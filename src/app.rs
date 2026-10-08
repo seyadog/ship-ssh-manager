@@ -457,6 +457,9 @@ pub enum Hit {
     No,
 }
 
+/// Sidebar header items in keyboard order: the button row (0..3), then the view row (3..5).
+pub const HEADER: [Hit; 5] = [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewFolders, Hit::ViewJump];
+
 #[derive(Clone, Copy)]
 pub struct TabHit {
     /// Index in `App::tabs` (the bar can be scrolled, so it is not the position in the hit list).
@@ -481,7 +484,7 @@ fn inside(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
     Folders,
     Jump,
@@ -511,6 +514,8 @@ pub struct App {
     /// Row under the pointer while dragging (highlighted as the drop target).
     pub drop_hover: Option<usize>,
     pub view: View,
+    /// Keyboard focus on the sidebar header instead of the list: an index into `HEADER`.
+    pub header: Option<usize>,
     /// Servers whose hidden hosts are unfolded in the jump view.
     /// Bastions the user folded in the jump view (everything is unfolded by default).
     jump_collapsed: HashSet<u64>,
@@ -537,6 +542,7 @@ impl App {
             drop_hover: None,
             view: View::Folders,
             jump_collapsed: HashSet::new(),
+            header: None,
             drag: None,
             last_click: None,
         };
@@ -1153,13 +1159,61 @@ impl App {
         }
     }
 
+    /// Runs a sidebar header button (by mouse or keyboard).
+    fn activate(&mut self, hit: Hit) {
+        match hit {
+            Hit::ViewFolders => self.set_view(View::Folders),
+            Hit::ViewJump => self.set_view(View::Jump),
+            Hit::AddServer => self.new_server_form(),
+            Hit::AddFolder => self.new_folder_prompt(),
+            Hit::Edit => self.edit_selected(),
+            _ => {}
+        }
+    }
+
+    /// Keys while the header has focus. Returns true if the key was consumed.
+    fn header_key(&mut self, i: usize, key: KeyEvent) -> bool {
+        let (row_start, row_end) = if i < 3 { (0, 3) } else { (3, 5) };
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => self.header = Some(i.saturating_sub(1).max(row_start)),
+            KeyCode::Right | KeyCode::Char('l') => self.header = Some((i + 1).min(row_end - 1)),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if i >= 3 {
+                    self.header = Some(0);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.header = if i < 3 { Some(if self.view == View::Folders { 3 } else { 4 }) } else { None }
+            }
+            KeyCode::Esc => self.header = None,
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                // Switching view keeps the focus in the header; the rest open a form or prompt.
+                if i < 3 {
+                    self.header = None;
+                }
+                self.activate(HEADER[i]);
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn sidebar_key(&mut self, key: KeyEvent) {
+        if let Some(i) = self.header {
+            if self.header_key(i, key) {
+                return;
+            }
+            self.header = None;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let last = self.rows.len().saturating_sub(1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if alt => self.shift_selected(-1),
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
+            KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => {
+                self.header = Some(if self.view == View::Folders { 3 } else { 4 });
+            }
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.selected = (self.selected + 1).min(last),
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
@@ -1611,15 +1665,10 @@ impl App {
     fn mouse_down(&mut self, x: u16, y: u16) {
         let double = self.is_double_click(x, y);
         self.drag = None;
+        self.header = None;
         if let Some(&(_, hit)) = self.layout.toolbar.iter().find(|(r, _)| inside(*r, x, y)) {
-            match hit {
-                Hit::ViewFolders => self.set_view(View::Folders),
-                Hit::ViewJump => self.set_view(View::Jump),
-                Hit::AddServer => self.new_server_form(),
-                Hit::AddFolder => self.new_folder_prompt(),
-                Hit::Edit => self.edit_selected(),
-                _ => {}
-            }
+            self.header = None;
+            self.activate(hit);
             return;
         }
         if inside(self.layout.sidebar, x, y) {
@@ -1949,6 +1998,64 @@ mod tests {
         let a = ssh_argv(&st, &t);
         let pc = a.iter().find(|x| x.starts_with("ProxyCommand=")).expect("ProxyCommand");
         assert!(pc.contains("-i /k/bast") && pc.contains("-W %h:%p ops@bastion.example"), "{pc}");
+    }
+
+    fn app_with_servers(n: usize) -> App {
+        let mut st = Store::default();
+        for i in 0..n {
+            st.add_server(Server { name: format!("s{i}"), host: format!("h{i}"), ..server(Auth::Agent, "", "u") });
+        }
+        let vault = Vault::new(std::env::temp_dir().join(format!("ship-test-vault-{}", std::process::id())));
+        let mut app = App::new(st, vault);
+        app.rebuild();
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.sidebar_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn up_from_the_first_row_reaches_the_header_and_back() {
+        let mut app = app_with_servers(2);
+        press(&mut app, KeyCode::Down);
+        assert_eq!((app.selected, app.header), (1, None));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.header, Some(3), "the view row (Folders) is the first stop");
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.header, Some(4));
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.header, Some(4), "stops at the end of the row");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.header, Some(0), "then the button row");
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.header, Some(2));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.header, None, "back on the list");
+    }
+
+    #[test]
+    fn enter_on_a_view_tab_switches_view_and_keeps_the_header() {
+        let mut app = app_with_servers(1);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.header, Some(3));
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!((app.view, app.header), (View::Jump, Some(4)));
+    }
+
+    #[test]
+    fn enter_on_add_server_opens_the_form() {
+        let mut app = app_with_servers(1);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.modal, Some(Modal::Form(_))));
+        assert_eq!(app.header, None);
     }
 
     #[test]

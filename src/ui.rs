@@ -121,6 +121,12 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         vx += w;
     }
     f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+    // Keyboard focus on the header: highlight the chosen item.
+    if let (Some(i), true) = (app.header, focused && app.modal.is_none()) {
+        if let Some(&(r, _)) = app.layout.toolbar.get(i) {
+            f.buffer_mut().set_style(r, Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD));
+        }
+    }
 
     let list = Rect::new(inner.x, inner.y + 3, inner.width, inner.height.saturating_sub(3));
     app.layout.list = list;
@@ -386,8 +392,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         "Esc cancel".to_string()
     } else if app.focus == Focus::Terminal {
         "F6 panel · Alt+←/→ tabs · Alt+Shift+←/→ move · Alt+W close · F2 rename · Shift+PgUp scrollback".to_string()
+    } else if app.header.is_some() {
+        "←→ choose · Enter activate · ↓ back to the list · Esc list".to_string()
     } else {
-        "↑↓ move · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
+        "↑↓ move · ↑ at the top for the menu · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
             .to_string()
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);

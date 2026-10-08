@@ -71,6 +71,7 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 | `→` / `l` | unfold, or step into the first child |
 | `←` / `h` | fold, or go back to the parent |
 | `Enter` | open server / toggle folder |
+| `↑` on the first row | focus the menu at the top (`+ Server`, `+ Folder`, `Edit`, `Folders`, `Jump hosts`): `←` `→` choose, `↑` `↓` change row, `Enter` activate, `Esc` or `↓` back to the list |
 | `v` / `Tab` | switch view |
 | `a` / `f` | new server / new folder (in the jump view, `a` on a server creates a host behind it) |
 | `e` / `d` | edit / delete |
