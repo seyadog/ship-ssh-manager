@@ -8,7 +8,7 @@ An SSH connection manager for the terminal: a modern TUI with mouse support. Kee
 
 Needs an `ssh` client in the PATH (preinstalled on macOS and most Linux distributions).
 
-**Prebuilt binary** (Linux x86_64 / arm64, macOS Apple Silicon and Intel). Download the `.tar.gz` for your platform from the
+**Prebuilt binary** (Linux x86_64 / arm64, macOS Apple Silicon and Intel, Windows 11 x86_64 — experimental). Download the `.tar.gz` for your platform from the
 [latest release](https://github.com/seyadog/ship-ssh-manager/releases/latest), or:
 
 ```sh
@@ -18,6 +18,15 @@ curl -fsSL https://raw.githubusercontent.com/seyadog/ship-ssh-manager/main/insta
 It installs `ship` into `~/.local/bin` (set `INSTALL_DIR` to change it). On macOS, if Gatekeeper blocks the binary:
 `xattr -d com.apple.quarantine ~/.local/bin/ship`.
 
+**Windows 11** (experimental, PowerShell; use Windows Terminal):
+
+```powershell
+irm https://raw.githubusercontent.com/seyadog/ship-ssh-manager/main/install.ps1 | iex
+```
+
+It installs `ship.exe` into `%LOCALAPPDATA%\ship\bin`. Needs the OpenSSH Client feature (on by default in Windows 11).
+See [Windows notes](#windows-notes) for the limitations.
+
 **From source** (stable [Rust](https://rustup.rs)):
 
 ```sh
@@ -26,6 +35,17 @@ cargo install --git https://github.com/seyadog/ship-ssh-manager --locked
 
 Data lives in `~/.config/ship/servers.json` (`~/Library/Application Support/ship` on macOS, or `$SHIP_CONFIG_DIR`).
 Passwords never go in that file: they live in the encrypted vault (`vault.json`, next to it).
+
+## Windows notes
+
+Windows support is **experimental**: it builds and passes the unit tests in CI, but has had little real-world testing.
+
+- Use Windows Terminal. It uses the system `ssh.exe` (Settings → System → Optional features → OpenSSH Client).
+- Jump hosts through the agent or default keys (`-J`) should work. Chains where a hop has its own key use a nested `ProxyCommand` run by `cmd.exe`, which is untested; deep chains may fail.
+- Some `Alt` key combinations may be taken by Windows or the terminal; the mouse and arrow keys always work.
+- The vault has no extra file permissions on Windows (no `0600`); it is still encrypted with your master password.
+- The binary is not code-signed, so SmartScreen may warn on first run. Windows on ARM uses the x86_64 build via emulation.
+- Data lives in `%APPDATA%\ship\config` (or `$env:SHIP_CONFIG_DIR`).
 
 ## Develop
 

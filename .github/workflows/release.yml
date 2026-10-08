@@ -14,6 +14,7 @@ jobs:
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, name: linux-aarch64 }
           - { os: macos-14, target: aarch64-apple-darwin, name: macos-aarch64 }
           - { os: macos-14, target: x86_64-apple-darwin, name: macos-x86_64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x86_64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -22,25 +23,34 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
+        shell: bash
         run: |
           pkg="ship-${GITHUB_REF_NAME}-${{ matrix.name }}"
           mkdir "$pkg"
-          cp "target/${{ matrix.target }}/release/ship" LICENSE README.md "$pkg/"
-          tar czf "$pkg.tar.gz" "$pkg"
-          if command -v sha256sum >/dev/null; then sha256sum "$pkg.tar.gz" > "$pkg.tar.gz.sha256"; else shasum -a 256 "$pkg.tar.gz" > "$pkg.tar.gz.sha256"; fi
-          echo "ASSET=$pkg" >> "$GITHUB_ENV"
+          if [ "${{ matrix.name }}" = windows-x86_64 ]; then
+            cp "target/${{ matrix.target }}/release/ship.exe" LICENSE README.md "$pkg/"
+            7z a -tzip "$pkg.zip" "$pkg" >/dev/null
+            ext=zip
+          else
+            cp "target/${{ matrix.target }}/release/ship" LICENSE README.md "$pkg/"
+            tar czf "$pkg.tar.gz" "$pkg"
+            ext=tar.gz
+          fi
+          if command -v sha256sum >/dev/null; then sha256sum "$pkg.$ext" > "$pkg.$ext.sha256"; else shasum -a 256 "$pkg.$ext" > "$pkg.$ext.sha256"; fi
+          echo "ASSET=$pkg.$ext" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ env.ASSET }}.tar.gz*
+          path: ${{ env.ASSET }}*
   publish:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --notes-file RELEASE_NOTES.md

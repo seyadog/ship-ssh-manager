@@ -204,8 +204,10 @@ fn classify_prompt(line: &str, login_phase: bool) -> Option<Prompt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
+    #[cfg(unix)]
     fn wait_for(s: &mut Session, want: &str) -> String {
         let end = Instant::now() + Duration::from_secs(5);
         loop {
@@ -219,6 +221,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn runs_command_and_captures_output() {
         let argv = vec!["sh".into(), "-c".into(), "echo hola-ship; exit 3".into()];
         let mut s = Session::spawn(&argv, 24, 80, None, false).unwrap();
@@ -233,6 +236,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn answers_password_prompt_once() {
         let script = "printf 'Password: '; read p; echo \"got:$p\"";
         let argv = vec!["sh".into(), "-c".into(), script.into()];
@@ -242,6 +246,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn flags_a_sudo_prompt_until_the_user_types() {
         let script = "printf '[sudo] password for alice: '; sleep 3";
         let argv = vec!["sh".into(), "-c".into(), script.into()];
@@ -268,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn sudo_prompt_is_found_even_after_a_screen_clear() {
         let script = "printf '\\033[H\\033[2J[sudo] password for alice: '; sleep 3";
         let argv = vec!["sh".into(), "-c".into(), script.into()];

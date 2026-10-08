@@ -1773,8 +1773,18 @@ fn target(s: &Server) -> String {
     if s.user.is_empty() { s.host.clone() } else { format!("{}@{}", s.user, s.host) }
 }
 
+/// Quotes `s` for the shell that runs a `ProxyCommand`: `sh` on Unix, `cmd.exe` on Windows.
+/// Plain words are left as they are.
 fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-:=@%,+".contains(c) || (cfg!(windows) && c == '\\');
+    if !s.is_empty() && s.chars().all(plain) {
+        return s.to_string();
+    }
+    if cfg!(windows) {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 /// Options shared by direct connections and by the hops of a ProxyCommand.
@@ -1795,7 +1805,7 @@ fn auth_args(s: &Server) -> Vec<String> {
 fn proxy_command(chain: &[&Server]) -> String {
     let Some((hop, before)) = chain.split_last() else { return String::new() };
     let mut parts = vec!["ssh".to_string()];
-    parts.extend(auth_args(hop));
+    parts.extend(auth_args(hop).into_iter().map(|a| sh_quote(&a)));
     parts.extend(["-p".into(), hop.port.to_string()]);
     if !before.is_empty() {
         parts.extend(["-o".into(), sh_quote(&format!("ProxyCommand={}", proxy_command(before)))]);
@@ -1877,6 +1887,28 @@ mod tests {
         let (st, t) = chain_store(Auth::Agent);
         let a = ssh_argv(&st, &t);
         assert!(a.windows(2).any(|w| w == ["-J", "ops@bastion.example"]), "{a:?}");
+    }
+
+    #[test]
+    fn quotes_only_what_needs_quoting() {
+        assert_eq!(sh_quote("-W"), "-W");
+        assert_eq!(sh_quote("%h:%p"), "%h:%p");
+        let q = sh_quote("/k/my key");
+        assert!(q == "'/k/my key'" || q == "\"/k/my key\"", "{q}");
+    }
+
+    #[test]
+    fn proxy_command_quotes_key_paths_with_spaces() {
+        let mut st = Store::default();
+        let mut bastion = server(Auth::Key, "/k/my key", "ops");
+        bastion.host = "bastion.example".into();
+        let b = st.add_server(bastion);
+        let mut inner = server(Auth::Agent, "", "app");
+        inner.jump = Some(b);
+        let id = st.add_server(inner);
+        let a = ssh_argv(&st, &st.server(id).unwrap().clone());
+        let pc = a.iter().find(|x| x.starts_with("ProxyCommand=")).unwrap();
+        assert!(pc.contains("-i '/k/my key'") || pc.contains("-i \"/k/my key\""), "{pc}");
     }
 
     #[test]
