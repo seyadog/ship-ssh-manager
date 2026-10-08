@@ -1961,6 +1961,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "unicode-width",
  "vt100",
 ]
 

@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -97,10 +97,8 @@ impl Store {
 
     pub fn load_from(path: PathBuf) -> Result<Self> {
         let mut store = if path.exists() {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("no se pudo leer {}", path.display()))?;
-            serde_json::from_str(&text)
-                .with_context(|| format!("{} no es un JSON válido", path.display()))?
+            let text = std::fs::read_to_string(&path).with_context(|| format!("no se pudo leer {}", path.display()))?;
+            serde_json::from_str(&text).with_context(|| format!("{} no es un JSON válido", path.display()))?
         } else {
             Store::default()
         };
@@ -179,12 +177,8 @@ impl Store {
                 vec![id]
             }
             NodeId::Folder(id) => {
-                let doomed: Vec<u64> = self
-                    .folders
-                    .iter()
-                    .filter(|f| self.is_inside(Some(f.id), id))
-                    .map(|f| f.id)
-                    .collect();
+                let doomed: Vec<u64> =
+                    self.folders.iter().filter(|f| self.is_inside(Some(f.id), id)).map(|f| f.id).collect();
                 let gone: Vec<u64> = self
                     .servers
                     .iter()
@@ -267,10 +261,6 @@ impl Store {
                 go(&mut self.servers, i, delta, |a, b| a.parent == b.parent)
             }
         }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 
