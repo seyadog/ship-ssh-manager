@@ -449,6 +449,7 @@ pub enum Hit {
     AddServer,
     AddFolder,
     Edit,
+    LocalTerm,
     Field(usize),
     Browse,
     Save,
@@ -457,8 +458,12 @@ pub enum Hit {
     No,
 }
 
-/// Sidebar header items in keyboard order: the button row (0..3), then the view row (3..5).
-pub const HEADER: [Hit; 5] = [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewFolders, Hit::ViewJump];
+/// Sidebar menu items in keyboard order: the button row (0..3), the view row (3..5), and the local terminal at the bottom (5).
+pub const HEADER: [Hit; 6] =
+    [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewFolders, Hit::ViewJump, Hit::LocalTerm];
+
+/// `Tab::server_id` of the terminal of this computer (real servers start at 1).
+pub const LOCAL: u64 = 0;
 
 #[derive(Clone, Copy)]
 pub struct TabHit {
@@ -720,8 +725,13 @@ impl App {
 
     /// Starts `ssh` for a server, in a new tab or replacing the session of tab `reuse`.
     fn connect(&mut self, id: u64, reuse: Option<usize>, fills: Vec<Autofill>) {
-        let Some(server) = self.store.server(id).cloned() else {
-            return self.set_flash("This server no longer exists");
+        let (argv, title, login_expected) = if id == LOCAL {
+            (local_shell(), "Local".to_string(), false)
+        } else {
+            let Some(server) = self.store.server(id).cloned() else {
+                return self.set_flash("This server no longer exists");
+            };
+            (ssh_argv(&self.store, &server), server.name.clone(), server.auth == Auth::Password)
         };
         let reuse = reuse.filter(|&i| i < self.tabs.len());
         let (rows, cols) = match reuse {
@@ -731,17 +741,16 @@ impl App {
                 if c.width > 0 && c.height > 0 { (c.height, c.width) } else { (24, 80) }
             }
         };
-        let login_expected = server.auth == Auth::Password;
-        match Session::spawn(&ssh_argv(&self.store, &server), rows, cols, fills, login_expected) {
+        match Session::spawn(&argv, rows, cols, fills, login_expected) {
             Ok(session) => match reuse {
                 Some(i) => self.tabs[i].session = session,
                 None => {
-                    self.tabs.push(Tab { title: server.name.clone(), server_id: id, session });
+                    self.tabs.push(Tab { title, server_id: id, session });
                     self.active = self.tabs.len() - 1;
                     self.focus = Focus::Terminal;
                 }
             },
-            Err(e) => self.set_flash(format!("Could not start ssh: {e:#}")),
+            Err(e) => self.set_flash(format!("Could not start {}: {e:#}", argv[0])),
         }
     }
 
@@ -1167,12 +1176,26 @@ impl App {
             Hit::AddServer => self.new_server_form(),
             Hit::AddFolder => self.new_folder_prompt(),
             Hit::Edit => self.edit_selected(),
+            Hit::LocalTerm => self.open_server(LOCAL),
             _ => {}
         }
     }
 
     /// Keys while the header has focus. Returns true if the key was consumed.
     fn header_key(&mut self, i: usize, key: KeyEvent) -> bool {
+        if i == 5 {
+            // The local terminal entry sits below the list.
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::Esc => self.header = None,
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.header = None;
+                    self.activate(Hit::LocalTerm);
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {}
+                _ => return false,
+            }
+            return true;
+        }
         let (row_start, row_end) = if i < 3 { (0, 3) } else { (3, 5) };
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => self.header = Some(i.saturating_sub(1).max(row_start)),
@@ -1215,7 +1238,8 @@ impl App {
                 self.header = Some(if self.view == View::Folders { 3 } else { 4 });
             }
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => self.selected = (self.selected + 1).min(last),
+            KeyCode::Down | KeyCode::Char('j') if self.selected >= last => self.header = Some(5),
+            KeyCode::Down | KeyCode::Char('j') => self.selected += 1,
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
             KeyCode::End | KeyCode::Char('G') => self.selected = last,
             KeyCode::Right | KeyCode::Char('l') => self.step_in(),
@@ -1228,6 +1252,7 @@ impl App {
             KeyCode::Char('v') | KeyCode::Tab => {
                 self.set_view(if self.view == View::Folders { View::Jump } else { View::Folders })
             }
+            KeyCode::Char('t') => self.open_server(LOCAL),
             KeyCode::Char('p') => self.modal = self.gate(Pending::OpenVault),
             KeyCode::Char('a') => self.new_server_form(),
             KeyCode::Char('f') => self.new_folder_prompt(),
@@ -1850,6 +1875,14 @@ pub fn expand_tilde(p: &str) -> String {
     p.to_string()
 }
 
+/// The user's shell, for the local terminal tab.
+fn local_shell() -> Vec<String> {
+    if cfg!(windows) {
+        return vec!["powershell.exe".into(), "-NoLogo".into()];
+    }
+    vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())]
+}
+
 fn target(s: &Server) -> String {
     if s.user.is_empty() { s.host.clone() } else { format!("{}@{}", s.user, s.host) }
 }
@@ -2056,6 +2089,27 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(matches!(app.modal, Some(Modal::Form(_))));
         assert_eq!(app.header, None);
+    }
+
+    #[test]
+    fn down_from_the_last_row_reaches_the_local_terminal_entry() {
+        let mut app = app_with_servers(2);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.header, Some(5));
+        press(&mut app, KeyCode::Up);
+        assert_eq!((app.header, app.selected), (None, 1), "Up returns to the last row");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn local_terminal_opens_a_tab_with_the_users_shell() {
+        let mut app = app_with_servers(1);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!((app.tabs[0].server_id, app.tabs[0].title.as_str()), (LOCAL, "Local"));
+        assert!(app.tabs[0].session.exit_code.is_none());
     }
 
     #[test]

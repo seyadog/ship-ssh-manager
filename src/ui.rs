@@ -121,6 +121,13 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         vx += w;
     }
     f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+    // Local terminal of this computer, pinned at the bottom.
+    if inner.height >= 6 {
+        let label = " ⌂ Local terminal ";
+        let r = Rect::new(inner.x, inner.y + inner.height - 1, (label.width() as u16).min(inner.width), 1);
+        f.render_widget(Paragraph::new(label).style(Style::new().fg(FG).bg(SEL_BG)), r);
+        app.layout.toolbar.push((r, Hit::LocalTerm));
+    }
     // Keyboard focus on the header: highlight the chosen item.
     if let (Some(i), true) = (app.header, focused && app.modal.is_none()) {
         if let Some(&(r, _)) = app.layout.toolbar.get(i) {
@@ -128,7 +135,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let list = Rect::new(inner.x, inner.y + 3, inner.width, inner.height.saturating_sub(3));
+    let list = Rect::new(inner.x, inner.y + 3, inner.width, inner.height.saturating_sub(4));
     app.layout.list = list;
     if list.height == 0 {
         return;
@@ -338,6 +345,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
         let msg = match code {
             0 => "Session closed.".to_string(),
             255 => "No connection (255): see the ssh error above.".to_string(),
+            n if tab.server_id == LOCAL => format!("Shell exited with code {n}."),
             n => format!("ssh exited with code {n}."),
         };
         let bar = Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1);
@@ -395,7 +403,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.header.is_some() {
         "←→ choose · Enter activate · ↓ back to the list · Esc list".to_string()
     } else {
-        "↑↓ move · ↑ at the top for the menu · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
+        "↑↓ move · ↑ at the top for the menu · t local terminal · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
             .to_string()
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);

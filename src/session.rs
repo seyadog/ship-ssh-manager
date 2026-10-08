@@ -272,6 +272,7 @@ mod tests {
         assert!(text.contains("got:s3cret"), "pantalla: {text:?}");
     }
 
+    #[cfg(unix)]
     fn fill(when: &str, secret: &str, fallback: bool) -> Autofill {
         Autofill { when: when.into(), secret: secret.into(), fallback }
     }

@@ -77,6 +77,7 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 | `e` / `d` | edit / delete |
 | `c` | close the open session of the selected server |
 | `Alt+↑` `Alt+↓` | reorder among siblings |
+| `t` | open a terminal of this computer in a new tab (also the `⌂ Local terminal` entry at the bottom: `↓` from the last row, or click) |
 | `p` | open the password vault |
 | `q` | quit |
 
