@@ -21,6 +21,7 @@ pub struct Session {
     /// Set when the user types, so an identical prompt line is recognised again.
     typed: Arc<AtomicBool>,
     pub exit_code: Option<u32>,
+    pub started: std::time::Instant,
 }
 
 impl Session {
@@ -106,6 +107,7 @@ impl Session {
             sudo_prompt,
             typed: typed_flag,
             exit_code: None,
+            started: std::time::Instant::now(),
         })
     }
 

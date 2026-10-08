@@ -266,8 +266,10 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     tab.session.resize(area.height, area.width);
 
     let mut cursor = None;
+    let mut blank = false;
     let buf = f.buffer_mut();
     tab.session.with_screen(|screen| {
+        blank = screen.contents().trim().is_empty();
         for row in 0..area.height {
             for col in 0..area.width {
                 let Some(cell) = screen.cell(row, col) else { continue };
@@ -298,6 +300,14 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
             cursor = Some((area.x + c, area.y + r));
         }
     });
+    // ssh prints nothing while it waits for an unreachable host: say what is going on.
+    let waited = tab.session.started.elapsed().as_secs();
+    if blank && tab.session.exit_code.is_none() && waited >= 2 {
+        let target = app.store.server(tab.server_id).map(|s| format!("{}:{}", s.host, s.port)).unwrap_or_default();
+        let msg = format!("Connecting to {target}… {waited}s (gives up after 15s; Alt+W closes this tab)");
+        let w = (msg.width() as u16).min(area.width);
+        f.render_widget(Paragraph::new(msg).style(Style::new().fg(MUTED)), Rect::new(area.x, area.y, w, 1));
+    }
     if focused {
         if let (Some((x, y)), None) = (cursor, tab.session.exit_code) {
             f.set_cursor_position(Position::new(x, y));

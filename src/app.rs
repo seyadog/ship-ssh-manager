@@ -1817,7 +1817,7 @@ fn proxy_command(chain: &[&Server]) -> String {
 /// Arguments for the system `ssh` client, including any jump hosts.
 pub fn ssh_argv(store: &Store, s: &Server) -> Vec<String> {
     let mut a: Vec<String> = vec!["ssh".into(), "-p".into(), s.port.to_string()];
-    a.extend(["-o".into(), "ServerAliveInterval=30".into()]);
+    a.extend(["-o".into(), "ServerAliveInterval=30".into(), "-o".into(), "ConnectTimeout=15".into()]);
     a.extend(auth_args(s));
     let chain = store.jump_chain(s.id);
     if !chain.is_empty() {
