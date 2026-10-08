@@ -32,10 +32,7 @@ impl Session {
         cmd.args(&argv[1..]);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .with_context(|| format!("no se pudo ejecutar `{}`", argv[0]))?;
+        let child = pair.slave.spawn_command(cmd).with_context(|| format!("no se pudo ejecutar `{}`", argv[0]))?;
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;

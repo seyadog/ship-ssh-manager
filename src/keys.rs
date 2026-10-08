@@ -20,11 +20,7 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
         }
     };
     let tilde = |n: u8| -> Vec<u8> {
-        if md > 1 {
-            format!("\x1b[{n};{md}~").into_bytes()
-        } else {
-            format!("\x1b[{n}~").into_bytes()
-        }
+        if md > 1 { format!("\x1b[{n};{md}~").into_bytes() } else { format!("\x1b[{n}~").into_bytes() }
     };
 
     let bytes = match key.code {
@@ -53,10 +49,22 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
             }
             out
         }
-        KeyCode::Enter => if alt { b"\x1b\r".to_vec() } else { b"\r".to_vec() },
+        KeyCode::Enter => {
+            if alt {
+                b"\x1b\r".to_vec()
+            } else {
+                b"\r".to_vec()
+            }
+        }
         KeyCode::Tab => b"\t".to_vec(),
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Backspace => if alt { b"\x1b\x7f".to_vec() } else { b"\x7f".to_vec() },
+        KeyCode::Backspace => {
+            if alt {
+                b"\x1b\x7f".to_vec()
+            } else {
+                b"\x7f".to_vec()
+            }
+        }
         KeyCode::Esc => b"\x1b".to_vec(),
         KeyCode::Up => csi('A'),
         KeyCode::Down => csi('B'),
@@ -71,11 +79,7 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
         KeyCode::F(n) => match n {
             1..=4 => {
                 let c = (b'P' + n - 1) as char;
-                if md > 1 {
-                    format!("\x1b[1;{md}{c}").into_bytes()
-                } else {
-                    format!("\x1bO{c}").into_bytes()
-                }
+                if md > 1 { format!("\x1b[1;{md}{c}").into_bytes() } else { format!("\x1bO{c}").into_bytes() }
             }
             5 => tilde(15),
             6 => tilde(17),
