@@ -449,6 +449,7 @@ pub enum Hit {
     ViewJump,
     AddServer,
     AddFolder,
+    Edit,
     Field(usize),
     Browse,
     Save,
@@ -1619,6 +1620,7 @@ impl App {
                 Hit::ViewJump => self.set_view(View::Jump),
                 Hit::AddServer => self.new_server_form(),
                 Hit::AddFolder => self.new_folder_prompt(),
+                Hit::Edit => self.edit_selected(),
                 _ => {}
             }
             return;

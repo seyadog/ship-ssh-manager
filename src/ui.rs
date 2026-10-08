@@ -89,16 +89,21 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let add_dir = " + Folder ";
     let w1 = add_srv.width() as u16;
     let w2 = add_dir.width() as u16;
+    let edit = " Edit ";
+    let w3 = edit.width() as u16;
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(add_srv, Style::new().fg(Color::Black).bg(ACCENT)),
             Span::raw(" "),
             Span::styled(add_dir, Style::new().fg(FG).bg(SEL_BG)),
+            Span::raw(" "),
+            Span::styled(edit, Style::new().fg(FG).bg(SEL_BG)),
         ])),
         bar,
     );
     app.layout.toolbar.push((Rect::new(bar.x, bar.y, w1, 1), Hit::AddServer));
     app.layout.toolbar.push((Rect::new(bar.x + w1 + 1, bar.y, w2, 1), Hit::AddFolder));
+    app.layout.toolbar.push((Rect::new(bar.x + w1 + w2 + 2, bar.y, w3, 1), Hit::Edit));
 
     // View switch
     let views = [(" Folders ", View::Folders, Hit::ViewFolders), (" Jump hosts ", View::Jump, Hit::ViewJump)];

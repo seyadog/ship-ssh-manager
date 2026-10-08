@@ -3,6 +3,7 @@ mod keys;
 mod secrets;
 mod session;
 mod store;
+mod tabby;
 mod ui;
 mod vault;
 
@@ -16,6 +17,15 @@ use crossterm::{
 use std::time::Duration;
 
 fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("import-tabby") {
+        let path = args.next().map(Into::into).unwrap_or_else(tabby::default_path);
+        let mut store = store::Store::load()?;
+        let (folders, servers, skipped) = tabby::import(&mut store, &path)?;
+        println!("Imported {servers} servers and {folders} folders ({skipped} already present).");
+        println!("Passwords are not imported (Tabby keeps them in its own vault): set them in ship's vault.");
+        return Ok(());
+    }
     let store = store::Store::load()?;
     let vault = vault::Vault::new(store::Store::config_dir().join("vault.json"));
     let mut app = app::App::new(store, vault);

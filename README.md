@@ -46,6 +46,12 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 
 In the server form, `Ctrl+O` (or “Browse…”) opens a file browser that starts in `~/.ssh` and highlights private keys.
 
+## Import from Tabby
+
+`ship import-tabby [path/to/config.yaml]` (default `~/.config/tabby/config.yaml`) copies SSH profiles and groups into ship:
+host, port, user, private key path, folders and jump hosts. Re-running it skips servers already present. Passwords are
+not imported (Tabby keeps them in its own vault); save them in ship's vault afterwards.
+
 ## Password vault
 
 Passwords you type in the server form (the login password or key passphrase, and an optional **sudo password**) are stored in an encrypted vault, protected by a master password.
