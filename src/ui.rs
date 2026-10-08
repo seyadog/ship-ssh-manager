@@ -205,21 +205,36 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 // ---------------------------------------------------------------- tabs
 
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
-    let mut x = area.x + 1;
     let end = area.x + area.width;
+    let n = app.tabs.len();
+    if n == 0 {
+        return;
+    }
+    // Shrink titles so that as many tabs as possible fit, then scroll the bar so the active tab is always visible.
+    let avail = area.width.saturating_sub(1) as usize;
+    let max_title = (avail / n).saturating_sub(7).clamp(6, 20);
+    let cell = |i: usize| fit(&app.tabs[i].title, max_title).width() + 6 + 1;
+    let active = app.active.min(n - 1);
+    let mut start = 0;
+    while start < active && (start..=active).map(cell).sum::<usize>() > avail {
+        start += 1;
+    }
+
+    let mut x = area.x + 1;
     let mut hits = vec![];
-    for (i, tab) in app.tabs.iter().enumerate() {
+    for i in start..n {
+        let tab = &app.tabs[i];
         let dead = tab.session.exit_code.is_some();
-        let title = fit(&tab.title, 20);
+        let title = fit(&tab.title, max_title);
         let text = format!(" {} {} ✕ ", if dead { "○" } else { "●" }, title);
         let w = text.width() as u16;
         if x + w > end {
             break;
         }
-        let active = i == app.active;
+        let is_active = i == active;
         let dot = if dead { RED } else { GREEN };
-        let bg = if active { SEL_BG } else { Color::Reset };
-        let fg = if active { FG } else { MUTED };
+        let bg = if is_active { SEL_BG } else { Color::Reset };
+        let fg = if is_active { FG } else { MUTED };
         let rect = Rect::new(x, area.y, w, 1);
         f.render_widget(
             Paragraph::new(Line::from(vec![
@@ -227,13 +242,13 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(if dead { "○ " } else { "● " }, Style::new().fg(dot).bg(bg)),
                 Span::styled(
                     title,
-                    Style::new().fg(fg).bg(bg).add_modifier(if active { Modifier::BOLD } else { Modifier::empty() }),
+                    Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
                 ),
                 Span::styled(" ✕ ", Style::new().fg(MUTED).bg(bg)),
             ])),
             rect,
         );
-        hits.push(TabHit { rect, close: Rect::new(x + w - 3, area.y, 3, 1) });
+        hits.push(TabHit { idx: i, rect, close: Rect::new(x + w - 3, area.y, 3, 1) });
         x += w + 1;
     }
     app.layout.tabs = hits;

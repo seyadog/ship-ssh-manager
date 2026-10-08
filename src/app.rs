@@ -459,6 +459,8 @@ pub enum Hit {
 
 #[derive(Clone, Copy)]
 pub struct TabHit {
+    /// Index in `App::tabs` (the bar can be scrolled, so it is not the position in the hit list).
+    pub idx: usize,
     pub rect: Rect,
     pub close: Rect,
 }
@@ -1603,9 +1605,9 @@ impl App {
                 }
             }
         } else if inside(self.layout.tabbar, x, y) {
-            let hit = self.layout.tabs.iter().position(|t| inside(t.rect, x, y));
-            if let Some(i) = hit {
-                if inside(self.layout.tabs[i].close, x, y) {
+            let hit = self.layout.tabs.iter().find(|t| inside(t.rect, x, y)).map(|t| (t.idx, t.close));
+            if let Some((i, close)) = hit {
+                if inside(close, x, y) {
                     return self.close_tab(i);
                 }
                 self.active = i;
@@ -1625,7 +1627,7 @@ impl App {
         self.drop_hover = None;
         match self.drag.take() {
             Some(Drag::Tab(from)) => {
-                if let Some(to) = self.layout.tabs.iter().position(|t| inside(t.rect, x, y)) {
+                if let Some(to) = self.layout.tabs.iter().find(|t| inside(t.rect, x, y)).map(|t| t.idx) {
                     self.move_tab(from, to);
                 }
             }
