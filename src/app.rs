@@ -1,4 +1,4 @@
-//! Estado de la aplicación y manejo de teclado/ratón. El dibujo vive en `ui.rs`.
+//! Application state and keyboard/mouse handling. Drawing lives in `ui.rs`.
 
 use crate::keys;
 use crate::secrets;
@@ -6,15 +6,16 @@ use crate::session::Session;
 use crate::store::{Auth, NodeId, Server, Store};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-// ---------------------------------------------------------------- entrada de texto
+// ---------------------------------------------------------------- text input
 
 #[derive(Default, Clone)]
 pub struct Input {
     pub value: String,
-    /// Posición del cursor en caracteres.
+    /// Cursor position, in characters.
     pub cursor: usize,
 }
 
@@ -57,7 +58,7 @@ impl Input {
     }
 }
 
-// ---------------------------------------------------------------- árbol
+// ---------------------------------------------------------------- tree
 
 #[derive(Clone, Copy)]
 pub struct Row {
@@ -86,6 +87,7 @@ pub const F_USER: usize = 3;
 pub const F_AUTH: usize = 4;
 pub const F_KEY: usize = 5;
 pub const F_SECRET: usize = 6;
+pub const F_JUMP: usize = 7;
 
 pub struct ServerForm {
     pub editing: Option<u64>,
@@ -97,16 +99,18 @@ pub struct ServerForm {
     pub key: Input,
     pub secret: Input,
     pub auth: Auth,
+    pub jump: Option<u64>,
     pub focus: usize,
     pub error: Option<String>,
     pub secret_saved: bool,
 }
 
 impl ServerForm {
-    fn new(parent: Option<u64>) -> Self {
+    fn new(parent: Option<u64>, jump: Option<u64>) -> Self {
         ServerForm {
             editing: None,
             parent,
+            jump,
             name: Input::default(),
             host: Input::default(),
             port: Input::new("22"),
@@ -124,6 +128,7 @@ impl ServerForm {
         ServerForm {
             editing: Some(s.id),
             parent: s.parent,
+            jump: s.jump,
             name: Input::new(&s.name),
             host: Input::new(&s.host),
             port: Input::new(&s.port.to_string()),
@@ -137,9 +142,9 @@ impl ServerForm {
         }
     }
 
-    /// Campos visibles según el tipo de autenticación.
+    /// Fields shown for the current auth method.
     pub fn visible(&self) -> Vec<usize> {
-        let mut v = vec![F_NAME, F_HOST, F_PORT, F_USER, F_AUTH];
+        let mut v = vec![F_NAME, F_HOST, F_PORT, F_USER, F_JUMP, F_AUTH];
         match self.auth {
             Auth::Agent => {}
             Auth::Key => v.extend([F_KEY, F_SECRET]),
@@ -177,7 +182,7 @@ pub struct PickEntry {
     pub key_like: bool,
 }
 
-/// Selector de archivos para elegir la clave privada.
+/// File browser for choosing the private key.
 pub struct Picker {
     pub dir: PathBuf,
     pub entries: Vec<PickEntry>,
@@ -212,7 +217,7 @@ impl Picker {
             }
         }
         dirs.sort_by_key(|e| e.name.to_lowercase());
-        // Las claves primero, luego el resto.
+        // Keys first, then everything else.
         files.sort_by_key(|e| (!e.key_like, e.name.to_lowercase()));
         self.entries = dirs.into_iter().chain(files).collect();
         if self.dir.parent().is_some() {
@@ -239,7 +244,7 @@ impl Picker {
         }
     }
 
-    /// Entra en la carpeta seleccionada o devuelve el archivo elegido.
+    /// Enters the selected folder, or returns the chosen file.
     fn activate(&mut self) -> Option<PathBuf> {
         let e = self.entries.get(self.selected)?;
         if e.name == ".." {
@@ -306,6 +311,8 @@ pub enum Modal {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hit {
+    ViewFolders,
+    ViewJump,
     AddServer,
     AddFolder,
     Field(usize),
@@ -338,6 +345,12 @@ fn inside(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Folders,
+    Jump,
+}
+
 enum Drag {
     Node(NodeId),
     Tab(usize),
@@ -357,8 +370,11 @@ pub struct App {
     pub layout: Layout,
     pub quit: bool,
     pub flash: Option<(String, Instant)>,
-    /// Fila sobre la que se suelta mientras se arrastra (para resaltarla).
+    /// Row under the pointer while dragging (highlighted as the drop target).
     pub drop_hover: Option<usize>,
+    pub view: View,
+    /// Servers whose hidden hosts are unfolded in the jump view.
+    jump_open: HashSet<u64>,
     drag: Option<Drag>,
     last_click: Option<(Instant, u16, u16)>,
 }
@@ -378,6 +394,8 @@ impl App {
             quit: false,
             flash: None,
             drop_hover: None,
+            view: View::Folders,
+            jump_open: HashSet::new(),
             drag: None,
             last_click: None,
         };
@@ -401,9 +419,73 @@ impl App {
                 out.push(Row { node: NodeId::Server(s.id), depth });
             }
         }
+        fn walk_jump(store: &Store, via: Option<u64>, depth: usize, open: &HashSet<u64>, out: &mut Vec<Row>) {
+            if depth > 16 {
+                return;
+            }
+            for s in store.servers.iter().filter(|s| s.jump == via) {
+                out.push(Row { node: NodeId::Server(s.id), depth });
+                if open.contains(&s.id) {
+                    walk_jump(store, Some(s.id), depth + 1, open, out);
+                }
+            }
+        }
         self.rows.clear();
-        walk(&self.store, None, 0, &mut self.rows);
+        match self.view {
+            View::Folders => walk(&self.store, None, 0, &mut self.rows),
+            View::Jump => walk_jump(&self.store, None, 0, &self.jump_open, &mut self.rows),
+        }
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+    }
+
+    pub fn has_children(&self, node: NodeId) -> bool {
+        match (node, self.view) {
+            (NodeId::Folder(id), _) => {
+                self.store.folders.iter().any(|f| f.parent == Some(id))
+                    || self.store.servers.iter().any(|s| s.parent == Some(id))
+            }
+            (NodeId::Server(id), View::Jump) => self.store.servers.iter().any(|s| s.jump == Some(id)),
+            (NodeId::Server(_), View::Folders) => false,
+        }
+    }
+
+    pub fn is_open(&self, node: NodeId) -> bool {
+        match node {
+            NodeId::Folder(id) => self.store.folder(id).is_some_and(|f| f.expanded),
+            NodeId::Server(id) => self.jump_open.contains(&id),
+        }
+    }
+
+    fn set_open(&mut self, node: NodeId, open: bool) {
+        match node {
+            NodeId::Folder(id) => {
+                if let Some(f) = self.store.folders.iter_mut().find(|f| f.id == id) {
+                    f.expanded = open;
+                }
+                self.persist();
+            }
+            NodeId::Server(id) => {
+                if open {
+                    self.jump_open.insert(id);
+                } else {
+                    self.jump_open.remove(&id);
+                }
+            }
+        }
+        self.rebuild();
+    }
+
+    fn set_view(&mut self, view: View) {
+        if self.view == view {
+            return;
+        }
+        let keep = self.selected_node();
+        self.view = view;
+        self.offset = 0;
+        self.rebuild();
+        if let Some(n) = keep {
+            self.select_node(n);
+        }
     }
 
     fn select_node(&mut self, node: NodeId) {
@@ -416,17 +498,17 @@ impl App {
         self.rows.get(self.selected).map(|r| r.node)
     }
 
-    /// Carpeta donde se crearían nuevos elementos.
+    /// Folder where new items would be created.
     fn current_parent(&self) -> Option<u64> {
         match self.selected_node()? {
-            NodeId::Folder(id) => Some(id),
-            n @ NodeId::Server(_) => self.store.parent_of(n),
+            NodeId::Folder(id) if self.view == View::Folders => Some(id),
+            n => self.store.parent_of(n),
         }
     }
 
     fn persist(&mut self) {
         if let Err(e) = self.store.save() {
-            self.set_flash(format!("No se pudo guardar: {e}"));
+            self.set_flash(format!("Could not save: {e}"));
         }
     }
 
@@ -434,7 +516,7 @@ impl App {
         self.tabs.iter().filter(|t| t.session.exit_code.is_none()).count()
     }
 
-    /// Se llama en cada vuelta del bucle.
+    /// Called on every pass of the event loop.
     pub fn tick(&mut self) {
         for t in &mut self.tabs {
             t.session.poll_exit();
@@ -450,37 +532,37 @@ impl App {
             self.quit = true;
         } else {
             self.modal = Some(Modal::Confirm(Confirm {
-                text: format!("Hay {n} sesión(es) abierta(s). ¿Salir de ship?"),
+                text: format!("{n} session(s) still open. Quit ship?"),
                 action: ConfirmAction::Quit,
             }));
         }
     }
 
-    // ------------------------------------------------------------ sesiones y pestañas
+    // ------------------------------------------------------------ sessions and tabs
 
     pub fn open_server(&mut self, id: u64) {
         let Some(server) = self.store.server(id).cloned() else { return };
         let c = self.layout.content;
         let (rows, cols) = if c.width > 0 && c.height > 0 { (c.height, c.width) } else { (24, 80) };
-        match Session::spawn(&ssh_argv(&server), rows, cols, secret_for(&server)) {
+        match Session::spawn(&ssh_argv(&self.store, &server), rows, cols, secret_for(&server)) {
             Ok(session) => {
                 self.tabs.push(Tab { title: server.name.clone(), server_id: id, session });
                 self.active = self.tabs.len() - 1;
                 self.focus = Focus::Terminal;
             }
-            Err(e) => self.set_flash(format!("No se pudo iniciar ssh: {e:#}")),
+            Err(e) => self.set_flash(format!("Could not start ssh: {e:#}")),
         }
     }
 
     fn reconnect(&mut self, idx: usize) {
         let Some(server) = self.tabs.get(idx).and_then(|t| self.store.server(t.server_id)).cloned() else {
-            self.set_flash("El servidor de esta pestaña ya no existe");
+            self.set_flash("This tab’s server no longer exists");
             return;
         };
         let (rows, cols) = self.tabs[idx].session.size();
-        match Session::spawn(&ssh_argv(&server), rows, cols, secret_for(&server)) {
+        match Session::spawn(&ssh_argv(&self.store, &server), rows, cols, secret_for(&server)) {
             Ok(session) => self.tabs[idx].session = session,
-            Err(e) => self.set_flash(format!("No se pudo reconectar: {e:#}")),
+            Err(e) => self.set_flash(format!("Could not reconnect: {e:#}")),
         }
     }
 
@@ -509,7 +591,7 @@ impl App {
     fn rename_tab_prompt(&mut self) {
         if let Some(t) = self.tabs.get(self.active) {
             self.modal = Some(Modal::Prompt(Prompt {
-                title: "Renombrar pestaña".into(),
+                title: "Rename tab".into(),
                 input: Input::new(&t.title),
                 kind: PromptKind::RenameTab(self.active),
             }));
@@ -587,13 +669,16 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.selected = (self.selected + 1).min(last),
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
             KeyCode::End | KeyCode::Char('G') => self.selected = last,
-            KeyCode::Right | KeyCode::Char('l') => self.set_expanded(true),
-            KeyCode::Left | KeyCode::Char('h') => self.collapse_or_parent(),
+            KeyCode::Right | KeyCode::Char('l') => self.step_in(),
+            KeyCode::Left | KeyCode::Char('h') => self.step_out(),
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected_node() {
                 Some(NodeId::Server(id)) => self.open_server(id),
-                Some(NodeId::Folder(id)) => self.toggle_folder(id),
+                Some(n @ NodeId::Folder(_)) => self.toggle(n),
                 None => {}
             },
+            KeyCode::Char('v') | KeyCode::Tab => {
+                self.set_view(if self.view == View::Folders { View::Jump } else { View::Folders })
+            }
             KeyCode::Char('a') => self.new_server_form(),
             KeyCode::Char('f') => self.new_folder_prompt(),
             KeyCode::Char('e') | KeyCode::F(4) => self.edit_selected(),
@@ -606,7 +691,7 @@ impl App {
 
     fn shift_selected(&mut self, delta: i32) {
         if let Some(n) = self.selected_node() {
-            if self.store.shift(n, delta) {
+            if self.store.shift(n, delta, self.view == View::Jump) {
                 self.persist();
                 self.rebuild();
                 self.select_node(n);
@@ -614,43 +699,52 @@ impl App {
         }
     }
 
-    fn toggle_folder(&mut self, id: u64) {
-        if let Some(f) = self.store.folders.iter_mut().find(|f| f.id == id) {
-            f.expanded = !f.expanded;
-        }
-        self.persist();
-        self.rebuild();
+    fn toggle(&mut self, node: NodeId) {
+        let open = self.is_open(node);
+        self.set_open(node, !open);
     }
 
-    fn set_expanded(&mut self, value: bool) {
-        if let Some(NodeId::Folder(id)) = self.selected_node() {
-            if let Some(f) = self.store.folders.iter_mut().find(|f| f.id == id) {
-                f.expanded = value;
-            }
-            self.persist();
-            self.rebuild();
-        }
-    }
-
-    fn collapse_or_parent(&mut self) {
+    /// Right arrow: unfold, or move into the first child if already unfolded.
+    fn step_in(&mut self) {
         let Some(node) = self.selected_node() else { return };
-        if let NodeId::Folder(id) = node {
-            if self.store.folder(id).is_some_and(|f| f.expanded) {
-                return self.set_expanded(false);
-            }
+        if !self.has_children(node) {
+            return;
         }
-        if let Some(p) = self.store.parent_of(node) {
-            self.select_node(NodeId::Folder(p));
+        if !self.is_open(node) {
+            return self.set_open(node, true);
+        }
+        let depth = self.rows[self.selected].depth;
+        if self.rows.get(self.selected + 1).is_some_and(|r| r.depth > depth) {
+            self.selected += 1;
+        }
+    }
+
+    /// Left arrow: fold, or go back up to the parent row.
+    fn step_out(&mut self) {
+        let Some(node) = self.selected_node() else { return };
+        if self.has_children(node) && self.is_open(node) {
+            return self.set_open(node, false);
+        }
+        let depth = self.rows[self.selected].depth;
+        if let Some(i) = self.rows[..self.selected].iter().rposition(|r| r.depth < depth) {
+            self.selected = i;
         }
     }
 
     fn new_server_form(&mut self) {
-        self.modal = Some(Modal::Form(Box::new(ServerForm::new(self.current_parent()))));
+        let jump = match (self.view, self.selected_node()) {
+            (View::Jump, Some(NodeId::Server(id))) => Some(id),
+            _ => None,
+        };
+        self.modal = Some(Modal::Form(Box::new(ServerForm::new(self.current_parent(), jump))));
     }
 
     fn new_folder_prompt(&mut self) {
+        if self.view == View::Jump {
+            return self.set_flash("Folders are created in the Folders view (press v)");
+        }
         self.modal = Some(Modal::Prompt(Prompt {
-            title: "Nueva carpeta".into(),
+            title: "New folder".into(),
             input: Input::default(),
             kind: PromptKind::NewFolder(self.current_parent()),
         }));
@@ -666,7 +760,7 @@ impl App {
             Some(NodeId::Folder(id)) => {
                 if let Some(f) = self.store.folder(id) {
                     self.modal = Some(Modal::Prompt(Prompt {
-                        title: "Renombrar carpeta".into(),
+                        title: "Rename folder".into(),
                         input: Input::new(&f.name),
                         kind: PromptKind::RenameFolder(id),
                     }));
@@ -680,10 +774,10 @@ impl App {
         let Some(node) = self.selected_node() else { return };
         let text = match node {
             NodeId::Server(id) => {
-                format!("¿Borrar el servidor «{}»?", self.store.server(id).map(|s| s.name.as_str()).unwrap_or("?"))
+                format!("Delete server “{}”?", self.store.server(id).map(|s| s.name.as_str()).unwrap_or("?"))
             }
             NodeId::Folder(id) => format!(
-                "¿Borrar la carpeta «{}» y todo su contenido?",
+                "Delete folder “{}” and everything in it?",
                 self.store.folder(id).map(|f| f.name.as_str()).unwrap_or("?")
             ),
         };
@@ -716,6 +810,8 @@ impl App {
                 }
                 f.step(1);
             }
+            KeyCode::Left if f.focus == F_JUMP => self.cycle_jump(&mut f, -1),
+            KeyCode::Right | KeyCode::Char(' ') if f.focus == F_JUMP => self.cycle_jump(&mut f, 1),
             KeyCode::Left if f.focus == F_AUTH => f.auth = f.auth.prev(),
             KeyCode::Right | KeyCode::Char(' ') if f.focus == F_AUTH => f.auth = f.auth.next(),
             _ => {
@@ -725,6 +821,20 @@ impl App {
             }
         }
         Some(Modal::Form(f))
+    }
+
+    /// Cycle through the servers `f` may be routed through (never itself or a loop).
+    fn cycle_jump(&self, f: &mut ServerForm, dir: i32) {
+        let mut options: Vec<Option<u64>> = vec![None];
+        options.extend(
+            self.store
+                .servers
+                .iter()
+                .filter(|s| f.editing.is_none_or(|id| !self.store.would_cycle(id, s.id)))
+                .map(|s| Some(s.id)),
+        );
+        let i = options.iter().position(|o| *o == f.jump).unwrap_or(0) as i32;
+        f.jump = options[(i + dir).rem_euclid(options.len() as i32) as usize];
     }
 
     fn picker_key(mut p: Box<Picker>, mut f: Box<ServerForm>, key: KeyEvent) -> Option<Modal> {
@@ -825,19 +935,19 @@ impl App {
         let port: u16 = match f.port.value.trim().parse() {
             Ok(p) if p > 0 => p,
             _ => {
-                f.error = Some("El puerto debe ser un número entre 1 y 65535".into());
+                f.error = Some("Port must be a number between 1 and 65535".into());
                 f.focus = F_PORT;
                 return Some(Modal::Form(f));
             }
         };
         if host.is_empty() {
-            f.error = Some("El host es obligatorio".into());
+            f.error = Some("Host is required".into());
             f.focus = F_HOST;
             return Some(Modal::Form(f));
         }
         let key_path = f.key.value.trim().to_string();
         if f.auth == Auth::Key && key_path.is_empty() {
-            f.error = Some("Elige la clave privada (Ctrl+O o «Examinar»)".into());
+            f.error = Some("Choose the private key (Ctrl+O or “Browse”)".into());
             f.focus = F_KEY;
             return Some(Modal::Form(f));
         }
@@ -854,6 +964,7 @@ impl App {
             auth: f.auth,
             key_path: if f.auth == Auth::Key { key_path } else { String::new() },
             parent: f.parent,
+            jump: f.jump,
         };
         let id = match f.editing {
             Some(id) => {
@@ -866,7 +977,7 @@ impl App {
             secrets::delete(id);
         } else if !f.secret.value.is_empty() {
             if let Err(e) = secrets::set(id, &f.secret.value) {
-                self.set_flash(format!("No se pudo guardar en el keyring: {e:#}"));
+                self.set_flash(format!("Could not save to the keyring: {e:#}"));
             }
         }
         self.persist();
@@ -900,7 +1011,7 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------------ ratón
+    // ------------------------------------------------------------ mouse
 
     fn is_double_click(&mut self, x: u16, y: u16) -> bool {
         let double =
@@ -948,6 +1059,8 @@ impl App {
         self.drag = None;
         if let Some(&(_, hit)) = self.layout.toolbar.iter().find(|(r, _)| inside(*r, x, y)) {
             match hit {
+                Hit::ViewFolders => self.set_view(View::Folders),
+                Hit::ViewJump => self.set_view(View::Jump),
                 Hit::AddServer => self.new_server_form(),
                 Hit::AddFolder => self.new_folder_prompt(),
                 _ => {}
@@ -961,7 +1074,7 @@ impl App {
                 let node = self.rows[i].node;
                 if double {
                     match node {
-                        NodeId::Folder(id) => self.toggle_folder(id),
+                        NodeId::Folder(_) => self.toggle(node),
                         NodeId::Server(id) => self.open_server(id),
                     }
                 } else {
@@ -1004,6 +1117,26 @@ impl App {
         if !inside(self.layout.sidebar, x, y) {
             return;
         }
+        if self.view == View::Jump {
+            let NodeId::Server(id) = node else { return };
+            let target = self.row_at(x, y).and_then(|i| self.rows.get(i)).map(|r| r.node);
+            let via = match target {
+                Some(NodeId::Server(s)) if s == id => return,
+                Some(NodeId::Server(s)) => Some(s),
+                _ => None,
+            };
+            if self.store.move_via(id, via) {
+                if let Some(v) = via {
+                    self.jump_open.insert(v);
+                }
+                self.persist();
+                self.rebuild();
+                self.select_node(node);
+            } else {
+                self.set_flash("Invalid move: that would create a loop");
+            }
+            return;
+        }
         let moved = match self.row_at(x, y).and_then(|i| self.rows.get(i)).map(|r| r.node) {
             Some(target) if target == node => return,
             Some(NodeId::Folder(f)) => self.store.move_into(node, Some(f)),
@@ -1022,7 +1155,7 @@ impl App {
             self.rebuild();
             self.select_node(node);
         } else {
-            self.set_flash("Movimiento no válido");
+            self.set_flash("Invalid move");
         }
     }
 
@@ -1117,26 +1250,60 @@ fn secret_for(s: &Server) -> Option<String> {
     }
 }
 
-/// Argumentos del cliente `ssh` del sistema para un servidor.
-pub fn ssh_argv(s: &Server) -> Vec<String> {
-    let mut a: Vec<String> = ["ssh", "-p"].iter().map(|x| x.to_string()).collect();
-    a.push(s.port.to_string());
-    a.extend(["-o".into(), "ServerAliveInterval=30".into()]);
+fn target(s: &Server) -> String {
+    if s.user.is_empty() { s.host.clone() } else { format!("{}@{}", s.user, s.host) }
+}
+
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Options shared by direct connections and by the hops of a ProxyCommand.
+fn auth_args(s: &Server) -> Vec<String> {
     match s.auth {
-        Auth::Agent => {}
-        Auth::Key => {
-            a.extend(["-i".into(), expand_tilde(&s.key_path), "-o".into(), "IdentitiesOnly=yes".into()]);
-        }
-        Auth::Password => {
-            a.extend([
-                "-o".into(),
-                "PreferredAuthentications=password,keyboard-interactive".into(),
-                "-o".into(),
-                "PubkeyAuthentication=no".into(),
-            ]);
+        Auth::Agent => vec![],
+        Auth::Key => vec!["-i".into(), expand_tilde(&s.key_path), "-o".into(), "IdentitiesOnly=yes".into()],
+        Auth::Password => vec![
+            "-o".into(),
+            "PreferredAuthentications=password,keyboard-interactive".into(),
+            "-o".into(),
+            "PubkeyAuthentication=no".into(),
+        ],
+    }
+}
+
+/// `ssh` command that tunnels through `chain` (outermost first), as a single shell string.
+fn proxy_command(chain: &[&Server]) -> String {
+    let Some((hop, before)) = chain.split_last() else { return String::new() };
+    let mut parts = vec!["ssh".to_string()];
+    parts.extend(auth_args(hop));
+    parts.extend(["-p".into(), hop.port.to_string()]);
+    if !before.is_empty() {
+        parts.extend(["-o".into(), sh_quote(&format!("ProxyCommand={}", proxy_command(before)))]);
+    }
+    parts.extend(["-W".into(), "%h:%p".into(), target(hop)]);
+    parts.join(" ")
+}
+
+/// Arguments for the system `ssh` client, including any jump hosts.
+pub fn ssh_argv(store: &Store, s: &Server) -> Vec<String> {
+    let mut a: Vec<String> = vec!["ssh".into(), "-p".into(), s.port.to_string()];
+    a.extend(["-o".into(), "ServerAliveInterval=30".into()]);
+    a.extend(auth_args(s));
+    let chain = store.jump_chain(s.id);
+    if !chain.is_empty() {
+        if chain.iter().all(|h| h.auth != Auth::Key) {
+            let hops: Vec<String> = chain
+                .iter()
+                .map(|h| if h.port == 22 { target(h) } else { format!("{}:{}", target(h), h.port) })
+                .collect();
+            a.extend(["-J".into(), hops.join(",")]);
+        } else {
+            // -J cannot give each hop its own key, so build the tunnel by hand.
+            a.extend(["-o".into(), format!("ProxyCommand={}", proxy_command(&chain))]);
         }
     }
-    a.push(if s.user.is_empty() { s.host.clone() } else { format!("{}@{}", s.user, s.host) });
+    a.push(target(s));
     a
 }
 
@@ -1154,12 +1321,13 @@ mod tests {
             auth,
             key_path: key.into(),
             parent: None,
+            jump: None,
         }
     }
 
     #[test]
     fn argv_for_key_auth() {
-        let a = ssh_argv(&server(Auth::Key, "/k/id", "root"));
+        let a = ssh_argv(&Store::default(), &server(Auth::Key, "/k/id", "root"));
         assert_eq!(a.last().unwrap(), "root@h.example");
         assert!(a.windows(2).any(|w| w == ["-i", "/k/id"]));
         assert!(a.windows(2).any(|w| w == ["-p", "2222"]));
@@ -1167,7 +1335,35 @@ mod tests {
 
     #[test]
     fn argv_without_user_uses_host_only() {
-        assert_eq!(ssh_argv(&server(Auth::Agent, "", "")).last().unwrap(), "h.example");
+        assert_eq!(ssh_argv(&Store::default(), &server(Auth::Agent, "", "")).last().unwrap(), "h.example");
+    }
+
+    fn chain_store(hop_auth: Auth) -> (Store, Server) {
+        let mut st = Store::default();
+        let mut bastion = server(hop_auth, "/k/bast", "ops");
+        bastion.host = "bastion.example".into();
+        bastion.port = 22;
+        let b = st.add_server(bastion);
+        let mut inner = server(Auth::Agent, "", "app");
+        inner.jump = Some(b);
+        let id = st.add_server(inner);
+        let target = st.server(id).unwrap().clone();
+        (st, target)
+    }
+
+    #[test]
+    fn argv_uses_dash_j_for_agent_hops() {
+        let (st, t) = chain_store(Auth::Agent);
+        let a = ssh_argv(&st, &t);
+        assert!(a.windows(2).any(|w| w == ["-J", "ops@bastion.example"]), "{a:?}");
+    }
+
+    #[test]
+    fn argv_uses_proxy_command_when_a_hop_has_a_key() {
+        let (st, t) = chain_store(Auth::Key);
+        let a = ssh_argv(&st, &t);
+        let pc = a.iter().find(|x| x.starts_with("ProxyCommand=")).expect("ProxyCommand");
+        assert!(pc.contains("-i /k/bast") && pc.contains("-W %h:%p ops@bastion.example"), "{pc}");
     }
 
     #[test]

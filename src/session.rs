@@ -1,5 +1,5 @@
-//! Una sesión = un proceso (normalmente `ssh`) dentro de un PTY, con un emulador `vt100`
-//! que mantiene la pantalla. Un hilo lector alimenta al emulador.
+//! A session is a process (normally `ssh`) inside a PTY, with a `vt100` emulator
+//! holding the screen. A reader thread feeds the emulator.
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -20,8 +20,8 @@ pub struct Session {
 }
 
 impl Session {
-    /// `argv[0]` es el programa. Si `secret` existe, se envía una vez cuando aparezca
-    /// un prompt de contraseña o passphrase.
+    /// `argv[0]` is the program. If `secret` is set, it is sent once when a
+    /// password or passphrase prompt appears.
     pub fn spawn(argv: &[String], rows: u16, cols: u16, secret: Option<String>) -> Result<Self> {
         let (rows, cols) = (rows.max(1), cols.max(1));
         let pair = native_pty_system()
@@ -32,7 +32,7 @@ impl Session {
         cmd.args(&argv[1..]);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        let child = pair.slave.spawn_command(cmd).with_context(|| format!("no se pudo ejecutar `{}`", argv[0]))?;
+        let child = pair.slave.spawn_command(cmd).with_context(|| format!("could not run `{}`", argv[0]))?;
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;
@@ -59,7 +59,7 @@ impl Session {
                             tail = tail[tail.len() - 256..].to_string();
                         }
                         if asks_for_secret(&tail) {
-                            // Una sola vez: si es incorrecta, no se reintenta en bucle.
+                            // Only once: a wrong secret must not be retried in a loop.
                             if let Some(s) = secret.take() {
                                 if let Ok(mut w) = writer.lock() {
                                     let _ = w.write_all(format!("{s}\r").as_bytes());
@@ -98,7 +98,7 @@ impl Session {
         }
     }
 
-    /// Actualiza `exit_code` si el proceso terminó.
+    /// Sets `exit_code` if the process has exited.
     pub fn poll_exit(&mut self) {
         if self.exit_code.is_none() {
             if let Ok(Some(status)) = self.child.try_wait() {
@@ -112,7 +112,7 @@ impl Session {
         f(p.screen())
     }
 
-    /// Desplaza la vista por el historial (`delta` > 0 sube).
+    /// Scrolls the view through the history (`delta` > 0 goes up).
     pub fn scroll(&self, delta: i32) {
         if let Ok(mut p) = self.parser.lock() {
             let cur = p.screen().scrollback() as i32;
@@ -133,7 +133,7 @@ impl Drop for Session {
     }
 }
 
-/// ¿El texto (en minúsculas) termina con un prompt de contraseña o passphrase?
+/// Does the (lowercased) text end with a password or passphrase prompt?
 fn asks_for_secret(tail: &str) -> bool {
     let t = tail.trim_end();
     t.ends_with("password:") || (t.contains("passphrase for") && t.ends_with(':'))

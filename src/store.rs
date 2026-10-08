@@ -1,5 +1,5 @@
-//! Modelo de datos (carpetas y servidores) y su persistencia en JSON.
-//! Las contraseñas nunca pasan por aquí: viven en el keyring (ver `secrets`).
+//! Data model (folders and servers) and its JSON persistence.
+//! Passwords never go through here: they live in the keyring (see `secrets`).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -17,9 +17,9 @@ pub enum Auth {
 impl Auth {
     pub fn label(self) -> &'static str {
         match self {
-            Auth::Agent => "Agente SSH",
-            Auth::Key => "Clave privada",
-            Auth::Password => "Contraseña",
+            Auth::Agent => "SSH agent",
+            Auth::Key => "Private key",
+            Auth::Password => "Password",
         }
     }
 
@@ -48,6 +48,9 @@ pub struct Server {
     pub key_path: String,
     #[serde(default)]
     pub parent: Option<u64>,
+    /// Server this one is reached through (bastion / jump host).
+    #[serde(default)]
+    pub jump: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -70,7 +73,7 @@ pub enum NodeId {
     Server(u64),
 }
 
-/// El orden de los hermanos es el orden de los vectores (carpetas primero, luego servidores).
+/// Sibling order is the order of the vectors (folders first, then servers).
 #[derive(Default, Serialize, Deserialize)]
 pub struct Store {
     next_id: u64,
@@ -81,7 +84,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// Directorio de configuración: `$SHIP_CONFIG_DIR` o el estándar del sistema.
+    /// Config directory: `$SHIP_CONFIG_DIR` or the system default.
     pub fn config_dir() -> PathBuf {
         if let Some(d) = std::env::var_os("SHIP_CONFIG_DIR") {
             return PathBuf::from(d);
@@ -97,8 +100,8 @@ impl Store {
 
     pub fn load_from(path: PathBuf) -> Result<Self> {
         let mut store = if path.exists() {
-            let text = std::fs::read_to_string(&path).with_context(|| format!("no se pudo leer {}", path.display()))?;
-            serde_json::from_str(&text).with_context(|| format!("{} no es un JSON válido", path.display()))?
+            let text = std::fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
+            serde_json::from_str(&text).with_context(|| format!("{} is not valid JSON", path.display()))?
         } else {
             Store::default()
         };
@@ -106,7 +109,7 @@ impl Store {
         Ok(store)
     }
 
-    /// Escritura atómica: archivo temporal + rename.
+    /// Atomic write: temp file + rename.
     pub fn save(&self) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -128,6 +131,41 @@ impl Store {
 
     pub fn folder(&self, id: u64) -> Option<&Folder> {
         self.folders.iter().find(|f| f.id == id)
+    }
+
+    /// Hops needed to reach `id`, outermost first (excluding `id` itself).
+    pub fn jump_chain(&self, id: u64) -> Vec<&Server> {
+        let mut chain = vec![];
+        let mut cur = self.server(id).and_then(|s| s.jump);
+        while let Some(j) = cur {
+            if chain.len() > 16 || j == id {
+                break;
+            }
+            let Some(s) = self.server(j) else { break };
+            chain.push(s);
+            cur = s.jump;
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Would routing `id` through `via` create a loop?
+    pub fn would_cycle(&self, id: u64, via: u64) -> bool {
+        id == via || self.jump_chain(via).iter().any(|s| s.id == id)
+    }
+
+    /// Route `id` through `via` (or directly, with `None`).
+    pub fn move_via(&mut self, id: u64, via: Option<u64>) -> bool {
+        if via.is_some_and(|v| self.would_cycle(id, v)) {
+            return false;
+        }
+        match self.servers.iter_mut().find(|s| s.id == id) {
+            Some(s) => {
+                s.jump = via;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn add_folder(&mut self, name: String, parent: Option<u64>) -> u64 {
@@ -156,7 +194,7 @@ impl Store {
         }
     }
 
-    /// ¿`folder` es `ancestor` o está dentro de él?
+    /// Is `folder` equal to `ancestor` or inside it?
     pub fn is_inside(&self, folder: Option<u64>, ancestor: u64) -> bool {
         let mut cur = folder;
         while let Some(id) = cur {
@@ -168,9 +206,19 @@ impl Store {
         false
     }
 
-    /// Borra el nodo; si es carpeta, también todo su contenido.
-    /// Devuelve los ids de servidores eliminados (para limpiar sus secretos).
+    /// Deletes the node (and everything inside, for a folder).
+    /// Returns the ids of the removed servers so their secrets can be cleaned up.
     pub fn delete(&mut self, node: NodeId) -> Vec<u64> {
+        let gone = self.delete_nodes(node);
+        for s in &mut self.servers {
+            if s.jump.is_some_and(|j| gone.contains(&j)) {
+                s.jump = None;
+            }
+        }
+        gone
+    }
+
+    fn delete_nodes(&mut self, node: NodeId) -> Vec<u64> {
         match node {
             NodeId::Server(id) => {
                 self.servers.retain(|s| s.id != id);
@@ -192,7 +240,7 @@ impl Store {
         }
     }
 
-    /// Mueve `node` dentro de `dest` (al final). Devuelve false si el movimiento no es válido.
+    /// Moves `node` into `dest` (at the end). Returns false if the move is invalid.
     pub fn move_into(&mut self, node: NodeId, dest: Option<u64>) -> bool {
         if let NodeId::Folder(id) = node {
             if self.is_inside(dest, id) {
@@ -221,7 +269,7 @@ impl Store {
         true
     }
 
-    /// Mueve un servidor justo antes de otro servidor (adoptando su carpeta).
+    /// Moves a server right before another one (adopting its folder).
     pub fn move_server_before(&mut self, id: u64, target: u64) -> bool {
         if id == target {
             return false;
@@ -237,8 +285,8 @@ impl Store {
         true
     }
 
-    /// Sube (-1) o baja (+1) el nodo entre sus hermanos del mismo tipo.
-    pub fn shift(&mut self, node: NodeId, delta: i32) -> bool {
+    /// Moves the node up (-1) or down (+1) among siblings of the same kind.
+    pub fn shift(&mut self, node: NodeId, delta: i32, by_jump: bool) -> bool {
         fn go<T>(v: &mut [T], i: usize, delta: i32, same: impl Fn(&T, &T) -> bool) -> bool {
             let step = delta.signum();
             let mut j = i as i32 + step;
@@ -258,7 +306,11 @@ impl Store {
             }
             NodeId::Server(id) => {
                 let Some(i) = self.servers.iter().position(|s| s.id == id) else { return false };
-                go(&mut self.servers, i, delta, |a, b| a.parent == b.parent)
+                if by_jump {
+                    go(&mut self.servers, i, delta, |a, b| a.jump == b.jump)
+                } else {
+                    go(&mut self.servers, i, delta, |a, b| a.parent == b.parent)
+                }
             }
         }
     }
@@ -278,6 +330,7 @@ mod tests {
             auth: Auth::Agent,
             key_path: String::new(),
             parent,
+            jump: None,
         }
     }
 
@@ -314,9 +367,25 @@ mod tests {
         assert!(s.move_server_before(c, a));
         let order: Vec<u64> = s.servers.iter().map(|x| x.id).collect();
         assert_eq!(order, vec![c, a, b]);
-        assert!(s.shift(NodeId::Server(c), 1));
+        assert!(s.shift(NodeId::Server(c), 1, false));
         let order: Vec<u64> = s.servers.iter().map(|x| x.id).collect();
         assert_eq!(order, vec![a, c, b]);
+    }
+
+    #[test]
+    fn jump_chain_cycles_and_delete() {
+        let mut s = Store::default();
+        let a = s.add_server(srv("a", None));
+        let b = s.add_server(srv("b", None));
+        let c = s.add_server(srv("c", None));
+        assert!(s.move_via(b, Some(a)));
+        assert!(s.move_via(c, Some(b)));
+        let chain: Vec<u64> = s.jump_chain(c).iter().map(|x| x.id).collect();
+        assert_eq!(chain, vec![a, b]);
+        assert!(!s.move_via(a, Some(c)), "a -> c -> b -> a is a loop");
+        assert!(!s.move_via(a, Some(a)));
+        s.delete(NodeId::Server(b));
+        assert_eq!(s.server(c).unwrap().jump, None);
     }
 
     #[test]

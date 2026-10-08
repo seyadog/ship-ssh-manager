@@ -1,5 +1,5 @@
-//! Contraseñas y passphrases en el keyring del sistema (Secret Service, Keychain, Credential Manager).
-//! Nunca se escriben en `servers.json`.
+//! Passwords and passphrases in the system keyring (Secret Service, Keychain, Credential Manager).
+//! They are never written to `servers.json`.
 
 use anyhow::Result;
 use keyring::Entry;
@@ -15,7 +15,7 @@ pub fn set(server_id: u64, secret: &str) -> Result<()> {
     Ok(())
 }
 
-/// `None` si no hay secreto guardado o el keyring no está disponible.
+/// `None` if nothing is stored or the keyring is unavailable.
 pub fn get(server_id: u64) -> Option<String> {
     entry(server_id).ok()?.get_password().ok()
 }

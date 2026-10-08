@@ -1,7 +1,7 @@
-//! Dibujo de la interfaz. Rellena `app.layout` para que el ratón sepa qué hay en cada zona.
+//! Drawing code. Fills `app.layout` so the mouse handler knows what is where.
 
 use crate::app::*;
-use crate::store::{Auth, NodeId};
+use crate::store::{Auth, NodeId, Store};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout as RLayout, Position, Rect},
@@ -20,7 +20,7 @@ const GREEN: Color = Color::Rgb(158, 206, 106);
 const AMBER: Color = Color::Rgb(224, 175, 104);
 const RED: Color = Color::Rgb(247, 118, 142);
 
-/// Recorta `s` a `w` columnas, añadiendo «…» si no cabe.
+/// Truncates `s` to `w` columns, adding “…” if it does not fit.
 fn fit(s: &str, w: usize) -> String {
     if s.width() <= w {
         return s.to_string();
@@ -74,17 +74,17 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(if focused { ACCENT } else { MUTED }))
-        .title(Span::styled(" ⛵ ship ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(" ship ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 2 {
         return;
     }
 
-    // Barra de acciones
+    // Action bar
     let bar = Rect::new(inner.x, inner.y, inner.width, 1);
-    let add_srv = " + Servidor ";
-    let add_dir = " + Carpeta ";
+    let add_srv = " + Server ";
+    let add_dir = " + Folder ";
     let w1 = add_srv.width() as u16;
     let w2 = add_dir.width() as u16;
     f.render_widget(
@@ -98,7 +98,24 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.layout.toolbar.push((Rect::new(bar.x, bar.y, w1, 1), Hit::AddServer));
     app.layout.toolbar.push((Rect::new(bar.x + w1 + 1, bar.y, w2, 1), Hit::AddFolder));
 
-    let list = Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2));
+    // View switch
+    let views = [(" Folders ", View::Folders, Hit::ViewFolders), (" Jump hosts ", View::Jump, Hit::ViewJump)];
+    let mut vx = inner.x;
+    let mut spans = vec![];
+    for (label, v, hit) in views {
+        let w = label.width() as u16;
+        let style = if app.view == v {
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::new().fg(MUTED)
+        };
+        spans.push(Span::styled(label, style));
+        app.layout.toolbar.push((Rect::new(vx, inner.y + 1, w, 1), hit));
+        vx += w;
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+
+    let list = Rect::new(inner.x, inner.y + 3, inner.width, inner.height.saturating_sub(3));
     app.layout.list = list;
     if list.height == 0 {
         return;
@@ -114,8 +131,8 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.rows.is_empty() {
         let hint = Paragraph::new(vec![
-            Line::from(Span::styled("Aún no hay servidores.", Style::new().fg(MUTED))),
-            Line::from(Span::styled("Pulsa «+ Servidor» o la tecla a.", Style::new().fg(MUTED))),
+            Line::from(Span::styled("No servers yet.", Style::new().fg(MUTED))),
+            Line::from(Span::styled("Click “+ Server” or press a.", Style::new().fg(MUTED))),
         ]);
         f.render_widget(hint, list);
         return;
@@ -142,15 +159,24 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 let name = s.map(|s| s.name.as_str()).unwrap_or("?");
                 let live = app.tabs.iter().any(|t| t.server_id == id && t.session.exit_code.is_none());
                 let label = fit(name, width.saturating_sub(indent.width() + 3));
-                spans.push(Span::styled(
-                    if live { "● " } else { "○ " },
-                    Style::new().fg(if live { GREEN } else { MUTED }),
-                ));
-                spans.push(Span::styled(label, Style::new().fg(FG)));
+                if app.has_children(row.node) {
+                    let arrow = if app.is_open(row.node) { "▾ " } else { "▸ " };
+                    spans.push(Span::styled(arrow, Style::new().fg(ACCENT)));
+                } else {
+                    spans.push(Span::styled(
+                        if live { "● " } else { "○ " },
+                        Style::new().fg(if live { GREEN } else { MUTED }),
+                    ));
+                }
+                spans.push(Span::styled(label, Style::new().fg(if live { GREEN } else { FG })));
                 if let Some(s) = s {
                     let room = width.saturating_sub(indent.width() + 2 + name.width() + 2);
+                    let via = match (app.view, s.jump.and_then(|j| app.store.server(j))) {
+                        (View::Folders, Some(j)) => format!("{} ↪ {}", s.host, j.name),
+                        _ => s.host.clone(),
+                    };
                     if room > 6 {
-                        spans.push(Span::styled(format!("  {}", fit(&s.host, room)), Style::new().fg(MUTED)));
+                        spans.push(Span::styled(format!("  {}", fit(&via, room)), Style::new().fg(MUTED)));
                     }
                 }
             }
@@ -169,7 +195,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-// ---------------------------------------------------------------- pestañas
+// ---------------------------------------------------------------- tabs
 
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let mut x = area.x + 1;
@@ -258,12 +284,12 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
 
     if let Some(code) = tab.session.exit_code {
         let msg = match code {
-            0 => "Sesión cerrada.".to_string(),
-            255 => "Sin conexión (255): mira el error de ssh arriba.".to_string(),
-            n => format!("ssh terminó con código {n}."),
+            0 => "Session closed.".to_string(),
+            255 => "No connection (255): see the ssh error above.".to_string(),
+            n => format!("ssh exited with code {n}."),
         };
         let bar = Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1);
-        let text = format!(" {msg}  Enter: reconectar · Alt+W: cerrar ");
+        let text = format!(" {msg}  Enter: reconnect · Alt+W: close ");
         f.render_widget(
             Paragraph::new(fit(&text, area.width as usize)).style(Style::new().fg(Color::Black).bg(if code == 0 {
                 AMBER
@@ -291,9 +317,9 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
         .collect();
     lines.push(Line::raw(""));
     for t in [
-        "Doble clic en un servidor para abrir una sesión.",
-        "Arrastra servidores y carpetas para reorganizarlos.",
-        "F6 cambia entre el panel y el terminal.",
+        "Double-click a server to open a session.",
+        "Drag servers and folders to reorganize them.",
+        "F6 switches between the panel and the terminal.",
     ] {
         lines.push(Line::from(Span::styled(t, Style::new().fg(MUTED))));
     }
@@ -302,18 +328,17 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), r);
 }
 
-// ---------------------------------------------------------------- barra de estado
+// ---------------------------------------------------------------- status bar
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let text = if let Some((msg, _)) = &app.flash {
         return f.render_widget(Paragraph::new(format!(" {msg}")).style(Style::new().fg(AMBER)), area);
     } else if app.modal.is_some() {
-        "Esc cancelar".to_string()
+        "Esc cancel".to_string()
     } else if app.focus == Focus::Terminal {
-        "F6 panel · Alt+←/→ pestañas · Alt+Shift+←/→ mover · Alt+W cerrar · F2 renombrar · Shift+PgUp historial"
-            .to_string()
+        "F6 panel · Alt+←/→ tabs · Alt+Shift+←/→ move · Alt+W close · F2 rename · Shift+PgUp scrollback".to_string()
     } else {
-        "↑↓ mover · Enter abrir · a servidor · f carpeta · e editar · d borrar · Alt+↑↓ ordenar · q salir".to_string()
+        "↑↓ move · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · Alt+↑↓ reorder · q quit".to_string()
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);
 }
@@ -339,7 +364,7 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
     let mut cursor: Option<Position> = None;
 
     match modal {
-        Modal::Form(form) => draw_form(f, area, form, &mut hits, &mut cursor),
+        Modal::Form(form) => draw_form(f, area, form, &app.store, &mut hits, &mut cursor),
         Modal::Picker(p, _) => picker_list = draw_picker(f, area, p),
         Modal::Prompt(p) => {
             let r = centered(52, 5, area);
@@ -351,14 +376,14 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
             f.render_widget(Paragraph::new(p.input.value.as_str()).style(Style::new().fg(FG).bg(SEL_BG)), field);
             cursor = Some(Position::new(field.x + p.input.cursor as u16, field.y));
             f.render_widget(
-                Paragraph::new("Enter aceptar · Esc cancelar").style(Style::new().fg(MUTED)),
+                Paragraph::new("Enter accept · Esc cancel").style(Style::new().fg(MUTED)),
                 Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1),
             );
         }
         Modal::Confirm(c) => {
             let r = centered(56, 6, area);
             f.render_widget(Clear, r);
-            let block = modal_block("Confirmar");
+            let block = modal_block("Confirm");
             let inner = block.inner(r);
             f.render_widget(block, r);
             f.render_widget(
@@ -367,7 +392,7 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
             );
             let by = inner.y + inner.height - 1;
             f.render_widget(
-                Paragraph::new(Line::from(vec![button("Sí (y)", true), Span::raw("  "), button("No (n)", false)])),
+                Paragraph::new(Line::from(vec![button("Yes (y)", true), Span::raw("  "), button("No (n)", false)])),
                 Rect::new(inner.x + 1, by, inner.width - 2, 1),
             );
             hits.push((Rect::new(inner.x + 1, by, 8, 1), Hit::Yes));
@@ -381,12 +406,19 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_form(f: &mut Frame, area: Rect, form: &ServerForm, hits: &mut Vec<(Rect, Hit)>, cursor: &mut Option<Position>) {
+fn draw_form(
+    f: &mut Frame,
+    area: Rect,
+    form: &ServerForm,
+    store: &Store,
+    hits: &mut Vec<(Rect, Hit)>,
+    cursor: &mut Option<Position>,
+) {
     let fields = form.visible();
     let h = fields.len() as u16 + 6;
     let r = centered(66, h, area);
     f.render_widget(Clear, r);
-    let title = if form.editing.is_some() { "Editar servidor" } else { "Nuevo servidor" };
+    let title = if form.editing.is_some() { "Edit server" } else { "New server" };
     let block = modal_block(title);
     let inner = block.inner(r);
     f.render_widget(block, r);
@@ -398,18 +430,19 @@ fn draw_form(f: &mut Frame, area: Rect, form: &ServerForm, hits: &mut Vec<(Rect,
         hits.push((row, Hit::Field(fi)));
         let focused = form.focus == fi;
         let (label, placeholder) = match fi {
-            F_NAME => ("Nombre", "(por defecto, el host)"),
-            F_HOST => ("Host", "ejemplo.com o 10.0.0.5"),
-            F_PORT => ("Puerto", ""),
-            F_USER => ("Usuario", "(el de ssh por defecto)"),
-            F_AUTH => ("Autenticación", ""),
-            F_KEY => ("Clave privada", "ruta de la clave"),
+            F_NAME => ("Name", "(defaults to the host)"),
+            F_HOST => ("Host", "example.com or 10.0.0.5"),
+            F_PORT => ("Port", ""),
+            F_USER => ("User", "(ssh default)"),
+            F_AUTH => ("Auth", ""),
+            F_JUMP => ("Jump via", ""),
+            F_KEY => ("Private key", "path to the key"),
             _ => (
-                if form.auth == Auth::Password { "Contraseña" } else { "Passphrase" },
+                if form.auth == Auth::Password { "Password" } else { "Passphrase" },
                 if form.secret_saved {
-                    "(guardada en el keyring)"
+                    "(saved in the keyring)"
                 } else if form.auth == Auth::Key {
-                    "opcional"
+                    "optional"
                 } else {
                     ""
                 },
@@ -423,6 +456,12 @@ fn draw_form(f: &mut Frame, area: Rect, form: &ServerForm, hits: &mut Vec<(Rect,
         let browse_w = if fi == F_KEY { 12 } else { 0 };
         let val = Rect::new(row.x + LABEL_W, y, row.width.saturating_sub(LABEL_W + browse_w), 1);
         let bg = if focused { SEL_BG } else { Color::Reset };
+        if fi == F_JUMP {
+            let name = form.jump.and_then(|j| store.server(j)).map(|s| s.name.as_str()).unwrap_or("(none)");
+            let text = format!("◀ {name} ▶");
+            f.render_widget(Paragraph::new(text).style(Style::new().fg(if focused { FG } else { MUTED }).bg(bg)), val);
+            continue;
+        }
         if fi == F_AUTH {
             let text = format!("◀ {} ▶", form.auth.label());
             f.render_widget(Paragraph::new(text).style(Style::new().fg(if focused { FG } else { MUTED }).bg(bg)), val);
@@ -443,7 +482,7 @@ fn draw_form(f: &mut Frame, area: Rect, form: &ServerForm, hits: &mut Vec<(Rect,
         } else {
             (shown, Style::new().fg(FG).bg(bg))
         };
-        // Desplazamiento horizontal para que el cursor siempre sea visible
+        // Horizontal scroll so the cursor is always visible
         let vis = val.width.saturating_sub(1) as usize;
         let skip = if focused { input.cursor.saturating_sub(vis) } else { 0 };
         let text: String = text.chars().skip(skip).take(val.width as usize).collect();
@@ -453,7 +492,7 @@ fn draw_form(f: &mut Frame, area: Rect, form: &ServerForm, hits: &mut Vec<(Rect,
         }
         if fi == F_KEY {
             let b = Rect::new(val.x + val.width + 1, y, 11, 1);
-            f.render_widget(Paragraph::new(Span::styled(" Examinar… ", Style::new().fg(Color::Black).bg(ACCENT))), b);
+            f.render_widget(Paragraph::new(Span::styled(" Browse… ", Style::new().fg(Color::Black).bg(ACCENT))), b);
             hits.push((b, Hit::Browse));
         }
     }
@@ -468,10 +507,10 @@ fn draw_form(f: &mut Frame, area: Rect, form: &ServerForm, hits: &mut Vec<(Rect,
     let by = inner.y + inner.height - 1;
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            button("Guardar", true),
+            button("Save", true),
             Span::raw("  "),
-            button("Cancelar", false),
-            Span::styled("  Tab siguiente · Ctrl+O examinar", Style::new().fg(MUTED)),
+            button("Cancel", false),
+            Span::styled("  Tab next · Ctrl+O browse", Style::new().fg(MUTED)),
         ])),
         Rect::new(inner.x + 1, by, inner.width.saturating_sub(2), 1),
     );
@@ -482,14 +521,14 @@ fn draw_form(f: &mut Frame, area: Rect, form: &ServerForm, hits: &mut Vec<(Rect,
 fn draw_picker(f: &mut Frame, area: Rect, p: &mut Picker) -> Rect {
     let r = centered(74, 22, area);
     f.render_widget(Clear, r);
-    let title = format!("Elegir clave — {}", fit(&p.dir.to_string_lossy(), 56));
+    let title = format!("Choose key — {}", fit(&p.dir.to_string_lossy(), 56));
     let block = modal_block(&title);
     let inner = block.inner(r);
     f.render_widget(block, r);
     let list = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), inner.height.saturating_sub(2));
     let h = list.height as usize;
 
-    // El offset vive en el picker; se ajusta aquí para mantener la selección visible.
+    // The offset lives in the picker; adjust it here to keep the selection visible.
     if p.selected < p.offset {
         p.offset = p.selected;
     } else if p.selected >= p.offset + h {
@@ -505,7 +544,7 @@ fn draw_picker(f: &mut Frame, area: Rect, p: &mut Picker) -> Rect {
         } else {
             ("  ", Style::new().fg(MUTED))
         };
-        let tag = if e.key_like { "  clave privada" } else { "" };
+        let tag = if e.key_like { "  private key" } else { "" };
         let name = fit(&e.name, list.width as usize - 2 - tag.width());
         let mut line_style = Style::new();
         if n == p.selected {
@@ -522,8 +561,7 @@ fn draw_picker(f: &mut Frame, area: Rect, p: &mut Picker) -> Rect {
         );
     }
     f.render_widget(
-        Paragraph::new("Enter abrir/elegir · Backspace subir · . ocultos · ~ home · Esc volver")
-            .style(Style::new().fg(MUTED)),
+        Paragraph::new("Enter open/select · Backspace up · . hidden · ~ home · Esc back").style(Style::new().fg(MUTED)),
         Rect::new(inner.x + 1, inner.y + inner.height - 1, inner.width.saturating_sub(2), 1),
     );
     Rect::new(list.x, list.y, list.width, list.height)

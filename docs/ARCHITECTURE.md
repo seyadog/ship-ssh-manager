@@ -1,38 +1,47 @@
-# Arquitectura de ship
+# ship architecture
 
-TUI en Rust (ratatui + crossterm) para gestionar conexiones SSH. Soporta ratón y corre en Linux, macOS y Windows.
+A Rust TUI (ratatui + crossterm) for managing SSH connections. Mouse support; runs on Linux, macOS and Windows.
 
-## Idea central
+## Core idea
 
-Cada pestaña lanza el `ssh` del sistema dentro de un PTY (`portable-pty`). Su salida pasa por un emulador de terminal (`vt100`) y se dibuja en un widget de ratatui. Así `ship` hereda gratis:
+Each tab runs the system `ssh` inside a PTY (`portable-pty`). Its output goes through a terminal emulator (`vt100`) and is drawn into a ratatui widget. `ship` therefore inherits for free:
 
-- agente SSH, claves, `~/.ssh/config`, ProxyJump
-- `known_hosts`: ssh pregunta por host keys nuevas o cambiadas **dentro de la pestaña** y las guarda él mismo
-- mensajes de error reales del cliente (host inalcanzable, permiso denegado, etc.)
+- the SSH agent, keys, `~/.ssh/config`, ProxyJump
+- `known_hosts`: ssh asks about new or changed host keys **inside the tab** and records them itself
+- the real client error messages (unreachable host, permission denied, ...)
 
-`ship` añade encima: el árbol de servidores, las pestañas, los formularios y un resumen claro cuando una sesión termina.
+`ship` adds the server tree, tabs, forms, jump-host routing and a clear summary when a session ends.
 
-## Módulos
+## Modules
 
-| Módulo | Responsabilidad |
+| Module | Responsibility |
 |---|---|
-| `main.rs` | Terminal (raw mode, ratón, paste), bucle de eventos, CLI |
-| `store.rs` | Modelo (carpetas, servidores) y persistencia JSON en `~/.config/ship/servers.json` |
-| `session.rs` | PTY + emulador: spawn, resize, escritura, scrollback, detección de salida |
-| `keys.rs` | Traduce teclas de crossterm a bytes de terminal |
-| `app.rs` | Estado de la app, foco, modales, manejo de teclado y ratón |
-| `ui.rs` | Dibujo: sidebar, pestañas, terminal, formularios |
+| `main.rs` | Terminal setup (raw mode, mouse, paste), event loop |
+| `store.rs` | Model (folders, servers, jump chains) and JSON persistence in `~/.config/ship/servers.json` |
+| `session.rs` | PTY + emulator: spawn, resize, input, scrollback, exit detection, one-shot secret autofill |
+| `secrets.rs` | System keyring |
+| `keys.rs` | Maps crossterm key events to terminal bytes |
+| `app.rs` | App state, focus, modals, keyboard and mouse handling, `ssh` argv building |
+| `ui.rs` | Drawing: sidebar, tabs, terminal, forms |
 
-Todo vive en un solo proceso. No hay IPC ni renderer separado.
+Everything runs in one process; there is no IPC and no separate renderer.
 
-## Seguridad
+## Folders vs. jump hosts
 
-- Ninguna contraseña se escribe en disco. Con autenticación por contraseña, `ssh` la pide dentro del PTY.
-- Fase posterior: guardado opcional en el keyring del sistema (crate `keyring`), nunca en el JSON.
-- Se prefieren claves y agente. El archivo de datos solo guarda la *ruta* de la clave.
+A server has two independent attributes: `parent` (its folder, for organizing) and `jump` (the server it is reached through, for routing). The sidebar is one tree with two lenses over the same data, so nothing is duplicated:
 
-## Fases
+- **Folders view** — roots are top-level folders; jump servers show a dim `↪ bastion` hint.
+- **Jump hosts view** — roots are servers with no `jump`; children are the servers behind them, to any depth.
 
-1. **MVP:** árbol, formulario, pestañas, resize, errores claros, drag & drop.
-2. **CLI y búsqueda:** `ship <alias>`, `ship list`, `ship add`, importar `~/.ssh/config`, Ctrl+K, reconexión automática.
-3. **Extras:** SFTP, túneles guardados, snippets, temas.
+`ssh_argv` resolves the chain. If every hop uses the agent/default keys it emits `-J a,b`. If a hop has its own key it builds a nested `ProxyCommand`, because `-J` cannot give each hop an identity. Loops are rejected (`Store::would_cycle`), and deleting a bastion detaches the servers behind it.
+
+## Security
+
+- No password is written to disk. It goes to the OS keyring (`keyring` crate) and is written to the PTY once when `ssh` prompts.
+- Keys and the agent are preferred; the data file only stores the *path* of a key.
+
+## Phases
+
+1. **MVP:** tree, form, tabs, resize, clear errors, drag & drop, jump hosts.
+2. **CLI and search:** `ship <alias>`, `ship list`, `ship add`, `~/.ssh/config` import, Ctrl+K, auto-reconnect.
+3. **Extras:** SFTP, saved tunnels, snippets, themes.

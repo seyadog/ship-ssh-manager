@@ -1,48 +1,57 @@
 # ship
 
-Gestor de conexiones SSH para la terminal: una TUI moderna, con ratón. Guarda tus servidores en carpetas y abre cada sesión en una pestaña. Alternativa ligera a Tabby.
+An SSH connection manager for the terminal: a modern TUI with mouse support. Keep your servers in folders, see them by jump host, and open every session in a tab. A lightweight alternative to Tabby.
 
-> Estado: Fase 1 (MVP) en desarrollo. Arquitectura en [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Status: Phase 1 (MVP) done, jump hosts included. Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Desarrollo
+## Install & develop
 
-Requiere [Rust](https://rustup.rs) estable y un cliente `ssh` en el PATH.
+Requires a stable [Rust](https://rustup.rs) toolchain and an `ssh` client in the PATH.
 
 ```sh
-cargo run            # ejecutar
-cargo test           # pruebas
-cargo build --release
+cargo run                                   # run from the source tree
+cargo test
+cargo install --path . --root ~/.local      # installs `ship` into ~/.local/bin
 ```
 
-Los datos se guardan en `~/.config/ship/servers.json` (o en `$SHIP_CONFIG_DIR`). Las contraseñas y passphrases van al keyring del sistema, nunca a ese archivo.
+Data lives in `~/.config/ship/servers.json` (or `$SHIP_CONFIG_DIR`). Passwords and passphrases go to the system keyring, never to that file.
 
-## Uso
+## Two views of the same servers
 
-**Ratón:** doble clic abre un servidor o despliega una carpeta; arrastra para mover (sobre una carpeta, dentro de ella; sobre un servidor, justo antes de él); arrastra pestañas para reordenarlas; clic en ✕ cierra una pestaña; doble clic en una pestaña la renombra; la rueda recorre el historial del terminal.
+Press `v` (or click the header) to switch:
 
-**Panel lateral:**
+- **Folders** — how you organize things.
+- **Jump hosts** — how you reach them. A server with “Jump via” set to another server is nested under it, so chains like `bastion → web → db` become a tree. Opening it runs `ssh` through every hop.
 
-| Tecla | Acción |
+## Keyboard (sidebar)
+
+Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `←` folds it or goes back up, `Enter` opens a session.
+
+| Key | Action |
 |---|---|
-| `↑` `↓` / `j` `k` | mover selección |
-| `Enter` | abrir servidor / plegar carpeta |
-| `a` / `f` | nuevo servidor / nueva carpeta |
-| `e` | editar |
-| `d` | borrar |
-| `Alt+↑` `Alt+↓` | cambiar orden entre hermanos |
-| `q` | salir |
+| `↑` `↓` / `j` `k` | move selection |
+| `→` / `l` | unfold, or step into the first child |
+| `←` / `h` | fold, or go back to the parent |
+| `Enter` | open server / toggle folder |
+| `v` / `Tab` | switch view |
+| `a` / `f` | new server / new folder (in the jump view, `a` on a server creates a host behind it) |
+| `e` / `d` | edit / delete |
+| `Alt+↑` `Alt+↓` | reorder among siblings |
+| `q` | quit |
 
-**Global:** `F6` panel ⇄ terminal · `Alt+←/→` cambiar de pestaña · `Alt+Shift+←/→` mover pestaña · `Alt+1..9` ir a pestaña · `Alt+W` cerrar · `F2` renombrar · `Shift+PgUp/PgDn` historial.
+**Global:** `F6` panel ⇄ terminal · `Alt+←/→` switch tab · `Alt+Shift+←/→` move tab · `Alt+1..9` jump to tab · `Alt+W` close · `F2` rename · `Shift+PgUp/PgDn` scrollback.
 
-En el formulario, `Ctrl+O` (o «Examinar…») abre un selector de archivos que empieza en `~/.ssh` y resalta las claves privadas.
+**Mouse:** double-click opens a server or toggles a folder · drag to move (onto a folder: inside it; onto a server: right before it; in the jump view: behind that server, or drop on empty space to reach it directly) · drag tabs to reorder · ✕ closes a tab · double-click a tab renames it · wheel scrolls the history.
 
-## Seguridad
+In the server form, `Ctrl+O` (or “Browse…”) opens a file browser that starts in `~/.ssh` and highlights private keys.
 
-- La sesión es el `ssh` del sistema dentro de un PTY: `known_hosts`, agente y claves funcionan como siempre. Si la host key es nueva o cambió, `ssh` pregunta dentro de la pestaña.
-- Si guardas una contraseña o passphrase, se almacena en el keyring del sistema y se envía una sola vez cuando `ssh` la pide.
+## Security
 
-## Plan
+- A session is the system `ssh` inside a PTY, so `known_hosts`, the agent and your keys work as usual. New or changed host keys are asked inside the tab.
+- A saved password/passphrase lives in the keyring and is sent once when `ssh` asks for it. Jump hosts should use keys or the agent.
 
-1. **MVP** (en curso): árbol, formulario, pestañas, resize, errores, arrastrar y soltar.
-2. CLI `ship <alias>` / `list` / `add`, importar `~/.ssh/config`, Ctrl+K, reconexión automática.
-3. SFTP, túneles, snippets, temas.
+## Roadmap
+
+1. **MVP** — tree, forms, tabs, resize, errors, drag & drop, jump hosts. ✔
+2. `ship <alias>` / `list` / `add`, `~/.ssh/config` import, Ctrl+K, auto-reconnect.
+3. SFTP, tunnels, snippets, themes.

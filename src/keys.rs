@@ -1,4 +1,4 @@
-//! Traduce eventos de teclado de crossterm a los bytes que espera un terminal.
+//! Translates crossterm key events into the bytes a terminal expects.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -7,7 +7,7 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
     let ctrl = m.contains(KeyModifiers::CONTROL);
     let alt = m.contains(KeyModifiers::ALT);
     let shift = m.contains(KeyModifiers::SHIFT);
-    // Parámetro de modificadores xterm: 1 + shift(1) + alt(2) + ctrl(4)
+    // xterm modifier parameter: 1 + shift(1) + alt(2) + ctrl(4)
     let md = 1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8;
 
     let csi = |final_byte: char| -> Vec<u8> {

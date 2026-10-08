@@ -20,7 +20,7 @@ fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
-    // Si hay un pánico, dejar la terminal usable antes de imprimir el error.
+    // On panic, leave the terminal usable before printing the error.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(std::io::stdout(), DisableBracketedPaste, DisableMouseCapture);
