@@ -8,6 +8,7 @@
 > - Some `Alt` key combinations may be intercepted by Windows or the terminal. Use the mouse or the arrow keys if one does not work.
 > - The vault file gets no extra permission restrictions (Windows has no `0600`); it relies on your user profile folder being private. It stays encrypted with your master password.
 > - The binary is **not code-signed**: Windows SmartScreen may warn on first run ("More info" → "Run anyway").
+> - There is no background server on Windows yet: sessions end when the window closes.
 > - Windows on ARM runs the x86_64 build through emulation; there is no native ARM build yet.
 >
 > Please report problems at https://github.com/seyadog/ship-ssh-manager/issues.

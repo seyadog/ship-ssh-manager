@@ -1,8 +1,8 @@
 # ship
 
-An SSH connection manager for the terminal: a modern TUI with mouse support. Keep your servers in folders, see them by jump host, and open every session in a tab. A lightweight, keyboard- and mouse-friendly alternative to GUI SSH clients.
+An SSH connection manager and terminal workspace: a modern TUI with mouse support. Keep your servers in folders, see them by jump host, open every session in a tab, and group local terminals and AI agents into project **spaces**. Sessions keep running when you close it. A lightweight, keyboard- and mouse-friendly alternative to GUI SSH clients.
 
-> Status: Phase 1 (MVP) done, with jump hosts and the encrypted password vault. Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Status: servers, folders, jump hosts, the encrypted password vault, spaces with an agents panel, and sessions that survive closing the window (Linux and macOS). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Install
 
@@ -54,9 +54,31 @@ cargo run
 cargo test
 ```
 
+## Spaces: projects with their own terminals
+
+A **space** is a project directory with its own terminals. Press `v` (or click `Spaces`) for the third view, then `a` and give it a directory. Each space shows its **git branch**, and its terminals start in that directory.
+
+- Every terminal belongs to where it was opened: the SSH section, or one space. The tab bar only shows the tabs of what you are looking at, so what runs in a space (an AI agent, say) never mixes with your SSH tabs.
+- **Agents.** Run `claude`, `opencode`, `codex`, `gemini`, `aider`... in any terminal and it shows up under **agents** at the bottom of the sidebar, with the space it runs in. `●` amber is working, `○` is idle, a green `●` means it finished and is waiting for you. Click one (or press `Alt+n`) to jump to its terminal wherever it lives.
+- **Sound.** When an agent finishes a stretch of work, ship plays a sound (the system's player, or the terminal bell). Set `{"sound": false}` in `settings.json` (next to `servers.json`) to silence it.
+- Detection looks at the foreground process of the terminal and at its output: an agent that keeps drawing is working; when it goes quiet after a while, it is done. Linux and macOS only.
+
+`a` new space · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
+
+## Sessions survive closing ship (Linux and macOS)
+
+Terminals live in a small background server (`ship daemon`) that starts by itself the first time. Closing ship, or its window, only disconnects: open it again and every terminal is back, in the same space, with its screen and its process still running, including agents. If an agent finishes while ship is closed, the server plays the sound and the tab is marked when you return.
+
+- `q` leaves the sessions running (it says how many). `ship kill-server` stops the server and every session in it. The server exits by itself when it holds nothing.
+- Closing a tab (`Alt+W`, `✕`, `c`) does end that session.
+- After updating ship, run `ship kill-server` once so the new version replaces the old server (it ends the sessions).
+- The server listens on a private Unix socket (mode `0600` inside a `0700` directory) under `$XDG_RUNTIME_DIR`. Saved passwords are sent to it once, in memory, when you connect; they are not written anywhere.
+- Limits: the scroll-back history is only what arrived since you attached; sessions use the environment of the ship that opened them (an `ssh-agent` socket that later changes is not picked up). Set `SHIP_NO_DAEMON=1` to keep sessions inside the window instead.
+- Windows has no background server yet: sessions end with the window.
+
 ## Two views of the same servers
 
-Press `v` (or click the header) to switch:
+Press `v` (or click the header) to switch between the first two:
 
 - **Folders** — how you organize things.
 - **Jump hosts** — how you reach them. Only bastions are roots here (servers that others are reached through), and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. Servers that are not part of any jump chain are hidden in this view. To start one, edit a server and set “Jump via”. Opening it runs `ssh` through every hop.
@@ -75,13 +97,13 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 | `v` / `Tab` | switch view |
 | `a` / `f` | new server / new folder (in the jump view, `a` on a server creates a host behind it) |
 | `e` / `d` | edit / delete |
-| `c` | close the open session of the selected server |
+| `c` | close the open session of the selected server (in the Spaces view: the current terminal) |
 | `Alt+↑` `Alt+↓` | reorder among siblings |
 | `t` | open a terminal of this computer in a new tab (also the `⌂ Local terminal` entry at the bottom: `↓` from the last row, or click) |
 | `p` | open the password vault |
 | `q` | quit |
 
-**Global:** `F6` panel ⇄ terminal · `Alt+←/→` switch tab · `Alt+Shift+←/→` move tab · `Alt+1..9` jump to tab (from the sidebar, plain `1`..`9` also work; some terminals, e.g. Ptyxis, keep `Alt+N` for their own tabs) · `Alt+W` close · `F2` rename · `Shift+PgUp/PgDn` scrollback.
+**Global:** `Alt+n` jump to the agent that wants attention (or the next one) · `F6` panel ⇄ terminal · `Alt+←/→` switch tab · `Alt+Shift+←/→` move tab · `Alt+1..9` jump to tab (from the sidebar, plain `1`..`9` also work; some terminals, e.g. Ptyxis, keep `Alt+N` for their own tabs) · `Alt+W` close · `F2` rename · `Shift+PgUp/PgDn` scrollback.
 
 **Mouse:** double-click opens a server or toggles a folder · drag to move (onto a folder: inside it; onto a server: right before it; in the jump view: behind that server, or drop on empty space to reach it directly) · drag tabs to reorder · ✕ closes a tab · double-click a tab renames it · wheel scrolls the history.
 
@@ -116,6 +138,6 @@ MIT, see [LICENSE](LICENSE).
 
 ## Roadmap
 
-1. **MVP** — tree, forms, tabs, resize, errors, drag & drop, jump hosts, password vault (with sudo fill). ✔
+1. **Done** — tree, forms, tabs, resize, errors, drag & drop, jump hosts, password vault (with sudo fill), spaces with git branch, agents panel with sound, background server for persistent sessions. ✔
 2. **Next:** `ship <alias>` / `list` / `add`, `~/.ssh/config` import (mapping `ProxyJump` to jump hosts), Ctrl+K quick search, auto-reconnect.
 3. **Later:** SFTP, saved tunnels, snippets, themes (including per-server colors), remembering the chosen view.

@@ -18,8 +18,13 @@ Each tab runs the system `ssh` inside a PTY (`portable-pty`). Its output goes th
 |---|---|
 | `main.rs` | Terminal setup (raw mode, mouse, paste), event loop |
 | `store.rs` | Model (folders, servers, jump chains) and JSON persistence in `~/.config/ship/servers.json` |
-| `session.rs` | PTY + emulator: spawn, resize, input, scrollback, exit detection, one-shot secret autofill |
+| `session.rs` | `PtySession`: a PTY + emulator (spawn, resize, input, scrollback, exit, per-prompt secret autofill, agent probe). `Session`: what the interface uses; it owns a `PtySession` or talks to one in the server |
 | `vault.rs` | Encrypted password vault (Argon2id + XChaCha20-Poly1305), master-password lock |
+| `spaces.rs` | Spaces (named project directories, saved in `spaces.json`) and the git branch of a directory |
+| `agent.rs` | Recognising an AI agent from the foreground process of a PTY, and the working/finished state machine |
+| `notify.rs` | The sound played when an agent finishes |
+| `daemon.rs` | The background server (Unix): protocol, server, client, `RemoteSession`. `daemon_stub.rs` stands in on other platforms |
+| `settings.rs` | `settings.json` |
 | `keys.rs` | Maps crossterm key events to terminal bytes |
 | `app.rs` | App state, focus, modals, keyboard and mouse handling, `ssh` argv building |
 | `ui.rs` | Drawing: sidebar, tabs, terminal, forms |
@@ -34,6 +39,20 @@ A server has two independent attributes: `parent` (its folder, for organizing) a
 - **Jump hosts view** — roots are bastions only (servers with no `jump` that other servers are reached through); children are the servers behind them, to any depth. Servers outside any jump chain are not listed.
 
 `ssh_argv` resolves the chain. If every hop uses the agent/default keys it emits `-J a,b`. If a hop has its own key it builds a nested `ProxyCommand`, because `-J` cannot give each hop an identity. Loops are rejected (`Store::would_cycle`), and deleting a bastion detaches the servers behind it.
+
+## Tabs, scopes and spaces
+
+Every tab has a `Scope`: the SSH section, or one space. The tab bar shows only the tabs of the current scope, and the scope follows the sidebar: the Folders and Jump hosts views show the SSH scope, and in the Spaces view it is the selected space. A terminal opened in a space starts in that space's directory. Keeping tabs per scope is what keeps an AI agent where it was launched and out of the SSH tabs.
+
+## The background server
+
+The PTYs and their `vt100` screens live in `ship daemon`, a process started on demand (`setsid`, detached from the terminal). The interface talks to it over a Unix socket with one JSON object per line (terminal bytes in base64).
+
+- `Spawn` creates a session (with the client's environment, working directory and the secrets to autofill); `Attach` returns a **snapshot** of the screen (`state_formatted`) and then streams `Output`. Snapshot and subscription happen while the screen is locked, so no output is lost or repeated.
+- The server watches its sessions twice a second: exit codes, sudo prompts, and the agent in the foreground (and whether it is working or just finished). If an agent finishes with no interface attached, it plays the sound itself and remembers it for the next attach.
+- Each tab sends a small description of itself (`SetMeta`: title, space, order) whenever it changes; that is how the next interface rebuilds the tabs in the right scope.
+- A client that cannot keep up is disconnected rather than allowed to miss output, and reconnects to a fresh snapshot. The server exits after a few idle seconds with no sessions and no clients, or on `Shutdown` (`ship kill-server`).
+- Closing a tab sends `Kill`; just dropping the connection only detaches. On platforms without Unix sockets, `daemon_stub.rs` makes the interface keep sessions in its own process.
 
 ## Security
 

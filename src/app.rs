@@ -1,6 +1,7 @@
 //! Application state and keyboard/mouse handling. Drawing lives in `ui.rs`.
 
 use crate::keys;
+use crate::daemon::Daemon;
 use crate::session::{Autofill, Session, SpawnOpts};
 use crate::spaces::{self, Spaces};
 use crate::store::{Auth, NodeId, Server, Store};
@@ -9,6 +10,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -175,6 +177,8 @@ pub struct Tab {
     pub session: Session,
     /// An agent finished here and the user has not looked yet.
     pub attention: bool,
+    /// The last description of this tab sent to the background server.
+    meta_sent: String,
 }
 
 // ---------------------------------------------------------------- modales
@@ -587,6 +591,11 @@ pub struct App {
     branches_at: Option<Instant>,
     /// Play a sound when an agent finishes.
     pub sound: bool,
+    /// The background server holding the sessions, if there is one.
+    pub daemon: Option<Arc<Daemon>>,
+    lost_warned: bool,
+    /// Sessions left running in the server when the interface quit (for the message after exiting).
+    pub left_running: usize,
     pub focus: Focus,
     pub modal: Option<Modal>,
     pub layout: Layout,
@@ -622,6 +631,9 @@ impl App {
             branches: HashMap::new(),
             branches_at: None,
             sound: true,
+            daemon: None,
+            lost_warned: false,
+            left_running: 0,
             focus: Focus::Sidebar,
             modal: None,
             layout: Layout::default(),
@@ -856,6 +868,61 @@ impl App {
         }
     }
 
+    /// Tells the background server what each tab is, whenever it changes, so the tabs can be rebuilt later.
+    fn sync_meta(&mut self) {
+        if self.daemon.is_none() {
+            return;
+        }
+        for (i, t) in self.tabs.iter_mut().enumerate() {
+            let space = match t.scope {
+                Scope::Space(id) => Some(id),
+                Scope::Ssh => None,
+            };
+            let meta = serde_json::json!({
+                "title": t.title,
+                "server_id": t.server_id,
+                "space": space,
+                "order": i,
+                "attention": t.attention,
+            });
+            let text = meta.to_string();
+            if text != t.meta_sent {
+                t.session.set_meta(&meta);
+                t.meta_sent = text;
+            }
+        }
+    }
+
+    /// Re-creates the tabs of the sessions that were left running in the background server.
+    pub fn restore_sessions(&mut self, rows: u16, cols: u16) {
+        let Some(d) = self.daemon.clone() else { return };
+        let Ok(mut list) = d.list() else { return };
+        list.sort_by_key(|i| i.meta.get("order").and_then(|v| v.as_u64()).unwrap_or(u64::MAX));
+        for info in &list {
+            let meta = &info.meta;
+            let scope = match meta.get("space").and_then(|v| v.as_u64()) {
+                Some(id) if self.spaces.get(id).is_some() => Scope::Space(id),
+                _ => Scope::Ssh,
+            };
+            let title = meta.get("title").and_then(|v| v.as_str()).unwrap_or("session").to_string();
+            let server_id = meta.get("server_id").and_then(|v| v.as_u64()).unwrap_or(LOCAL);
+            self.next_tab_id += 1;
+            self.tabs.push(Tab {
+                id: self.next_tab_id,
+                title,
+                server_id,
+                scope,
+                session: Session::from_remote(d.attach(info.sid, rows, cols)),
+                attention: meta.get("attention").and_then(|v| v.as_bool()).unwrap_or(false),
+                meta_sent: String::new(),
+            });
+        }
+        if !list.is_empty() {
+            self.fix_active();
+            self.set_flash(format!("Restored {} session(s) from the background server", list.len()));
+        }
+    }
+
     pub fn live_sessions(&self) -> usize {
         self.tabs.iter().filter(|t| t.session.exit_code.is_none()).count()
     }
@@ -880,6 +947,11 @@ impl App {
             if let Some(t) = self.tabs.get_mut(self.active).filter(|t| t.scope == scope) {
                 t.attention = false;
             }
+        }
+        self.sync_meta();
+        if !self.lost_warned && self.daemon.as_ref().is_some_and(|d| !d.alive()) {
+            self.lost_warned = true;
+            self.set_flash("Lost the background server: its sessions ended");
         }
         if self.branches_at.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
             self.branches_at = Some(Instant::now());
@@ -912,6 +984,10 @@ impl App {
     fn request_quit(&mut self) {
         let n = self.live_sessions();
         if n == 0 {
+            self.quit = true;
+        } else if self.daemon.as_ref().is_some_and(|d| d.alive()) {
+            // The sessions live in the background server: leaving only detaches from them.
+            self.left_running = n;
             self.quit = true;
         } else {
             self.modal = Some(Modal::Confirm(Confirm {
@@ -964,13 +1040,28 @@ impl App {
                 if c.width > 0 && c.height > 0 { (c.height, c.width) } else { (24, 80) }
             }
         };
-        let opts = SpawnOpts { argv: argv.clone(), rows, cols, fills, login_expected, cwd, env: None };
-        match Session::spawn_with(opts) {
+        if self.daemon.as_ref().is_some_and(|d| !d.alive()) {
+            self.daemon = None; // the server is gone: carry on inside this process
+        }
+        let opts = SpawnOpts { argv: argv.clone(), rows, cols, fills, login_expected, cwd, env: None, tap: None };
+        match Session::spawn_with(opts, self.daemon.as_deref()) {
             Ok(session) => match reuse {
-                Some(i) => self.tabs[i].session = session,
+                Some(i) => {
+                    let mut old = std::mem::replace(&mut self.tabs[i].session, session);
+                    old.kill();
+                    self.tabs[i].meta_sent.clear();
+                }
                 None => {
                     self.next_tab_id += 1;
-                    self.tabs.push(Tab { id: self.next_tab_id, title, server_id: id, scope, session, attention: false });
+                    self.tabs.push(Tab {
+                        id: self.next_tab_id,
+                        title,
+                        server_id: id,
+                        scope,
+                        session,
+                        attention: false,
+                        meta_sent: String::new(),
+                    });
                     self.set_scope(scope);
                     self.active = self.tabs.len() - 1;
                     self.focus = Focus::Terminal;
@@ -1295,7 +1386,7 @@ impl App {
         let pos = same.iter().position(|&i| i == idx).unwrap_or(0);
         let neighbour = if pos > 0 { Some(same[pos - 1]) } else { same.get(1).copied() };
         let was_active = idx == self.active;
-        self.tabs.remove(idx);
+        self.tabs.remove(idx).session.kill();
         if self.active > idx {
             self.active -= 1;
         }
@@ -2500,6 +2591,7 @@ mod tests {
         assert_eq!((app.active, app.focus), (1, Focus::Sidebar), "no such tab: nothing changes");
     }
 
+    #[cfg(unix)]
     fn temp_dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("ship-app-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -2507,6 +2599,7 @@ mod tests {
         d.canonicalize().unwrap()
     }
 
+    #[cfg(unix)]
     fn wait_for_screen(app: &App, tab: usize, want: &str) -> bool {
         let end = Instant::now() + Duration::from_secs(4);
         while Instant::now() < end {

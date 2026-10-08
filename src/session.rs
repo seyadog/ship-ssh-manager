@@ -1,17 +1,21 @@
-//! A session is a process (normally `ssh`) inside a PTY, with a `vt100` emulator
-//! holding the screen. A reader thread feeds the emulator.
+//! A session is a process (normally `ssh`) inside a PTY, with a `vt100` emulator holding the screen.
+//!
+//! `PtySession` is the real thing. `Session` is what the interface uses: it either owns a `PtySession`
+//! itself, or talks to one living in the background server (`daemon`), which is what lets sessions
+//! survive closing the interface.
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use crate::agent::{self, AgentInfo};
+use crate::daemon::{Daemon, RemoteSession};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 
-const SCROLLBACK: usize = 5000;
+pub const SCROLLBACK: usize = 5000;
 
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -25,6 +29,10 @@ pub struct Autofill {
     pub fallback: bool,
 }
 
+/// Called with every chunk of output, while the screen is locked (so nothing can slip between a
+/// snapshot of the screen and the output that follows it). The background server uses it to forward output.
+pub type Tap = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 /// Everything needed to start a session.
 pub struct SpawnOpts {
     pub argv: Vec<String>,
@@ -35,9 +43,10 @@ pub struct SpawnOpts {
     pub cwd: Option<PathBuf>,
     /// If set, the child gets exactly this environment instead of ours (used by the background server).
     pub env: Option<Vec<(String, String)>>,
+    pub tap: Option<Tap>,
 }
 
-pub struct Session {
+pub struct PtySession {
     parser: Arc<Mutex<vt100::Parser>>,
     writer: SharedWriter,
     master: Box<dyn MasterPty + Send>,
@@ -57,17 +66,12 @@ pub struct Session {
     probed: Instant,
 }
 
-impl Session {
+impl PtySession {
     /// `argv[0]` is the program. Each `Autofill` is typed once, when the login or passphrase prompt that
     /// belongs to it appears. `login_expected` says the first generic `Password:` prompt is the login
     /// (password auth) rather than a later `su`.
-    #[cfg(test)]
-    pub fn spawn(argv: &[String], rows: u16, cols: u16, fills: Vec<Autofill>, login_expected: bool) -> Result<Self> {
-        Self::spawn_with(SpawnOpts { argv: argv.to_vec(), rows, cols, fills, login_expected, cwd: None, env: None })
-    }
-
     pub fn spawn_with(opts: SpawnOpts) -> Result<Self> {
-        let SpawnOpts { argv, rows, cols, fills, login_expected, cwd, env } = opts;
+        let SpawnOpts { argv, rows, cols, fills, login_expected, cwd, env, tap } = opts;
         let (rows, cols) = (rows.max(1), cols.max(1));
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -120,6 +124,9 @@ impl Session {
                         let Ok(mut p) = parser.lock() else { break };
                         p.process(&buf[..n]);
                         last_output.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                        if let Some(tap) = &tap {
+                            tap(&buf[..n]);
+                        }
                         let (row, col) = p.screen().cursor_position();
                         (row, p.screen().contents_between(row, 0, row, col).to_lowercase())
                     };
@@ -165,7 +172,7 @@ impl Session {
             });
         }
 
-        Ok(Session {
+        Ok(PtySession {
             parser,
             writer,
             master: pair.master,
@@ -256,6 +263,10 @@ impl Session {
         self.agent.as_ref()
     }
 
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+    }
+
     /// True once after an agent finishes a stretch of work.
     pub fn take_done(&mut self) -> bool {
         std::mem::take(&mut self.done)
@@ -281,9 +292,143 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for PtySession {
     fn drop(&mut self) {
         let _ = self.child.kill();
+    }
+}
+
+/// A terminal session as the interface sees it, wherever the process actually lives.
+pub struct Session {
+    pub exit_code: Option<u32>,
+    pub started: Instant,
+    backend: Backend,
+}
+
+enum Backend {
+    Pty(PtySession),
+    Remote(RemoteSession),
+}
+
+impl Session {
+    #[cfg(all(test, unix))]
+    pub fn spawn(argv: &[String], rows: u16, cols: u16, fills: Vec<Autofill>, login_expected: bool) -> Result<Self> {
+        let opts = SpawnOpts { argv: argv.to_vec(), rows, cols, fills, login_expected, cwd: None, env: None, tap: None };
+        Self::spawn_with(opts, None)
+    }
+
+    /// Starts a session in the background server if there is one, in this process otherwise.
+    pub fn spawn_with(opts: SpawnOpts, daemon: Option<&Daemon>) -> Result<Self> {
+        let backend = match daemon {
+            Some(d) => Backend::Remote(d.spawn(opts)?),
+            None => Backend::Pty(PtySession::spawn_with(opts)?),
+        };
+        Ok(Session { exit_code: None, started: Instant::now(), backend })
+    }
+
+    /// A session that already runs in the background server.
+    pub fn from_remote(r: RemoteSession) -> Self {
+        Session { exit_code: None, started: Instant::now(), backend: Backend::Remote(r) }
+    }
+
+    pub fn size(&self) -> (u16, u16) {
+        match &self.backend {
+            Backend::Pty(p) => p.size(),
+            Backend::Remote(r) => r.size(),
+        }
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        match &mut self.backend {
+            Backend::Pty(p) => p.resize(rows, cols),
+            Backend::Remote(r) => r.resize(rows, cols),
+        }
+    }
+
+    /// Is the remote asking for a `sudo`/`su` password right now?
+    pub fn sudo_prompt(&self) -> bool {
+        match &self.backend {
+            Backend::Pty(p) => p.sudo_prompt(),
+            Backend::Remote(r) => r.sudo_prompt(),
+        }
+    }
+
+    pub fn write(&self, bytes: &[u8]) {
+        match &self.backend {
+            Backend::Pty(p) => p.write(bytes),
+            Backend::Remote(r) => r.write(bytes),
+        }
+    }
+
+    /// Sets `exit_code` if the process has exited.
+    pub fn poll_exit(&mut self) {
+        match &mut self.backend {
+            Backend::Pty(p) => {
+                p.poll_exit();
+                self.exit_code = p.exit_code;
+            }
+            Backend::Remote(r) => self.exit_code = r.exit_code().or(self.exit_code),
+        }
+    }
+
+    /// Looks at what runs in the foreground (only for sessions of this process: the server does it for the rest).
+    pub fn poll_agent(&mut self) {
+        if let Backend::Pty(p) = &mut self.backend {
+            p.poll_agent();
+        }
+    }
+
+    /// The AI agent running in this terminal, if any.
+    pub fn agent(&self) -> Option<AgentInfo> {
+        match &self.backend {
+            Backend::Pty(p) => p.agent().cloned(),
+            Backend::Remote(r) => r.agent(),
+        }
+    }
+
+    /// True once after an agent finishes a stretch of work.
+    pub fn take_done(&mut self) -> bool {
+        match &mut self.backend {
+            Backend::Pty(p) => p.take_done(),
+            Backend::Remote(r) => r.take_done(),
+        }
+    }
+
+    pub fn with_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
+        match &self.backend {
+            Backend::Pty(p) => p.with_screen(f),
+            Backend::Remote(r) => r.with_screen(f),
+        }
+    }
+
+    /// Scrolls the view through the history (`delta` > 0 goes up).
+    pub fn scroll(&self, delta: i32) {
+        match &self.backend {
+            Backend::Pty(p) => p.scroll(delta),
+            Backend::Remote(r) => r.scroll(delta),
+        }
+    }
+
+    pub fn reset_scroll(&self) {
+        match &self.backend {
+            Backend::Pty(p) => p.reset_scroll(),
+            Backend::Remote(r) => r.reset_scroll(),
+        }
+    }
+
+    /// Ends the session for good (closing its tab). Merely dropping a remote session only detaches.
+    pub fn kill(&mut self) {
+        match &mut self.backend {
+            Backend::Pty(p) => p.kill(),
+            Backend::Remote(r) => r.kill(),
+        }
+    }
+
+    /// Tells the background server what this tab is (title, space, order...) so it can be rebuilt later.
+    pub fn set_meta(&self, meta: &serde_json::Value) {
+        if let Backend::Remote(r) = &self.backend {
+            r.set_meta(meta);
+        }
     }
 }
 
@@ -416,7 +561,7 @@ mod tests {
             s.poll_agent();
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert_eq!(s.agent().map(|a| a.name.as_str()), Some("claude"));
+        assert_eq!(s.agent().map(|a| a.name), Some("claude".to_string()));
         let end = Instant::now() + Duration::from_secs(5);
         while s.agent().is_some() && Instant::now() < end {
             s.poll_exit();
