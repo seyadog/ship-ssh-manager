@@ -3,5 +3,40 @@
 # Local user data: never commit
 servers.json
 vault.json
-*.bak
+servers.json.*
+vault.json.*
 .ship/
+config.yaml
+*.bak
+*.backup
+*.tmp
+
+# Keys and credentials
+*.key
+*.pem
+*.ppk
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+*.kdbx
+.env
+.env.*
+.netrc
+known_hosts*
+authorized_keys
+secrets/
+credentials*
+
+# Logs, dumps, editor and OS junk
+*.log
+*.pcap
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+.claude/
+CLAUDE.md
