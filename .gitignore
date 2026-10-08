@@ -1,1 +1,7 @@
 /target
+
+# Local user data: never commit
+servers.json
+vault.json
+*.bak
+.ship/
