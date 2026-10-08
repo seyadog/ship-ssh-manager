@@ -2,7 +2,7 @@
 
 An SSH connection manager for the terminal: a modern TUI with mouse support. Keep your servers in folders, see them by jump host, and open every session in a tab. A lightweight alternative to Tabby.
 
-> Status: Phase 1 (MVP) done, jump hosts included. Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Status: Phase 1 (MVP) done, with jump hosts and the encrypted password vault. Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Install & develop
 
@@ -66,6 +66,6 @@ Passwords you type in the server form (the login password or key passphrase, and
 
 ## Roadmap
 
-1. **MVP** — tree, forms, tabs, resize, errors, drag & drop, jump hosts. ✔
-2. `ship <alias>` / `list` / `add`, `~/.ssh/config` import, Ctrl+K, auto-reconnect.
-3. SFTP, tunnels, snippets, themes.
+1. **MVP** — tree, forms, tabs, resize, errors, drag & drop, jump hosts, password vault (with sudo fill). ✔
+2. **Next:** `ship <alias>` / `list` / `add`, `~/.ssh/config` import (mapping `ProxyJump` to jump hosts), Ctrl+K quick search, auto-reconnect.
+3. **Later:** SFTP, saved tunnels, snippets, themes (including per-server colors), remembering the chosen view.
