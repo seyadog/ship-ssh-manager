@@ -646,6 +646,11 @@ impl App {
         }
     }
 
+    /// Parent for a new folder: always a sibling of the selected item.
+    fn new_folder_parent(&self) -> Option<u64> {
+        self.store.parent_of(self.selected_node()?)
+    }
+
     fn persist(&mut self) {
         if let Err(e) = self.store.save() {
             self.set_flash(format!("Could not save: {e}"));
@@ -1240,7 +1245,7 @@ impl App {
         self.modal = Some(Modal::Prompt(Prompt {
             title: "New folder".into(),
             input: Input::default(),
-            kind: PromptKind::NewFolder(self.current_parent()),
+            kind: PromptKind::NewFolder(self.new_folder_parent()),
         }));
     }
 
