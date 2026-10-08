@@ -72,42 +72,47 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 // ---------------------------------------------------------------- sidebar
 
+/// Fills `r` with `bg` and writes `lines` on it (the first lines of the block), so a block is a solid box.
+fn block(f: &mut Frame, r: Rect, lines: Vec<Line<'static>>, bg: Color) {
+    f.render_widget(Paragraph::new(lines).style(Style::new().bg(bg)), r);
+}
+
 fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar && app.modal.is_none();
-    let block = Block::bordered()
+    let block_frame = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(if focused { ACCENT } else { MUTED }))
         .title(Span::styled(" ship ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = block_frame.inner(area);
+    f.render_widget(block_frame, area);
     if inner.height < 2 {
         return;
     }
-
-    // Action bar
-    let bar = Rect::new(inner.x, inner.y, inner.width, 1);
+    // With room, the blocks are tall and airy; in a short window they shrink back to one line.
+    let roomy = inner.height >= 24;
     let in_spaces = app.view == View::Spaces;
-    let add_srv = if in_spaces { " + Space " } else { " + Server " };
-    let add_dir = if in_spaces { " + Terminal " } else { " + Folder " };
-    let w1 = add_srv.width() as u16;
-    let w2 = add_dir.width() as u16;
-    let edit = " Edit ";
-    let w3 = edit.width() as u16;
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(add_srv, Style::new().fg(Color::Black).bg(ACCENT)),
-            Span::raw(" "),
-            Span::styled(add_dir, Style::new().fg(FG).bg(SEL_BG)),
-            Span::raw(" "),
-            Span::styled(edit, Style::new().fg(FG).bg(SEL_BG)),
-        ])),
-        bar,
-    );
-    app.layout.toolbar.push((Rect::new(bar.x, bar.y, w1, 1), Hit::AddServer));
-    app.layout.toolbar.push((Rect::new(bar.x + w1 + 1, bar.y, w2, 1), Hit::AddFolder));
-    app.layout.toolbar.push((Rect::new(bar.x + w1 + w2 + 2, bar.y, w3, 1), Hit::Edit));
+
+    // Action buttons
+    let btn_h: u16 = if roomy { 3 } else { 1 };
+    let buttons = [
+        (if in_spaces { " + Space " } else { " + Server " }, Hit::AddServer, true),
+        (if in_spaces { " + Terminal " } else { " + Folder " }, Hit::AddFolder, false),
+        (" Edit ", Hit::Edit, false),
+    ];
+    let mut bx = inner.x;
+    for (label, hit, primary) in buttons {
+        let w = (label.width() as u16).min(inner.width.saturating_sub(bx - inner.x));
+        let r = Rect::new(bx, inner.y, w, btn_h);
+        let (fg, bg) = if primary { (Color::Black, ACCENT) } else { (FG, SEL_BG) };
+        let mut lines: Vec<Line> = vec![Line::raw(""); btn_h as usize];
+        lines[btn_h as usize / 2] = Line::from(Span::styled(label, Style::new().fg(fg).bg(bg)));
+        block(f, r, lines, bg);
+        app.layout.toolbar.push((r, hit));
+        bx += w + 1;
+    }
 
     // View switch
+    let views_y = inner.y + btn_h + if roomy { 1 } else { 0 };
     let views = [
         (" Spaces ", View::Spaces, Hit::ViewSpaces),
         (" Folders ", View::Folders, Hit::ViewFolders),
@@ -123,16 +128,19 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             Style::new().fg(MUTED)
         };
         spans.push(Span::styled(label, style));
-        app.layout.toolbar.push((Rect::new(vx, inner.y + 1, w, 1), hit));
+        app.layout.toolbar.push((Rect::new(vx, views_y, w, 1), hit));
         vx += w;
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, inner.y + 1, inner.width, 1));
+    f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, views_y, inner.width, 1));
+
     // Terminal entry pinned at the bottom: this computer's shell, or a new terminal in the current space.
-    let bottom_h: u16 = if inner.height >= 6 { 1 } else { 0 };
+    let bottom_h: u16 = if inner.height >= 6 { btn_h } else { 0 };
     if bottom_h > 0 {
         let label = if in_spaces { " ⌂ New terminal here " } else { " ⌂ Local terminal " };
-        let r = Rect::new(inner.x, inner.y + inner.height - 1, (label.width() as u16).min(inner.width), 1);
-        f.render_widget(Paragraph::new(label).style(Style::new().fg(FG).bg(SEL_BG)), r);
+        let r = Rect::new(inner.x, inner.y + inner.height - bottom_h, (label.width() as u16).min(inner.width), bottom_h);
+        let mut lines: Vec<Line> = vec![Line::raw(""); bottom_h as usize];
+        lines[bottom_h as usize / 2] = Line::from(Span::styled(label, Style::new().fg(FG).bg(SEL_BG)));
+        block(f, r, lines, SEL_BG);
         app.layout.toolbar.push((r, Hit::LocalTerm));
     }
     // Keyboard focus on the header: highlight the chosen item.
@@ -144,8 +152,9 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Agents panel: every AI agent running in any terminal, above the terminal entry.
     let agents = app.agent_tabs();
-    let shown = agents.len().min(5);
-    let panel_h: u16 = if shown > 0 && inner.height >= 12 { shown as u16 + 1 } else { 0 };
+    let agent_h: u16 = if roomy { 2 } else { 1 };
+    let shown = agents.len().min(if roomy { 3 } else { 5 });
+    let panel_h: u16 = if shown > 0 && inner.height >= 12 { shown as u16 * agent_h + 1 + if roomy { 1 } else { 0 } } else { 0 };
     if panel_h > 0 {
         let top = inner.y + inner.height - bottom_h - panel_h;
         let extra = if agents.len() > shown { format!(" +{}", agents.len() - shown) } else { String::new() };
@@ -164,28 +173,42 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 ("○", MUTED)
             };
             let here = ti == app.active && tab.scope == app.scope && app.focus == Focus::Terminal;
-            let room = (inner.width as usize).saturating_sub(3 + info.name.width() + 2);
-            let place = fit(&app.tab_place(tab), room);
             let bg = if here { SEL_BG } else { Color::Reset };
-            let line = Line::from(vec![
-                Span::styled(format!("{dot} "), Style::new().fg(color).bg(bg)),
-                Span::styled(info.name.clone(), Style::new().fg(if tab.attention { GREEN } else { FG }).bg(bg)),
-                Span::styled(format!("  {place}"), Style::new().fg(MUTED).bg(bg)),
-            ]);
-            let r = Rect::new(inner.x, top + 1 + k as u16, inner.width, 1);
-            f.render_widget(Paragraph::new(line).style(Style::new().bg(bg)), r);
+            let place = fit(&app.tab_place(tab), (inner.width as usize).saturating_sub(4));
+            let name_style = Style::new().fg(if tab.attention { GREEN } else { FG }).bg(bg);
+            let r = Rect::new(inner.x, top + 1 + k as u16 * agent_h, inner.width, agent_h);
+            let lines = if roomy {
+                vec![
+                    Line::from(vec![
+                        Span::styled(format!(" {dot} "), Style::new().fg(color).bg(bg)),
+                        Span::styled(info.name.clone(), name_style.add_modifier(Modifier::BOLD)),
+                    ]),
+                    Line::from(Span::styled(format!("   {place}"), Style::new().fg(MUTED).bg(bg))),
+                ]
+            } else {
+                vec![Line::from(vec![
+                    Span::styled(format!("{dot} "), Style::new().fg(color).bg(bg)),
+                    Span::styled(info.name.clone(), name_style),
+                    Span::styled(format!("  {place}"), Style::new().fg(MUTED).bg(bg)),
+                ])]
+            };
+            block(f, r, lines, bg);
             app.layout.agents.push((r, ti));
         }
     }
 
-    let list_h = inner.height.saturating_sub(3 + bottom_h + panel_h);
-    let list = Rect::new(inner.x, inner.y + 3, inner.width, list_h);
+    // The list. Spaces are two-line blocks with a gap when there is room; servers stay dense.
+    let list_top = views_y + if roomy { 2 } else { 2 };
+    let list_h = (inner.y + inner.height).saturating_sub(list_top + bottom_h + panel_h + if roomy && bottom_h > 0 { 1 } else { 0 });
+    let list = Rect::new(inner.x, list_top, inner.width, list_h);
     app.layout.list = list;
+    let row_h: u16 = if roomy && in_spaces { 3 } else { 1 };
+    app.layout.row_h = row_h;
     if list.height == 0 {
         return;
     }
 
-    let h = list.height as usize;
+    let h = ((list.height / row_h) as usize).max(1);
     if app.selected < app.offset {
         app.offset = app.selected;
     } else if app.selected >= app.offset + h {
@@ -208,33 +231,57 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     let width = list.width as usize;
     for (n, row) in app.rows.iter().enumerate().skip(app.offset).take(h) {
-        let y = list.y + (n - app.offset) as u16;
+        let y = list.y + (n - app.offset) as u16 * row_h;
         let is_sel = n == app.selected;
         let is_drop = app.drop_hover == Some(n);
+        let mut style = Style::new();
+        let mut bg = Color::Reset;
+        if is_drop {
+            bg = DROP_BG;
+        } else if is_sel {
+            bg = SEL_BG;
+            if focused {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+        }
+        style = style.bg(bg);
+
+        if let NodeId::Space(id) = row.node {
+            // A solid two-line block: name, and under it the git branch (or the directory).
+            let sp = app.spaces.get(id);
+            let name = sp.map(|s| s.name.clone()).unwrap_or_else(|| "?".into());
+            let cwd = sp.map(|s| app.tilde(&s.cwd)).unwrap_or_default();
+            let mine = |t: &&Tab| t.scope == Scope::Space(id);
+            let live = app.tabs.iter().filter(mine).any(|t| t.session.exit_code.is_none());
+            let attention = app.tabs.iter().filter(mine).any(|t| t.attention);
+            let (dot, color) = if attention {
+                ("●", GREEN)
+            } else if live {
+                ("●", ACCENT)
+            } else {
+                ("○", MUTED)
+            };
+            let first = Line::from(vec![
+                Span::styled(format!(" {dot} "), Style::new().fg(color).bg(bg)),
+                Span::styled(
+                    fit(&name, width.saturating_sub(4)),
+                    style.fg(if attention { GREEN } else { FG }).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            let second = match app.branches.get(&id) {
+                Some(b) => Line::from(Span::styled(format!("   {}", fit(b, width.saturating_sub(4))), Style::new().fg(REMOTE_GREEN).bg(bg))),
+                None => Line::from(Span::styled(format!("   {}", fit(&cwd, width.saturating_sub(4))), Style::new().fg(MUTED).bg(bg))),
+            };
+            let block_h = if row_h >= 2 { 2 } else { 1 };
+            let lines = if block_h == 2 { vec![first, second] } else { vec![first] };
+            block(f, Rect::new(list.x, y, list.width, block_h), lines, bg);
+            continue;
+        }
+
         let indent = "  ".repeat(row.depth);
         let mut spans = vec![Span::raw(indent.clone())];
         match row.node {
-            NodeId::Space(id) => {
-                let name = app.spaces.get(id).map(|s| s.name.as_str()).unwrap_or("?");
-                let mine = |t: &&Tab| t.scope == Scope::Space(id);
-                let live = app.tabs.iter().filter(mine).any(|t| t.session.exit_code.is_none());
-                let attention = app.tabs.iter().filter(mine).any(|t| t.attention);
-                let (dot, color) = if attention {
-                    ("● ", GREEN)
-                } else if live {
-                    ("● ", ACCENT)
-                } else {
-                    ("○ ", MUTED)
-                };
-                spans.push(Span::styled(dot, Style::new().fg(color)));
-                spans.push(Span::styled(fit(name, width.saturating_sub(indent.width() + 3)), Style::new().fg(if attention { GREEN } else { FG })));
-                if let Some(b) = app.branches.get(&id) {
-                    let room = width.saturating_sub(indent.width() + 2 + name.width() + 2);
-                    if room > 3 {
-                        spans.push(Span::styled(format!("  {}", fit(b, room)), Style::new().fg(REMOTE_GREEN)));
-                    }
-                }
-            }
+            NodeId::Space(_) => {}
             NodeId::Folder(id) => {
                 let fo = app.store.folder(id);
                 let open = fo.is_some_and(|f| f.expanded);
@@ -268,15 +315,6 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                         spans.push(Span::styled(format!("  {}", fit(&via, room)), Style::new().fg(MUTED)));
                     }
                 }
-            }
-        }
-        let mut style = Style::new();
-        if is_drop {
-            style = style.bg(DROP_BG);
-        } else if is_sel {
-            style = style.bg(SEL_BG);
-            if focused {
-                style = style.add_modifier(Modifier::BOLD);
             }
         }
         let line = Line::from(spans).style(style);

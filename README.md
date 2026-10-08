@@ -63,7 +63,7 @@ A **space** is a project with its own terminals. Press `v` (or click `Spaces`, t
 - **Sound.** When an agent finishes a stretch of work, ship plays a sound (the system's player, or the terminal bell). Set `{"sound": false}` in `settings.json` (next to `servers.json`) to silence it.
 - Detection looks at the foreground process of the terminal and at its output: an agent that keeps drawing is working; when it goes quiet after a while, it is done. Linux and macOS only.
 
-`a` new space (opens a terminal) · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
+In a window tall enough, the buttons, spaces, agents and the terminal entry are big blocks (a space shows its branch or directory under its name); in a short window they shrink back to one line. `a` new space (opens a terminal) · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
 
 ## Sessions survive closing ship (Linux and macOS)
 

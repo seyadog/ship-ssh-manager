@@ -534,6 +534,8 @@ pub struct TabHit {
 pub struct Layout {
     pub sidebar: Rect,
     pub list: Rect,
+    /// Height in screen lines of one row of the list (spaces are taller blocks).
+    pub row_h: u16,
     pub tabbar: Rect,
     pub content: Rect,
     pub tabs: Vec<TabHit>,
@@ -644,6 +646,18 @@ impl App {
         };
         app.rebuild();
         app
+    }
+
+    /// A path with the home directory written as `~`.
+    pub fn tilde(&self, path: &str) -> String {
+        match home_dir() {
+            Some(h) => match Path::new(path).strip_prefix(&h) {
+                Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+                Ok(rest) => format!("~/{}", rest.display()),
+                Err(_) => path.to_string(),
+            },
+            None => path.to_string(),
+        }
     }
 
     pub fn set_flash(&mut self, msg: impl Into<String>) {
@@ -2126,7 +2140,7 @@ impl App {
 
     fn row_at(&self, x: u16, y: u16) -> Option<usize> {
         let l = self.layout.list;
-        if inside(l, x, y) { Some(self.offset + (y - l.y) as usize) } else { None }
+        if inside(l, x, y) { Some(self.offset + ((y - l.y) / self.layout.row_h.max(1)) as usize) } else { None }
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
@@ -2941,6 +2955,20 @@ mod tests {
         assert!(wait_for_dir(&mut app, &dir));
         assert_eq!(app.spaces.get(id).unwrap().name, "mine", "a name chosen by the user is kept");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_click_anywhere_in_a_tall_block_hits_its_row() {
+        let mut app = app_with_servers(3);
+        app.layout.list = Rect::new(1, 10, 30, 30);
+        app.layout.row_h = 3; // spaces are three-line blocks (two lines and a gap)
+        for (y, row) in [(10, 0), (11, 0), (12, 0), (13, 1), (15, 1), (16, 2)] {
+            assert_eq!(app.row_at(5, y), Some(row), "line {y}");
+        }
+        app.offset = 2;
+        assert_eq!(app.row_at(5, 10), Some(2), "rows are counted from the scroll offset");
+        app.layout.row_h = 1;
+        assert_eq!(app.row_at(5, 12), Some(4), "one-line rows as before");
     }
 
     #[test]
