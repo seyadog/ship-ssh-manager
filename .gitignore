@@ -5,6 +5,11 @@ servers.json
 vault.json
 servers.json.*
 vault.json.*
+spaces.json
+spaces.json.*
+settings.json
+*.sock
+daemon.log
 .ship/
 config.yaml
 *.bak
