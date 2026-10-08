@@ -4,6 +4,7 @@ mod secrets;
 mod session;
 mod store;
 mod ui;
+mod vault;
 
 use anyhow::Result;
 use crossterm::{
