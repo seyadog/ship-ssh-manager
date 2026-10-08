@@ -1,6 +1,10 @@
+mod agent;
 mod app;
 mod keys;
+mod notify;
 mod session;
+mod settings;
+mod spaces;
 mod store;
 mod tabby;
 mod ui;
@@ -28,6 +32,9 @@ fn main() -> Result<()> {
     let store = store::Store::load()?;
     let vault = vault::Vault::new(store::Store::config_dir().join("vault.json"));
     let mut app = app::App::new(store, vault);
+    app.spaces = spaces::Spaces::load()?;
+    app.sound = settings::Settings::load().sound;
+    app.rebuild();
 
     let mut terminal = ratatui::init();
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;

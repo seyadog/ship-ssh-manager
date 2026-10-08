@@ -4,7 +4,10 @@
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::agent::{self, AgentInfo};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 
@@ -22,6 +25,18 @@ pub struct Autofill {
     pub fallback: bool,
 }
 
+/// Everything needed to start a session.
+pub struct SpawnOpts {
+    pub argv: Vec<String>,
+    pub rows: u16,
+    pub cols: u16,
+    pub fills: Vec<Autofill>,
+    pub login_expected: bool,
+    pub cwd: Option<PathBuf>,
+    /// If set, the child gets exactly this environment instead of ours (used by the background server).
+    pub env: Option<Vec<(String, String)>>,
+}
+
 pub struct Session {
     parser: Arc<Mutex<vt100::Parser>>,
     writer: SharedWriter,
@@ -32,14 +47,27 @@ pub struct Session {
     /// Set when the user types, so an identical prompt line is recognised again.
     typed: Arc<AtomicBool>,
     pub exit_code: Option<u32>,
-    pub started: std::time::Instant,
+    pub started: Instant,
+    /// Milliseconds since `started` of the last output and of the last keypress.
+    last_output: Arc<AtomicU64>,
+    last_input: Arc<AtomicU64>,
+    tracker: agent::Tracker,
+    agent: Option<AgentInfo>,
+    done: bool,
+    probed: Instant,
 }
 
 impl Session {
     /// `argv[0]` is the program. Each `Autofill` is typed once, when the login or passphrase prompt that
     /// belongs to it appears. `login_expected` says the first generic `Password:` prompt is the login
     /// (password auth) rather than a later `su`.
+    #[cfg(test)]
     pub fn spawn(argv: &[String], rows: u16, cols: u16, fills: Vec<Autofill>, login_expected: bool) -> Result<Self> {
+        Self::spawn_with(SpawnOpts { argv: argv.to_vec(), rows, cols, fills, login_expected, cwd: None, env: None })
+    }
+
+    pub fn spawn_with(opts: SpawnOpts) -> Result<Self> {
+        let SpawnOpts { argv, rows, cols, fills, login_expected, cwd, env } = opts;
         let (rows, cols) = (rows.max(1), cols.max(1));
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -47,6 +75,15 @@ impl Session {
 
         let mut cmd = CommandBuilder::new(&argv[0]);
         cmd.args(&argv[1..]);
+        if let Some(env) = env {
+            cmd.env_clear();
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+        }
+        if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+            cmd.cwd(dir);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         let child = pair.slave.spawn_command(cmd).with_context(|| format!("could not run `{}`", argv[0]))?;
@@ -56,6 +93,9 @@ impl Session {
         let writer: SharedWriter = Arc::new(Mutex::new(pair.master.take_writer()?));
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
 
+        let started = Instant::now();
+        let last_output = Arc::new(AtomicU64::new(0));
+        let last_input = Arc::new(AtomicU64::new(0));
         let sudo_prompt = Arc::new(AtomicBool::new(false));
         let typed_flag = Arc::new(AtomicBool::new(false));
         {
@@ -63,6 +103,7 @@ impl Session {
             let writer = Arc::clone(&writer);
             let sudo_flag = Arc::clone(&sudo_prompt);
             let typed = Arc::clone(&typed_flag);
+            let last_output = Arc::clone(&last_output);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 16 * 1024];
                 let mut fills: Vec<Option<Autofill>> = fills.into_iter().map(Some).collect();
@@ -78,6 +119,7 @@ impl Session {
                     let line = {
                         let Ok(mut p) = parser.lock() else { break };
                         p.process(&buf[..n]);
+                        last_output.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
                         let (row, col) = p.screen().cursor_position();
                         (row, p.screen().contents_between(row, 0, row, col).to_lowercase())
                     };
@@ -132,7 +174,13 @@ impl Session {
             sudo_prompt,
             typed: typed_flag,
             exit_code: None,
-            started: std::time::Instant::now(),
+            started,
+            last_output,
+            last_input,
+            tracker: agent::Tracker::default(),
+            agent: None,
+            done: false,
+            probed: started,
         })
     }
 
@@ -161,6 +209,7 @@ impl Session {
         // Any input answers (or dismisses) the prompt.
         self.sudo_prompt.store(false, Ordering::Relaxed);
         self.typed.store(true, Ordering::Relaxed);
+        self.last_input.store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(bytes);
             let _ = w.flush();
@@ -174,6 +223,42 @@ impl Session {
                 self.exit_code = Some(status.exit_code());
             }
         }
+    }
+
+    /// Looks at what runs in the foreground and whether it is busy. Call often; it rate-limits itself.
+    pub fn poll_agent(&mut self) {
+        if self.exit_code.is_some() {
+            self.agent = None;
+            return;
+        }
+        let now = self.started.elapsed().as_millis() as u64;
+        if self.probed.elapsed() >= Duration::from_millis(500) {
+            self.probed = Instant::now();
+            let name = agent::foreground_agent(self.master.as_ref());
+            if name.map(String::from) != self.agent.as_ref().map(|a| a.name.clone()) {
+                self.agent = name.map(|n| AgentInfo { name: n.to_string(), working: false });
+            }
+        }
+        let finished = self.tracker.step(
+            now,
+            self.last_output.load(Ordering::Relaxed),
+            self.last_input.load(Ordering::Relaxed),
+            self.agent.is_some(),
+        );
+        if let Some(a) = self.agent.as_mut() {
+            a.working = self.tracker.working;
+        }
+        self.done |= finished;
+    }
+
+    /// The agent running in this terminal, if any.
+    pub fn agent(&self) -> Option<&AgentInfo> {
+        self.agent.as_ref()
+    }
+
+    /// True once after an agent finishes a stretch of work.
+    pub fn take_done(&mut self) -> bool {
+        std::mem::take(&mut self.done)
     }
 
     pub fn with_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
@@ -313,6 +398,33 @@ mod tests {
         assert!(s.sudo_prompt());
         s.write(b"x");
         assert!(!s.sudo_prompt());
+    }
+
+    /// A process called `claude` in the foreground is recognised as an agent, and stops being one when it exits.
+    #[test]
+    #[cfg(unix)]
+    fn detects_an_agent_in_the_foreground() {
+        let dir = std::env::temp_dir().join(format!("ship-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("claude");
+        let _ = std::fs::remove_file(&fake);
+        std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+        let argv = vec![fake.display().to_string(), "2".into()];
+        let mut s = Session::spawn(&argv, 24, 80, vec![], false).unwrap();
+        let end = Instant::now() + Duration::from_secs(3);
+        while s.agent().is_none() && Instant::now() < end {
+            s.poll_agent();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(s.agent().map(|a| a.name.as_str()), Some("claude"));
+        let end = Instant::now() + Duration::from_secs(5);
+        while s.agent().is_some() && Instant::now() < end {
+            s.poll_exit();
+            s.poll_agent();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(s.agent().is_none(), "the agent is gone once it exits");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

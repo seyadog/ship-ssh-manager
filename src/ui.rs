@@ -50,6 +50,7 @@ fn centered(w: u16, h: u16, area: Rect) -> Rect {
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     app.layout.tabs.clear();
+    app.layout.agents.clear();
     app.layout.toolbar.clear();
     app.layout.modal.clear();
 
@@ -85,8 +86,9 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Action bar
     let bar = Rect::new(inner.x, inner.y, inner.width, 1);
-    let add_srv = " + Server ";
-    let add_dir = " + Folder ";
+    let in_spaces = app.view == View::Spaces;
+    let add_srv = if in_spaces { " + Space " } else { " + Server " };
+    let add_dir = if in_spaces { " + Terminal " } else { " + Folder " };
     let w1 = add_srv.width() as u16;
     let w2 = add_dir.width() as u16;
     let edit = " Edit ";
@@ -106,7 +108,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.layout.toolbar.push((Rect::new(bar.x + w1 + w2 + 2, bar.y, w3, 1), Hit::Edit));
 
     // View switch
-    let views = [(" Folders ", View::Folders, Hit::ViewFolders), (" Jump hosts ", View::Jump, Hit::ViewJump)];
+    let views = [
+        (" Folders ", View::Folders, Hit::ViewFolders),
+        (" Jump hosts ", View::Jump, Hit::ViewJump),
+        (" Spaces ", View::Spaces, Hit::ViewSpaces),
+    ];
     let mut vx = inner.x;
     let mut spans = vec![];
     for (label, v, hit) in views {
@@ -121,9 +127,10 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         vx += w;
     }
     f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, inner.y + 1, inner.width, 1));
-    // Local terminal of this computer, pinned at the bottom.
-    if inner.height >= 6 {
-        let label = " ⌂ Local terminal ";
+    // Terminal entry pinned at the bottom: this computer's shell, or a new terminal in the current space.
+    let bottom_h: u16 = if inner.height >= 6 { 1 } else { 0 };
+    if bottom_h > 0 {
+        let label = if in_spaces { " ⌂ New terminal here " } else { " ⌂ Local terminal " };
         let r = Rect::new(inner.x, inner.y + inner.height - 1, (label.width() as u16).min(inner.width), 1);
         f.render_widget(Paragraph::new(label).style(Style::new().fg(FG).bg(SEL_BG)), r);
         app.layout.toolbar.push((r, Hit::LocalTerm));
@@ -135,7 +142,44 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let list = Rect::new(inner.x, inner.y + 3, inner.width, inner.height.saturating_sub(4));
+    // Agents panel: every AI agent running in any terminal, above the terminal entry.
+    let agents = app.agent_tabs();
+    let shown = agents.len().min(5);
+    let panel_h: u16 = if shown > 0 && inner.height >= 12 { shown as u16 + 1 } else { 0 };
+    if panel_h > 0 {
+        let top = inner.y + inner.height - bottom_h - panel_h;
+        let extra = if agents.len() > shown { format!(" +{}", agents.len() - shown) } else { String::new() };
+        f.render_widget(
+            Paragraph::new(format!("agents{extra}")).style(Style::new().fg(MUTED).add_modifier(Modifier::BOLD)),
+            Rect::new(inner.x, top, inner.width, 1),
+        );
+        for (k, &ti) in agents.iter().take(shown).enumerate() {
+            let tab = &app.tabs[ti];
+            let Some(info) = tab.session.agent() else { continue };
+            let (dot, color) = if tab.attention {
+                ("●", GREEN)
+            } else if info.working {
+                ("●", AMBER)
+            } else {
+                ("○", MUTED)
+            };
+            let here = ti == app.active && tab.scope == app.scope && app.focus == Focus::Terminal;
+            let room = (inner.width as usize).saturating_sub(3 + info.name.width() + 2);
+            let place = fit(&app.tab_place(tab), room);
+            let bg = if here { SEL_BG } else { Color::Reset };
+            let line = Line::from(vec![
+                Span::styled(format!("{dot} "), Style::new().fg(color).bg(bg)),
+                Span::styled(info.name.clone(), Style::new().fg(if tab.attention { GREEN } else { FG }).bg(bg)),
+                Span::styled(format!("  {place}"), Style::new().fg(MUTED).bg(bg)),
+            ]);
+            let r = Rect::new(inner.x, top + 1 + k as u16, inner.width, 1);
+            f.render_widget(Paragraph::new(line).style(Style::new().bg(bg)), r);
+            app.layout.agents.push((r, ti));
+        }
+    }
+
+    let list_h = inner.height.saturating_sub(3 + bottom_h + panel_h);
+    let list = Rect::new(inner.x, inner.y + 3, inner.width, list_h);
     app.layout.list = list;
     if list.height == 0 {
         return;
@@ -150,7 +194,9 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.offset = app.offset.min(app.rows.len().saturating_sub(1));
 
     if app.rows.is_empty() {
-        let lines: Vec<&str> = if app.view == View::Jump && !app.store.servers.is_empty() {
+        let lines: Vec<&str> = if app.view == View::Spaces {
+            vec!["No spaces yet.", "A space is a project directory", "with its own terminals.", "Click “+ Space” or press a."]
+        } else if app.view == View::Jump && !app.store.servers.is_empty() {
             vec!["No jump hosts yet.", "Edit a server and set “Jump via”: the", "bastion appears here with what is", "reached through it."]
         } else {
             vec!["No servers yet.", "Click “+ Server” or press a."]
@@ -168,6 +214,27 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let indent = "  ".repeat(row.depth);
         let mut spans = vec![Span::raw(indent.clone())];
         match row.node {
+            NodeId::Space(id) => {
+                let name = app.spaces.get(id).map(|s| s.name.as_str()).unwrap_or("?");
+                let mine = |t: &&Tab| t.scope == Scope::Space(id);
+                let live = app.tabs.iter().filter(mine).any(|t| t.session.exit_code.is_none());
+                let attention = app.tabs.iter().filter(mine).any(|t| t.attention);
+                let (dot, color) = if attention {
+                    ("● ", GREEN)
+                } else if live {
+                    ("● ", ACCENT)
+                } else {
+                    ("○ ", MUTED)
+                };
+                spans.push(Span::styled(dot, Style::new().fg(color)));
+                spans.push(Span::styled(fit(name, width.saturating_sub(indent.width() + 3)), Style::new().fg(if attention { GREEN } else { FG })));
+                if let Some(b) = app.branches.get(&id) {
+                    let room = width.saturating_sub(indent.width() + 2 + name.width() + 2);
+                    if room > 3 {
+                        spans.push(Span::styled(format!("  {}", fit(b, room)), Style::new().fg(REMOTE_GREEN)));
+                    }
+                }
+            }
             NodeId::Folder(id) => {
                 let fo = app.store.folder(id);
                 let open = fo.is_some_and(|f| f.expanded);
@@ -221,52 +288,64 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let end = area.x + area.width;
-    let n = app.tabs.len();
-    if n == 0 {
-        return;
-    }
-    // Shrink titles so that as many tabs as possible fit, then scroll the bar so the active tab is always visible.
-    let avail = area.width.saturating_sub(1) as usize;
-    let max_title = (avail / n).saturating_sub(9).clamp(6, 20);
-    let cell = |i: usize| fit(&app.tabs[i].title, max_title).width() + 8 + 1;
-    let active = app.active.min(n - 1);
-    let mut start = 0;
-    while start < active && (start..=active).map(cell).sum::<usize>() > avail {
-        start += 1;
-    }
-
+    let scoped = app.scoped();
+    let n = scoped.len();
     let mut x = area.x + 1;
     let mut hits = vec![];
-    for i in start..n {
-        let tab = &app.tabs[i];
-        let dead = tab.session.exit_code.is_some();
-        let title = fit(&tab.title, max_title);
-        let num = if i < 9 { format!("{} ", i + 1) } else { "  ".to_string() };
-        let text = format!(" {num}{} {} ✕ ", if dead { "○" } else { "●" }, title);
-        let w = text.width() as u16;
-        if x + w > end {
-            break;
+    if n > 0 {
+        // Shrink titles so that as many tabs as possible fit, then scroll the bar so the active tab is always visible.
+        let avail = area.width.saturating_sub(4) as usize;
+        let max_title = (avail / n).saturating_sub(9).clamp(6, 20);
+        let cell = |p: usize| fit(&app.tabs[scoped[p]].title, max_title).width() + 8 + 1;
+        let active = scoped.iter().position(|&g| g == app.active).unwrap_or(0);
+        let mut start = 0;
+        while start < active && (start..=active).map(cell).sum::<usize>() > avail {
+            start += 1;
         }
-        let is_active = i == active;
-        let dot = if dead { RED } else { GREEN };
-        let bg = if is_active { SEL_BG } else { Color::Reset };
-        let fg = if is_active { FG } else { MUTED };
-        let rect = Rect::new(x, area.y, w, 1);
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" ", Style::new().bg(bg)),
-                Span::styled(num, Style::new().fg(MUTED).bg(bg)),
-                Span::styled(if dead { "○ " } else { "● " }, Style::new().fg(dot).bg(bg)),
-                Span::styled(
-                    title,
-                    Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
-                ),
-                Span::styled(" ✕ ", Style::new().fg(MUTED).bg(bg)),
-            ])),
-            rect,
-        );
-        hits.push(TabHit { idx: i, rect, close: Rect::new(x + w - 3, area.y, 3, 1) });
-        x += w + 1;
+        for pos in start..n {
+            let i = scoped[pos];
+            let tab = &app.tabs[i];
+            let dead = tab.session.exit_code.is_some();
+            let title = fit(&tab.title, max_title);
+            let num = if pos < 9 { format!("{} ", pos + 1) } else { "  ".to_string() };
+            let text = format!(" {num}{} {} ✕ ", if dead { "○" } else { "●" }, title);
+            let w = text.width() as u16;
+            if x + w > end {
+                break;
+            }
+            let is_active = i == app.active;
+            let dot = if dead {
+                RED
+            } else if tab.attention {
+                AMBER
+            } else {
+                GREEN
+            };
+            let bg = if is_active { SEL_BG } else { Color::Reset };
+            let fg = if is_active { FG } else { MUTED };
+            let rect = Rect::new(x, area.y, w, 1);
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" ", Style::new().bg(bg)),
+                    Span::styled(num, Style::new().fg(MUTED).bg(bg)),
+                    Span::styled(if dead { "○ " } else { "● " }, Style::new().fg(dot).bg(bg)),
+                    Span::styled(
+                        title,
+                        Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
+                    ),
+                    Span::styled(" ✕ ", Style::new().fg(MUTED).bg(bg)),
+                ])),
+                rect,
+            );
+            hits.push(TabHit { idx: i, rect, close: Rect::new(x + w - 3, area.y, 3, 1) });
+            x += w + 1;
+        }
+    }
+    // “+” opens a new terminal in this scope.
+    if app.scope != Scope::Space(0) && x + 3 <= end {
+        let r = Rect::new(x, area.y, 3, 1);
+        f.render_widget(Paragraph::new(" + ").style(Style::new().fg(ACCENT)), r);
+        app.layout.toolbar.push((r, Hit::NewTab));
     }
     app.layout.tabs = hits;
 }
@@ -274,8 +353,8 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
 // ---------------------------------------------------------------- contenido
 
 fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.tabs.is_empty() {
-        return draw_welcome(f, area);
+    if app.scoped().is_empty() {
+        return draw_welcome(f, app, area);
     }
     let focused = app.focus == Focus::Terminal && app.modal.is_none();
     let idx = app.active.min(app.tabs.len() - 1);
@@ -374,18 +453,31 @@ fn map_color(c: vt100::Color) -> Color {
     }
 }
 
-fn draw_welcome(f: &mut Frame, area: Rect) {
+fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
     let logo = ["┏━┓╻ ╻╻┏━┓", "┗━┓┣━┫┃┣━┛", "┗━┛╹ ╹╹╹  "];
     let mut lines: Vec<Line> = logo
         .iter()
         .map(|l| Line::from(Span::styled(*l, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))))
         .collect();
     lines.push(Line::raw(""));
-    for t in [
-        "Double-click a server to open a session.",
-        "Drag servers and folders to reorganize them.",
-        "F6 switches between the panel and the terminal.",
-    ] {
+    let hints: Vec<String> = match app.scope {
+        Scope::Ssh => vec![
+            "Double-click a server to open a session.".into(),
+            "Drag servers and folders to reorganize them.".into(),
+            "F6 switches between the panel and the terminal.".into(),
+        ],
+        Scope::Space(0) => vec!["No spaces yet.".into(), "Press a (or “+ Space”) and give it a project directory.".into()],
+        Scope::Space(id) => {
+            let sp = app.spaces.get(id);
+            vec![
+                sp.map(|s| s.name.clone()).unwrap_or_default(),
+                sp.map(|s| s.cwd.clone()).unwrap_or_default(),
+                "Press Enter or t to open a terminal here.".into(),
+                "Run claude, opencode… in it: it shows under “agents”.".into(),
+            ]
+        }
+    };
+    for t in hints {
         lines.push(Line::from(Span::styled(t, Style::new().fg(MUTED))));
     }
     let h = lines.len() as u16;
@@ -402,6 +494,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         "Esc cancel".to_string()
     } else if app.focus == Focus::Terminal {
         "F6 panel · Alt+←/→ tabs · Alt+Shift+←/→ move · Alt+W close · F2 rename · Shift+PgUp scrollback".to_string()
+    } else if app.header.is_some() {
+        "←→ choose · Enter activate · ↓ back to the list · Esc list".to_string()
+    } else if app.view == View::Spaces && app.header.is_none() {
+        "↑↓ choose · Enter open · a new space · e rename · d delete · t terminal · Alt+n next agent · q quit".to_string()
     } else if app.header.is_some() {
         "←→ choose · Enter activate · ↓ back to the list · Esc list".to_string()
     } else {

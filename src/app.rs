@@ -1,13 +1,14 @@
 //! Application state and keyboard/mouse handling. Drawing lives in `ui.rs`.
 
 use crate::keys;
-use crate::session::{Autofill, Session};
+use crate::session::{Autofill, Session, SpawnOpts};
+use crate::spaces::{self, Spaces};
 use crate::store::{Auth, NodeId, Server, Store};
 use crate::vault::{Kind, UnlockError, Vault};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -53,6 +54,8 @@ pub struct Input {
     pub value: String,
     /// Cursor position, in characters.
     pub cursor: usize,
+    /// The next edit replaces the whole text (a suggested value that is easy to overwrite).
+    fresh: bool,
 }
 
 impl Drop for Input {
@@ -63,7 +66,21 @@ impl Drop for Input {
 
 impl Input {
     pub fn new(s: &str) -> Self {
-        Input { value: s.to_string(), cursor: s.chars().count() }
+        Input { value: s.to_string(), cursor: s.chars().count(), fresh: false }
+    }
+
+    /// Like `new`, but the first thing typed replaces the text.
+    pub fn suggested(s: &str) -> Self {
+        let mut i = Input::new(s);
+        i.fresh = true;
+        i
+    }
+
+    fn take_fresh(&mut self) {
+        if std::mem::take(&mut self.fresh) {
+            self.value.clear();
+            self.cursor = 0;
+        }
     }
 
     fn byte_idx(&self) -> usize {
@@ -71,6 +88,7 @@ impl Input {
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        self.take_fresh();
         for c in s.chars().filter(|c| !c.is_control()) {
             let i = self.byte_idx();
             self.value.insert(i, c);
@@ -80,7 +98,34 @@ impl Input {
 
     pub fn handle(&mut self, key: KeyEvent) {
         let plain = !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if matches!(key.code, KeyCode::Backspace | KeyCode::Delete) && self.fresh {
+            return self.take_fresh();
+        }
+        if !matches!(key.code, KeyCode::Char(_)) || ctrl {
+            self.fresh = false;
+        }
         match key.code {
+            KeyCode::Char('u') if ctrl => {
+                let at = self.byte_idx();
+                self.value.drain(..at);
+                self.cursor = 0;
+            }
+            KeyCode::Char('w') if ctrl => {
+                let chars: Vec<char> = self.value.chars().collect();
+                let mut i = self.cursor;
+                while i > 0 && chars[i - 1].is_whitespace() {
+                    i -= 1;
+                }
+                while i > 0 && !chars[i - 1].is_whitespace() {
+                    i -= 1;
+                }
+                let kept: String = chars[..i].iter().chain(chars[self.cursor..].iter()).collect();
+                self.value = kept;
+                self.cursor = i;
+            }
+            KeyCode::Char('a') if ctrl => self.cursor = 0,
+            KeyCode::Char('e') if ctrl => self.cursor = self.value.chars().count(),
             KeyCode::Char(c) if plain => self.insert_str(&c.to_string()),
             KeyCode::Backspace if self.cursor > 0 => {
                 self.cursor -= 1;
@@ -114,10 +159,22 @@ pub enum Focus {
     Terminal,
 }
 
+/// Where a tab lives: the SSH section, or one space. Each has its own tab bar, so what runs in a space
+/// (an AI agent, say) never shows up among the SSH tabs. `Space(0)` stands for "no space selected".
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Scope {
+    Ssh,
+    Space(u64),
+}
+
 pub struct Tab {
+    pub id: u64,
     pub title: String,
     pub server_id: u64,
+    pub scope: Scope,
     pub session: Session,
+    /// An agent finished here and the user has not looked yet.
+    pub attention: bool,
 }
 
 // ---------------------------------------------------------------- modales
@@ -337,6 +394,8 @@ fn looks_like_private_key(path: &Path) -> bool {
 }
 
 pub enum PromptKind {
+    NewSpace,
+    RenameSpace(u64),
     NewFolder(Option<u64>),
     RenameFolder(u64),
     RenameTab(usize),
@@ -351,6 +410,7 @@ pub struct Prompt {
 pub enum ConfirmAction {
     DeleteSecret(u64, Kind),
     Delete(NodeId),
+    DeleteSpace(u64),
     Quit,
 }
 
@@ -450,6 +510,8 @@ pub enum Hit {
     AddFolder,
     Edit,
     LocalTerm,
+    ViewSpaces,
+    NewTab,
     Field(usize),
     Browse,
     Save,
@@ -458,9 +520,9 @@ pub enum Hit {
     No,
 }
 
-/// Sidebar menu items in keyboard order: the button row (0..3), the view row (3..5), and the local terminal at the bottom (5).
-pub const HEADER: [Hit; 6] =
-    [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewFolders, Hit::ViewJump, Hit::LocalTerm];
+/// Sidebar menu items in keyboard order: the button row (0..3), the view row (3..6), and the terminal entry at the bottom (6).
+pub const HEADER: [Hit; 7] =
+    [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewFolders, Hit::ViewJump, Hit::ViewSpaces, Hit::LocalTerm];
 
 /// `Tab::server_id` of the terminal of this computer (real servers start at 1).
 pub const LOCAL: u64 = 0;
@@ -480,6 +542,8 @@ pub struct Layout {
     pub tabbar: Rect,
     pub content: Rect,
     pub tabs: Vec<TabHit>,
+    /// Rows of the agents panel: (area, index in `App::tabs`).
+    pub agents: Vec<(Rect, usize)>,
     pub toolbar: Vec<(Rect, Hit)>,
     pub modal: Vec<(Rect, Hit)>,
     pub picker_list: Rect,
@@ -493,6 +557,7 @@ fn inside(r: Rect, x: u16, y: u16) -> bool {
 pub enum View {
     Folders,
     Jump,
+    Spaces,
 }
 
 enum Drag {
@@ -510,7 +575,18 @@ pub struct App {
     pub selected: usize,
     pub offset: usize,
     pub tabs: Vec<Tab>,
+    /// Index in `tabs` of the active tab of the current scope (meaningless while the scope has no tabs).
     pub active: usize,
+    pub scope: Scope,
+    /// The last active tab (by id) of each scope, to come back to it.
+    remembered: HashMap<Scope, u64>,
+    next_tab_id: u64,
+    pub spaces: Spaces,
+    /// Git branch of each space's directory, refreshed every few seconds.
+    pub branches: HashMap<u64, String>,
+    branches_at: Option<Instant>,
+    /// Play a sound when an agent finishes.
+    pub sound: bool,
     pub focus: Focus,
     pub modal: Option<Modal>,
     pub layout: Layout,
@@ -539,6 +615,13 @@ impl App {
             offset: 0,
             tabs: vec![],
             active: 0,
+            scope: Scope::Ssh,
+            remembered: HashMap::new(),
+            next_tab_id: 0,
+            spaces: Spaces::default(),
+            branches: HashMap::new(),
+            branches_at: None,
+            sound: true,
             focus: Focus::Sidebar,
             modal: None,
             layout: Layout::default(),
@@ -590,6 +673,7 @@ impl App {
         match self.view {
             View::Folders => walk(&self.store, None, 0, &mut self.rows),
             View::Jump => walk_jump(&self.store, None, 0, &self.jump_collapsed, &mut self.rows),
+            View::Spaces => self.rows.extend(self.spaces.spaces.iter().map(|s| Row { node: NodeId::Space(s.id), depth: 0 })),
         }
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
     }
@@ -601,7 +685,8 @@ impl App {
                     || self.store.servers.iter().any(|s| s.parent == Some(id))
             }
             (NodeId::Server(id), View::Jump) => self.store.servers.iter().any(|s| s.jump == Some(id)),
-            (NodeId::Server(_), View::Folders) => false,
+            (NodeId::Server(_), _) => false,
+            (NodeId::Space(_), _) => false,
         }
     }
 
@@ -609,6 +694,7 @@ impl App {
         match node {
             NodeId::Folder(id) => self.store.folder(id).is_some_and(|f| f.expanded),
             NodeId::Server(id) => !self.jump_collapsed.contains(&id),
+            NodeId::Space(_) => false,
         }
     }
 
@@ -627,6 +713,7 @@ impl App {
                     self.jump_collapsed.insert(id);
                 }
             }
+            NodeId::Space(_) => {}
         }
         self.rebuild();
     }
@@ -639,8 +726,104 @@ impl App {
         self.view = view;
         self.offset = 0;
         self.rebuild();
-        if let Some(n) = keep {
+        if view == View::Spaces {
+            // Start on the space whose tabs are on screen.
+            match self.scope {
+                Scope::Space(id) => self.select_node(NodeId::Space(id)),
+                Scope::Ssh => self.selected = 0,
+            }
+        } else if let Some(n) = keep {
             self.select_node(n);
+        }
+        self.sync_scope();
+    }
+
+    // ------------------------------------------------------------ scopes
+
+    /// The scope whose tabs the current view shows: a space in the Spaces view, the SSH section otherwise.
+    fn sync_scope(&mut self) {
+        let want = match self.view {
+            View::Spaces => match self.selected_node() {
+                Some(NodeId::Space(id)) => Scope::Space(id),
+                _ => Scope::Space(0),
+            },
+            _ => Scope::Ssh,
+        };
+        self.set_scope(want);
+    }
+
+    fn set_scope(&mut self, scope: Scope) {
+        if self.scope == scope {
+            return;
+        }
+        if let Some(t) = self.tabs.get(self.active).filter(|t| t.scope == self.scope) {
+            self.remembered.insert(self.scope, t.id);
+        }
+        self.scope = scope;
+        let back = self.remembered.get(&scope).and_then(|id| self.tabs.iter().position(|t| t.id == *id));
+        if let Some(i) = back {
+            self.active = i;
+        }
+        self.fix_active();
+    }
+
+    /// Indices in `tabs` of the tabs of the current scope, in order.
+    pub fn scoped(&self) -> Vec<usize> {
+        self.tabs.iter().enumerate().filter(|(_, t)| t.scope == self.scope).map(|(i, _)| i).collect()
+    }
+
+    /// Keeps `active` pointing at a tab of the current scope, and the keyboard off an empty terminal.
+    fn fix_active(&mut self) {
+        let sc = self.scoped();
+        match sc.last() {
+            None => self.focus = Focus::Sidebar,
+            Some(&last) if !sc.contains(&self.active) => self.active = last,
+            _ => {}
+        }
+    }
+
+    /// Indices of the tabs where an AI agent is running, in any scope.
+    pub fn agent_tabs(&self) -> Vec<usize> {
+        self.tabs.iter().enumerate().filter(|(_, t)| t.session.agent().is_some()).map(|(i, _)| i).collect()
+    }
+
+    /// Name shown next to an agent: the space it runs in.
+    pub fn tab_place(&self, t: &Tab) -> String {
+        match t.scope {
+            Scope::Space(id) => self.spaces.get(id).map(|s| s.name.clone()).unwrap_or_default(),
+            Scope::Ssh => "local".into(),
+        }
+    }
+
+    /// Shows tab `idx` wherever it lives and puts the keyboard on it.
+    pub fn focus_tab(&mut self, idx: usize) {
+        let Some(scope) = self.tabs.get(idx).map(|t| t.scope) else { return };
+        match scope {
+            Scope::Space(id) => {
+                self.set_view(View::Spaces);
+                self.select_node(NodeId::Space(id));
+            }
+            Scope::Ssh if self.view == View::Spaces => self.set_view(View::Folders),
+            Scope::Ssh => {}
+        }
+        self.sync_scope();
+        self.active = idx;
+        self.tabs[idx].attention = false;
+        self.focus = Focus::Terminal;
+    }
+
+    /// Alt+N: the agent that wants attention, else the next one after the current tab.
+    fn next_agent(&mut self) {
+        let agents = self.agent_tabs();
+        let pick = agents
+            .iter()
+            .copied()
+            .find(|&i| self.tabs[i].attention)
+            .or_else(|| agents.iter().copied().find(|&i| i > self.active))
+            .or_else(|| agents.first().copied());
+        match pick {
+            Some(i) => self.focus_tab(i),
+            None => self.set_flash("No agents running"),
         }
     }
 
@@ -679,8 +862,33 @@ impl App {
 
     /// Called on every pass of the event loop.
     pub fn tick(&mut self) {
+        let mut finished = false;
         for t in &mut self.tabs {
             t.session.poll_exit();
+            t.session.poll_agent();
+            if t.session.take_done() {
+                t.attention = true;
+                finished = true;
+            }
+        }
+        if finished && self.sound {
+            crate::notify::ring();
+        }
+        // Looking at an agent's tab is the attention it asked for.
+        if self.focus == Focus::Terminal && self.modal.is_none() {
+            let scope = self.scope;
+            if let Some(t) = self.tabs.get_mut(self.active).filter(|t| t.scope == scope) {
+                t.attention = false;
+            }
+        }
+        if self.branches_at.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
+            self.branches_at = Some(Instant::now());
+            self.branches = self
+                .spaces
+                .spaces
+                .iter()
+                .filter_map(|s| spaces::git_branch(Path::new(&expand_tilde(&s.cwd))).map(|b| (s.id, b)))
+                .collect();
         }
         if self.flash.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(5)) {
             self.flash = None;
@@ -725,15 +933,30 @@ impl App {
 
     /// Starts `ssh` for a server, in a new tab or replacing the session of tab `reuse`.
     fn connect(&mut self, id: u64, reuse: Option<usize>, fills: Vec<Autofill>) {
+        let reuse = reuse.filter(|&i| i < self.tabs.len());
+        // Where the tab lives: a reconnected tab stays put, a local terminal opens in the current space,
+        // and servers always go in the SSH section.
+        let in_space = matches!(self.scope, Scope::Space(s) if s != 0);
+        let scope = match reuse {
+            Some(i) => self.tabs[i].scope,
+            None if id == LOCAL && in_space => self.scope,
+            None => Scope::Ssh,
+        };
+        if reuse.is_none() && id == LOCAL && self.view == View::Spaces && !in_space {
+            return self.set_flash("Create a space first (press a)");
+        }
+        let cwd = match scope {
+            Scope::Space(sid) => self.spaces.get(sid).map(|s| PathBuf::from(expand_tilde(&s.cwd))),
+            Scope::Ssh => None,
+        };
         let (argv, title, login_expected) = if id == LOCAL {
-            (local_shell(), "Local".to_string(), false)
+            (local_shell(), if cwd.is_some() { "shell" } else { "Local" }.to_string(), false)
         } else {
             let Some(server) = self.store.server(id).cloned() else {
                 return self.set_flash("This server no longer exists");
             };
             (ssh_argv(&self.store, &server), server.name.clone(), server.auth == Auth::Password)
         };
-        let reuse = reuse.filter(|&i| i < self.tabs.len());
         let (rows, cols) = match reuse {
             Some(i) => self.tabs[i].session.size(),
             None => {
@@ -741,11 +964,14 @@ impl App {
                 if c.width > 0 && c.height > 0 { (c.height, c.width) } else { (24, 80) }
             }
         };
-        match Session::spawn(&argv, rows, cols, fills, login_expected) {
+        let opts = SpawnOpts { argv: argv.clone(), rows, cols, fills, login_expected, cwd, env: None };
+        match Session::spawn_with(opts) {
             Ok(session) => match reuse {
                 Some(i) => self.tabs[i].session = session,
                 None => {
-                    self.tabs.push(Tab { title, server_id: id, session });
+                    self.next_tab_id += 1;
+                    self.tabs.push(Tab { id: self.next_tab_id, title, server_id: id, scope, session, attention: false });
+                    self.set_scope(scope);
                     self.active = self.tabs.len() - 1;
                     self.focus = Focus::Terminal;
                 }
@@ -1063,18 +1289,36 @@ impl App {
         if idx >= self.tabs.len() {
             return;
         }
+        // The tab to land on: its neighbour in the same scope.
+        let scope = self.tabs[idx].scope;
+        let same: Vec<usize> = self.tabs.iter().enumerate().filter(|(_, t)| t.scope == scope).map(|(i, _)| i).collect();
+        let pos = same.iter().position(|&i| i == idx).unwrap_or(0);
+        let neighbour = if pos > 0 { Some(same[pos - 1]) } else { same.get(1).copied() };
+        let was_active = idx == self.active;
         self.tabs.remove(idx);
-        if self.active > idx || self.active >= self.tabs.len() {
-            self.active = self.active.saturating_sub(1);
+        if self.active > idx {
+            self.active -= 1;
         }
-        if self.tabs.is_empty() {
-            self.focus = Focus::Sidebar;
+        if was_active {
+            if let Some(n) = neighbour {
+                self.active = if n > idx { n - 1 } else { n };
+            }
         }
+        self.fix_active();
     }
 
     /// Closes the open session of the selected server (the active tab if it is that server's, else the newest one).
     fn close_selected_tab(&mut self) {
-        let Some(NodeId::Server(id)) = self.selected_node() else { return };
+        let id = match self.selected_node() {
+            Some(NodeId::Server(id)) => id,
+            Some(NodeId::Space(_)) => {
+                return match self.scoped().contains(&self.active) {
+                    true => self.close_tab(self.active),
+                    false => self.set_flash("No open terminal in this space"),
+                };
+            }
+            _ => return,
+        };
         let idx = match self.tabs.get(self.active) {
             Some(t) if t.server_id == id => Some(self.active),
             _ => self.tabs.iter().rposition(|t| t.server_id == id),
@@ -1087,8 +1331,8 @@ impl App {
 
     /// Switches to tab `i` (0-based) and puts the keyboard on its terminal.
     fn goto_tab(&mut self, i: usize) {
-        if i < self.tabs.len() {
-            self.active = i;
+        if let Some(&g) = self.scoped().get(i) {
+            self.active = g;
             self.focus = Focus::Terminal;
         } else {
             self.set_flash(format!("No tab {}", i + 1));
@@ -1117,13 +1361,20 @@ impl App {
     // ------------------------------------------------------------ teclado
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        self.on_key_inner(key);
+        self.sync_scope();
+    }
+
+    fn on_key_inner(&mut self, key: KeyEvent) {
         if self.modal.is_some() {
             self.modal_key(key);
             return;
         }
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let n = self.tabs.len();
+        let scoped = self.scoped();
+        let n = scoped.len();
+        let pos = scoped.iter().position(|&g| g == self.active).unwrap_or(0);
         match key.code {
             KeyCode::F(6) => {
                 self.focus = if self.focus == Focus::Terminal || n == 0 { Focus::Sidebar } else { Focus::Terminal };
@@ -1134,10 +1385,11 @@ impl App {
                 self.modal = self.gate(Pending::FillSudo(self.active));
                 return;
             }
-            KeyCode::Left if alt && shift => return self.move_tab(self.active, self.active.saturating_sub(1)),
-            KeyCode::Right if alt && shift && n > 0 => return self.move_tab(self.active, (self.active + 1).min(n - 1)),
-            KeyCode::Left if alt && n > 0 => return self.active = (self.active + n - 1) % n,
-            KeyCode::Right if alt && n > 0 => return self.active = (self.active + 1) % n,
+            KeyCode::Left if alt && shift && n > 0 => return self.move_tab(self.active, scoped[pos.saturating_sub(1)]),
+            KeyCode::Right if alt && shift && n > 0 => return self.move_tab(self.active, scoped[(pos + 1).min(n - 1)]),
+            KeyCode::Left if alt && n > 0 => return self.active = scoped[(pos + n - 1) % n],
+            KeyCode::Right if alt && n > 0 => return self.active = scoped[(pos + 1) % n],
+            KeyCode::Char('n') if alt => return self.next_agent(),
             KeyCode::Char('w') if alt && n > 0 => return self.close_tab(self.active),
             KeyCode::Char(c @ '1'..='9') if alt => return self.goto_tab(c as usize - '1' as usize),
             _ => {}
@@ -1172,23 +1424,36 @@ impl App {
         }
     }
 
+    /// The header item (index into `HEADER`) of the current view.
+    fn view_index(&self) -> usize {
+        match self.view {
+            View::Folders => 3,
+            View::Jump => 4,
+            View::Spaces => 5,
+        }
+    }
+
     /// Runs a sidebar header button (by mouse or keyboard).
     fn activate(&mut self, hit: Hit) {
+        let spaces = self.view == View::Spaces;
         match hit {
             Hit::ViewFolders => self.set_view(View::Folders),
             Hit::ViewJump => self.set_view(View::Jump),
+            Hit::ViewSpaces => self.set_view(View::Spaces),
+            Hit::AddServer if spaces => self.new_space_prompt(),
             Hit::AddServer => self.new_server_form(),
+            Hit::AddFolder if spaces => self.open_server(LOCAL),
             Hit::AddFolder => self.new_folder_prompt(),
             Hit::Edit => self.edit_selected(),
-            Hit::LocalTerm => self.open_server(LOCAL),
+            Hit::LocalTerm | Hit::NewTab => self.open_server(LOCAL),
             _ => {}
         }
     }
 
     /// Keys while the header has focus. Returns true if the key was consumed.
     fn header_key(&mut self, i: usize, key: KeyEvent) -> bool {
-        if i == 5 {
-            // The local terminal entry sits below the list.
+        if i == 6 {
+            // The terminal entry sits below the list.
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') | KeyCode::Esc => self.header = None,
                 KeyCode::Enter | KeyCode::Char(' ') => {
@@ -1200,7 +1465,7 @@ impl App {
             }
             return true;
         }
-        let (row_start, row_end) = if i < 3 { (0, 3) } else { (3, 5) };
+        let (row_start, row_end) = if i < 3 { (0, 3) } else { (3, 6) };
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => self.header = Some(i.saturating_sub(1).max(row_start)),
             KeyCode::Right | KeyCode::Char('l') => self.header = Some((i + 1).min(row_end - 1)),
@@ -1210,7 +1475,7 @@ impl App {
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.header = if i < 3 { Some(if self.view == View::Folders { 3 } else { 4 }) } else { None }
+                self.header = if i < 3 { Some(self.view_index()) } else { None }
             }
             KeyCode::Esc => self.header = None,
             KeyCode::Enter | KeyCode::Char(' ') => {
@@ -1238,27 +1503,34 @@ impl App {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if alt => self.shift_selected(-1),
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
-            KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => {
-                self.header = Some(if self.view == View::Folders { 3 } else { 4 });
-            }
+            KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => self.header = Some(self.view_index()),
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') if self.selected >= last => self.header = Some(5),
+            KeyCode::Down | KeyCode::Char('j') if self.selected >= last => self.header = Some(6),
             KeyCode::Down | KeyCode::Char('j') => self.selected += 1,
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
             KeyCode::End | KeyCode::Char('G') => self.selected = last,
+            KeyCode::Right | KeyCode::Char('l') if matches!(self.selected_node(), Some(NodeId::Space(_))) => {
+                if let Some(NodeId::Space(id)) = self.selected_node() {
+                    self.open_space(id);
+                }
+            }
             KeyCode::Right | KeyCode::Char('l') => self.step_in(),
             KeyCode::Left | KeyCode::Char('h') => self.step_out(),
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected_node() {
+                Some(NodeId::Space(id)) => self.open_space(id),
                 Some(NodeId::Server(id)) => self.open_server(id),
                 Some(n @ NodeId::Folder(_)) => self.toggle(n),
                 None => {}
             },
-            KeyCode::Char('v') | KeyCode::Tab => {
-                self.set_view(if self.view == View::Folders { View::Jump } else { View::Folders })
-            }
+            KeyCode::Char('v') | KeyCode::Tab => self.set_view(match self.view {
+                View::Folders => View::Jump,
+                View::Jump => View::Spaces,
+                View::Spaces => View::Folders,
+            }),
             KeyCode::Char(c @ '1'..='9') if !ctrl && !alt => self.goto_tab(c as usize - '1' as usize),
             KeyCode::Char('t') => self.open_server(LOCAL),
             KeyCode::Char('p') => self.modal = self.gate(Pending::OpenVault),
+            KeyCode::Char('a') if self.view == View::Spaces => self.new_space_prompt(),
             KeyCode::Char('a') => self.new_server_form(),
             KeyCode::Char('f') => self.new_folder_prompt(),
             KeyCode::Char('e') | KeyCode::F(4) => self.edit_selected(),
@@ -1271,6 +1543,14 @@ impl App {
     }
 
     fn shift_selected(&mut self, delta: i32) {
+        if let Some(NodeId::Space(id)) = self.selected_node() {
+            if self.spaces.shift(id, delta) {
+                self.save_spaces();
+                self.rebuild();
+                self.select_node(NodeId::Space(id));
+            }
+            return;
+        }
         if let Some(n) = self.selected_node() {
             if self.store.shift(n, delta, self.view == View::Jump) {
                 self.persist();
@@ -1321,7 +1601,7 @@ impl App {
     }
 
     fn new_folder_prompt(&mut self) {
-        if self.view == View::Jump {
+        if self.view != View::Folders {
             return self.set_flash("Folders are created in the Folders view (press v)");
         }
         self.modal = Some(Modal::Prompt(Prompt {
@@ -1331,8 +1611,43 @@ impl App {
         }));
     }
 
+    fn save_spaces(&mut self) {
+        if let Err(e) = self.spaces.save() {
+            self.set_flash(format!("Could not save spaces: {e}"));
+        }
+    }
+
+    fn new_space_prompt(&mut self) {
+        let start = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
+        self.modal = Some(Modal::Prompt(Prompt {
+            title: "New space: directory".into(),
+            input: Input::suggested(&start),
+            kind: PromptKind::NewSpace,
+        }));
+    }
+
+    /// Shows a space and puts the keyboard on its terminal, opening the first one if it has none.
+    fn open_space(&mut self, id: u64) {
+        self.select_node(NodeId::Space(id));
+        self.sync_scope();
+        if self.scoped().is_empty() {
+            self.open_server(LOCAL);
+        } else {
+            self.focus = Focus::Terminal;
+        }
+    }
+
     fn edit_selected(&mut self) {
         match self.selected_node() {
+            Some(NodeId::Space(id)) => {
+                if let Some(sp) = self.spaces.get(id) {
+                    self.modal = Some(Modal::Prompt(Prompt {
+                        title: "Rename space".into(),
+                        input: Input::new(&sp.name),
+                        kind: PromptKind::RenameSpace(id),
+                    }));
+                }
+            }
             Some(NodeId::Server(id)) => {
                 if let Some(s) = self.store.server(id) {
                     self.modal = Some(Modal::Form(Box::new(ServerForm::from_server(s))));
@@ -1354,6 +1669,10 @@ impl App {
     fn ask_delete(&mut self) {
         let Some(node) = self.selected_node() else { return };
         let text = match node {
+            NodeId::Space(id) => format!(
+                "Delete space “{}”? Its terminals are closed; the directory is not touched.",
+                self.spaces.get(id).map(|s| s.name.as_str()).unwrap_or("?")
+            ),
             NodeId::Server(id) => {
                 format!("Delete server “{}”?", self.store.server(id).map(|s| s.name.as_str()).unwrap_or("?"))
             }
@@ -1362,7 +1681,11 @@ impl App {
                 self.store.folder(id).map(|f| f.name.as_str()).unwrap_or("?")
             ),
         };
-        self.modal = Some(Modal::Confirm(Confirm { text, action: ConfirmAction::Delete(node) }));
+        let action = match node {
+            NodeId::Space(id) => ConfirmAction::DeleteSpace(id),
+            n => ConfirmAction::Delete(n),
+        };
+        self.modal = Some(Modal::Confirm(Confirm { text, action }));
     }
 
     // ------------------------------------------------------------ modales (teclado)
@@ -1472,6 +1795,21 @@ impl App {
             return;
         }
         match p.kind {
+            PromptKind::NewSpace => {
+                let dir = PathBuf::from(expand_tilde(&name));
+                if !dir.is_dir() {
+                    return self.set_flash(format!("Not a directory: {}", dir.display()));
+                }
+                let dir = dir.canonicalize().unwrap_or(dir);
+                let id = self.spaces.add(spaces::default_name(&dir), dir.display().to_string());
+                self.save_spaces();
+                self.rebuild();
+                self.open_space(id);
+            }
+            PromptKind::RenameSpace(id) => {
+                self.spaces.rename(id, name);
+                self.save_spaces();
+            }
             PromptKind::NewFolder(parent) => {
                 let id = self.store.add_folder(name, parent);
                 self.persist();
@@ -1519,6 +1857,19 @@ impl App {
             }
             ConfirmAction::Quit => {
                 self.quit = true;
+                None
+            }
+            ConfirmAction::DeleteSpace(id) => {
+                let doomed: Vec<usize> =
+                    self.tabs.iter().enumerate().filter(|(_, t)| t.scope == Scope::Space(id)).map(|(i, _)| i).collect();
+                for i in doomed.into_iter().rev() {
+                    self.close_tab(i);
+                }
+                self.remembered.remove(&Scope::Space(id));
+                self.spaces.remove(id);
+                self.save_spaces();
+                self.rebuild();
+                self.sync_scope();
                 None
             }
             ConfirmAction::Delete(node) => {
@@ -1664,6 +2015,11 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
+        self.on_mouse_inner(ev);
+        self.sync_scope();
+    }
+
+    fn on_mouse_inner(&mut self, ev: MouseEvent) {
         let (x, y) = (ev.column, ev.row);
         if self.modal.is_some() {
             return self.modal_mouse(ev);
@@ -1701,6 +2057,9 @@ impl App {
             self.activate(hit);
             return;
         }
+        if let Some(&(_, i)) = self.layout.agents.iter().find(|(r, _)| inside(*r, x, y)) {
+            return self.focus_tab(i);
+        }
         if inside(self.layout.sidebar, x, y) {
             self.focus = Focus::Sidebar;
             if let Some(i) = self.row_at(x, y).filter(|&i| i < self.rows.len()) {
@@ -1710,6 +2069,7 @@ impl App {
                     match node {
                         NodeId::Folder(_) => self.toggle(node),
                         NodeId::Server(id) => self.open_server(id),
+                        NodeId::Space(id) => self.open_space(id),
                     }
                 } else {
                     self.drag = Some(Drag::Node(node));
@@ -1751,6 +2111,9 @@ impl App {
         if !inside(self.layout.sidebar, x, y) {
             return;
         }
+        if self.view == View::Spaces {
+            return;
+        }
         if self.view == View::Jump {
             let NodeId::Server(id) = node else { return };
             let target = self.row_at(x, y).and_then(|i| self.rows.get(i)).map(|r| r.node);
@@ -1773,6 +2136,7 @@ impl App {
         }
         let moved = match self.row_at(x, y).and_then(|i| self.rows.get(i)).map(|r| r.node) {
             Some(target) if target == node => return,
+            Some(NodeId::Space(_)) => false,
             Some(NodeId::Folder(f)) => self.store.move_into(node, Some(f)),
             Some(NodeId::Server(s)) => match node {
                 NodeId::Server(id) => self.store.move_server_before(id, s),
@@ -1780,6 +2144,7 @@ impl App {
                     let parent = self.store.server(s).and_then(|s| s.parent);
                     self.store.move_into(node, parent)
                 }
+                NodeId::Space(_) => false,
             },
             None if inside(self.layout.list, x, y) || y >= self.layout.list.y => self.store.move_into(node, None),
             None => false,
@@ -2062,9 +2427,10 @@ mod tests {
         press(&mut app, KeyCode::Up);
         assert_eq!(app.header, Some(3), "the view row (Folders) is the first stop");
         press(&mut app, KeyCode::Right);
-        assert_eq!(app.header, Some(4));
         press(&mut app, KeyCode::Right);
-        assert_eq!(app.header, Some(4), "stops at the end of the row");
+        assert_eq!(app.header, Some(5), "Folders, Jump hosts, Spaces");
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.header, Some(5), "stops at the end of the row");
         press(&mut app, KeyCode::Up);
         assert_eq!(app.header, Some(0), "then the button row");
         press(&mut app, KeyCode::Right);
@@ -2101,7 +2467,7 @@ mod tests {
         let mut app = app_with_servers(2);
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
-        assert_eq!(app.header, Some(5));
+        assert_eq!(app.header, Some(6));
         press(&mut app, KeyCode::Up);
         assert_eq!((app.header, app.selected), (None, 1), "Up returns to the last row");
     }
@@ -2132,6 +2498,137 @@ mod tests {
         app.focus = Focus::Sidebar;
         press(&mut app, KeyCode::Char('5'));
         assert_eq!((app.active, app.focus), (1, Focus::Sidebar), "no such tab: nothing changes");
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ship-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.canonicalize().unwrap()
+    }
+
+    fn wait_for_screen(app: &App, tab: usize, want: &str) -> bool {
+        let end = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < end {
+            if app.tabs[tab].session.with_screen(|s| s.contents()).contains(want) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        false
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_space_terminal_starts_in_its_directory_and_stays_out_of_the_ssh_tabs() {
+        let dir = temp_dir("space");
+        let mut app = app_with_servers(1);
+        let id = app.spaces.add("proj".into(), dir.display().to_string());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        assert_eq!(app.scope, Scope::Space(id));
+        app.open_space(id);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].scope, Scope::Space(id));
+        app.tabs[0].session.write(b"pwd\r");
+        assert!(wait_for_screen(&app, 0, dir.file_name().unwrap().to_str().unwrap()), "the shell starts in the space directory");
+
+        app.set_view(View::Folders);
+        assert_eq!(app.scope, Scope::Ssh);
+        assert!(app.scoped().is_empty(), "nothing from the space shows among the SSH tabs");
+        assert_eq!(app.focus, Focus::Sidebar);
+        app.open_server(LOCAL);
+        assert_eq!(app.tabs[1].scope, Scope::Ssh, "a local terminal outside the spaces belongs to the SSH section");
+        assert_eq!(app.scoped(), vec![1]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn each_space_remembers_its_own_active_tab() {
+        let (d1, d2) = (temp_dir("a"), temp_dir("b"));
+        let mut app = app_with_servers(0);
+        let a = app.spaces.add("a".into(), d1.display().to_string());
+        let b = app.spaces.add("b".into(), d2.display().to_string());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        app.open_space(a);
+        app.open_server(LOCAL); // second tab in a
+        app.goto_tab(0);
+        assert_eq!(app.active, 0);
+        app.open_space(b);
+        assert_eq!(app.scope, Scope::Space(b));
+        assert_eq!(app.scoped(), vec![2], "b has its own single tab");
+        app.select_node(NodeId::Space(a));
+        app.sync_scope();
+        assert_eq!((app.scope, app.active), (Scope::Space(a), 0), "back in a, on the tab it was left on");
+        std::fs::remove_dir_all(d1).ok();
+        std::fs::remove_dir_all(d2).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deleting_a_space_closes_its_terminals() {
+        let dir = temp_dir("del");
+        let mut app = app_with_servers(0);
+        let id = app.spaces.add("gone".into(), dir.display().to_string());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        app.open_space(id);
+        app.open_server(LOCAL);
+        assert_eq!(app.tabs.len(), 2);
+        app.run_confirmed(ConfirmAction::DeleteSpace(id));
+        assert!(app.tabs.is_empty() && app.spaces.spaces.is_empty() && app.rows.is_empty());
+        assert_eq!(app.focus, Focus::Sidebar);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn focusing_an_agent_tab_switches_to_its_space() {
+        let dir = temp_dir("agent");
+        let mut app = app_with_servers(1);
+        let id = app.spaces.add("proj".into(), dir.display().to_string());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        app.open_space(id);
+        app.set_view(View::Folders);
+        assert!(app.scoped().is_empty());
+        app.focus_tab(0);
+        assert_eq!((app.view, app.scope, app.focus), (View::Spaces, Scope::Space(id), Focus::Terminal));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_suggested_value_is_replaced_by_the_first_edit() {
+        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let mut i = Input::suggested("/work/here");
+        i.handle(key('/'));
+        i.handle(key('x'));
+        assert_eq!(i.value, "/x");
+        let mut i = Input::suggested("/work/here");
+        i.handle(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        i.handle(key('!'));
+        assert_eq!(i.value, "/work/here!", "moving the cursor keeps the suggestion to edit it");
+        let mut i = Input::suggested("abc");
+        i.handle(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(i.value, "", "backspace clears a suggestion");
+    }
+
+    #[test]
+    fn line_editing_shortcuts() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut i = Input::new("one two  three");
+        i.handle(ctrl('w'));
+        assert_eq!(i.value, "one two  ");
+        i.handle(ctrl('w'));
+        assert_eq!(i.value, "one ");
+        i.handle(ctrl('a'));
+        i.handle(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+        assert_eq!(i.value, ">one ");
+        i.handle(ctrl('e'));
+        i.handle(ctrl('u'));
+        assert_eq!(i.value, "");
     }
 
     #[test]
