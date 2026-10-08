@@ -1,7 +1,7 @@
 //! Application state and keyboard/mouse handling. Drawing lives in `ui.rs`.
 
 use crate::keys;
-use crate::session::Session;
+use crate::session::{Autofill, Session};
 use crate::store::{Auth, NodeId, Server, Store};
 use crate::vault::{Kind, UnlockError, Vault};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
@@ -564,6 +564,10 @@ impl App {
                 return;
             }
             for s in store.servers.iter().filter(|s| s.jump == via) {
+                // At the top level only bastions: servers that others are reached through.
+                if via.is_none() && !store.servers.iter().any(|x| x.jump == Some(s.id)) {
+                    continue;
+                }
                 out.push(Row { node: NodeId::Server(s.id), depth });
                 if open.contains(&s.id) {
                     walk_jump(store, Some(s.id), depth + 1, open, out);
@@ -708,7 +712,7 @@ impl App {
     }
 
     /// Starts `ssh` for a server, in a new tab or replacing the session of tab `reuse`.
-    fn connect(&mut self, id: u64, reuse: Option<usize>, secret: Option<String>) {
+    fn connect(&mut self, id: u64, reuse: Option<usize>, fills: Vec<Autofill>) {
         let Some(server) = self.store.server(id).cloned() else {
             return self.set_flash("This server no longer exists");
         };
@@ -721,7 +725,7 @@ impl App {
             }
         };
         let login_expected = server.auth == Auth::Password;
-        match Session::spawn(&ssh_argv(&self.store, &server), rows, cols, secret, login_expected) {
+        match Session::spawn(&ssh_argv(&self.store, &server), rows, cols, fills, login_expected) {
             Ok(session) => match reuse {
                 Some(i) => self.tabs[i].session = session,
                 None => {
@@ -738,11 +742,13 @@ impl App {
 
     fn needs_vault(&self, p: &Pending) -> bool {
         let wants_secret = |s: &Server| s.auth != Auth::Agent && s.has_secret;
+        // The destination or any jump host on the way may have a saved secret.
+        let chain_wants = |id: u64| {
+            self.store.server(id).is_some_and(wants_secret) || self.store.jump_chain(id).into_iter().any(wants_secret)
+        };
         match p {
-            Pending::Open(id) => self.store.server(*id).is_some_and(wants_secret),
-            Pending::Reconnect(i) => {
-                self.tabs.get(*i).and_then(|t| self.store.server(t.server_id)).is_some_and(wants_secret)
-            }
+            Pending::Open(id) => chain_wants(*id),
+            Pending::Reconnect(i) => self.tabs.get(*i).is_some_and(|t| chain_wants(t.server_id)),
             Pending::Purge(ids) => !ids.is_empty() && self.vault.exists(),
             _ => true,
         }
@@ -763,26 +769,37 @@ impl App {
         })))
     }
 
-    /// The login secret for a server, from the vault.
-    fn login_secret(&mut self, id: u64) -> Option<String> {
-        let s = self.store.server(id)?;
-        if s.auth == Auth::Agent {
-            return None;
+    /// The saved secrets for reaching `id`: its own and those of every jump host on the way, each tied to the
+    /// prompt it answers, so that a hop's password is never typed at another host's prompt.
+    fn autofills(&mut self, id: u64) -> Vec<Autofill> {
+        let mut servers: Vec<Server> = self.store.jump_chain(id).into_iter().cloned().collect();
+        servers.extend(self.store.server(id).cloned());
+        let mut out = vec![];
+        for s in servers {
+            if s.auth == Auth::Agent || !s.has_secret {
+                continue;
+            }
+            let Some(secret) = self.vault.get(s.id, Kind::Login) else { continue };
+            let when = match s.auth {
+                Auth::Key => format!("'{}'", expand_tilde(&s.key_path)).to_lowercase(),
+                _ => format!("{}@{}", s.user, s.host).to_lowercase(),
+            };
+            out.push(Autofill { when, secret, fallback: s.id == id });
         }
-        if s.has_secret { self.vault.get(id, Kind::Login) } else { None }
+        out
     }
 
     fn run_pending(&mut self, p: Pending) -> Option<Modal> {
         match p {
             Pending::Open(id) => {
-                let secret = self.login_secret(id);
-                self.connect(id, None, secret);
+                let fills = self.autofills(id);
+                self.connect(id, None, fills);
                 None
             }
             Pending::Reconnect(idx) => {
                 let id = self.tabs.get(idx)?.server_id;
-                let secret = self.login_secret(id);
-                self.connect(id, Some(idx), secret);
+                let fills = self.autofills(id);
+                self.connect(id, Some(idx), fills);
                 None
             }
             Pending::FillSudo(idx) => {
@@ -815,13 +832,13 @@ impl App {
     fn abort_pending(&mut self, p: Pending) -> Option<Modal> {
         match p {
             Pending::Open(id) => {
-                self.connect(id, None, None);
+                self.connect(id, None, vec![]);
                 self.set_flash("Connecting without the saved password");
                 None
             }
             Pending::Reconnect(idx) => {
                 if let Some(id) = self.tabs.get(idx).map(|t| t.server_id) {
-                    self.connect(id, Some(idx), None);
+                    self.connect(id, Some(idx), vec![]);
                 }
                 None
             }

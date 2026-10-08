@@ -6,10 +6,21 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroize;
 
 const SCROLLBACK: usize = 5000;
 
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
+/// A saved secret to type when `ssh` shows the prompt that belongs to it. Each one is sent once, so a wrong
+/// secret is never retried in a loop and a hop's password never goes to another host.
+pub struct Autofill {
+    /// Lowercase text that must appear on the prompt line: `user@host` for a password, the quoted key path for a passphrase.
+    pub when: String,
+    pub secret: String,
+    /// May also answer a bare `Password:` prompt (the destination's keyboard-interactive login).
+    pub fallback: bool,
+}
 
 pub struct Session {
     parser: Arc<Mutex<vt100::Parser>>,
@@ -25,10 +36,10 @@ pub struct Session {
 }
 
 impl Session {
-    /// `argv[0]` is the program. If `secret` is set, it is sent once when a login password or
-    /// passphrase prompt appears. `login_expected` says the first generic `Password:` prompt is
-    /// the login (password auth) rather than a later `su`.
-    pub fn spawn(argv: &[String], rows: u16, cols: u16, secret: Option<String>, login_expected: bool) -> Result<Self> {
+    /// `argv[0]` is the program. Each `Autofill` is typed once, when the login or passphrase prompt that
+    /// belongs to it appears. `login_expected` says the first generic `Password:` prompt is the login
+    /// (password auth) rather than a later `su`.
+    pub fn spawn(argv: &[String], rows: u16, cols: u16, fills: Vec<Autofill>, login_expected: bool) -> Result<Self> {
         let (rows, cols) = (rows.max(1), cols.max(1));
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -54,7 +65,7 @@ impl Session {
             let typed = Arc::clone(&typed_flag);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 16 * 1024];
-                let mut secret = secret;
+                let mut fills: Vec<Option<Autofill>> = fills.into_iter().map(Some).collect();
                 let mut login_phase = login_expected;
                 // The prompt line last acted on, so the same text is not handled twice.
                 let mut last_seen: Option<(u16, String)> = None;
@@ -78,14 +89,28 @@ impl Session {
                     }
                     match classify_prompt(&line.1, login_phase) {
                         Some(Prompt::Login) => {
-                            last_seen = Some(line);
-                            login_phase = false;
-                            // Only once: a wrong secret must not be retried in a loop.
-                            if let Some(s) = secret.take() {
+                            last_seen = Some(line.clone());
+                            let text = &line.1;
+                            let generic = !text.contains('@') && !text.contains("passphrase");
+                            let pick = fills
+                                .iter()
+                                .position(|f| f.as_ref().is_some_and(|f| text.contains(&f.when)))
+                                .or_else(|| {
+                                    if !generic {
+                                        return None;
+                                    }
+                                    fills.iter().position(|f| f.as_ref().is_some_and(|f| f.fallback))
+                                });
+                            if let Some(mut f) = pick.and_then(|i| fills[i].take()) {
                                 if let Ok(mut w) = writer.lock() {
-                                    let _ = w.write_all(format!("{s}\r").as_bytes());
+                                    let _ = w.write_all(format!("{}\r", f.secret).as_bytes());
                                     let _ = w.flush();
                                 }
+                                f.secret.zeroize();
+                            }
+                            // Stay in the login phase while a later hop or the destination still has a secret to give.
+                            if fills.iter().all(|f| f.is_none()) {
+                                login_phase = false;
                             }
                         }
                         Some(Prompt::Sudo) => {
@@ -226,7 +251,7 @@ mod tests {
     #[cfg(unix)]
     fn runs_command_and_captures_output() {
         let argv = vec!["sh".into(), "-c".into(), "echo hola-ship; exit 3".into()];
-        let mut s = Session::spawn(&argv, 24, 80, None, false).unwrap();
+        let mut s = Session::spawn(&argv, 24, 80, vec![], false).unwrap();
         let text = wait_for(&mut s, "hola-ship");
         assert!(text.contains("hola-ship"), "pantalla: {text:?}");
         let end = Instant::now() + Duration::from_secs(5);
@@ -242,9 +267,36 @@ mod tests {
     fn answers_password_prompt_once() {
         let script = "printf 'Password: '; read p; echo \"got:$p\"";
         let argv = vec!["sh".into(), "-c".into(), script.into()];
-        let mut s = Session::spawn(&argv, 24, 80, Some("s3cret".into()), true).unwrap();
+        let mut s = Session::spawn(&argv, 24, 80, vec![fill("", "s3cret", true)], true).unwrap();
         let text = wait_for(&mut s, "got:");
         assert!(text.contains("got:s3cret"), "pantalla: {text:?}");
+    }
+
+    fn fill(when: &str, secret: &str, fallback: bool) -> Autofill {
+        Autofill { when: when.into(), secret: secret.into(), fallback }
+    }
+
+    /// A jump host asks first, then the destination: each gets its own password.
+    #[test]
+    #[cfg(unix)]
+    fn each_hop_gets_its_own_password() {
+        let script = "printf \"ops@bastion's password: \"; read a; printf \"\\napp@dest's password: \"; read b; echo \"got:$a:$b\"";
+        let argv = vec!["sh".into(), "-c".into(), script.into()];
+        let fills = vec![fill("app@dest", "dest-pw", true), fill("ops@bastion", "bastion-pw", false)];
+        let mut s = Session::spawn(&argv, 24, 80, fills, true).unwrap();
+        let text = wait_for(&mut s, "got:");
+        assert!(text.contains("got:bastion-pw:dest-pw"), "pantalla: {text:?}");
+    }
+
+    /// The destination's password must never be typed into the jump host's prompt.
+    #[test]
+    #[cfg(unix)]
+    fn destination_password_is_not_sent_to_a_hop_without_a_saved_secret() {
+        let script = "printf \"ops@bastion's password: \"; read -t 2 a; echo \"got:[$a]\"";
+        let argv = vec!["sh".into(), "-c".into(), script.into()];
+        let mut s = Session::spawn(&argv, 24, 80, vec![fill("app@dest", "dest-pw", true)], true).unwrap();
+        let text = wait_for(&mut s, "got:");
+        assert!(text.contains("got:[]"), "pantalla: {text:?}");
     }
 
     #[test]
@@ -252,7 +304,7 @@ mod tests {
     fn flags_a_sudo_prompt_until_the_user_types() {
         let script = "printf '[sudo] password for alice: '; sleep 3";
         let argv = vec!["sh".into(), "-c".into(), script.into()];
-        let s = Session::spawn(&argv, 24, 80, None, false).unwrap();
+        let s = Session::spawn(&argv, 24, 80, vec![], false).unwrap();
         let end = Instant::now() + Duration::from_secs(2);
         while !s.sudo_prompt() && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));
@@ -279,7 +331,7 @@ mod tests {
     fn sudo_prompt_is_found_even_after_a_screen_clear() {
         let script = "printf '\\033[H\\033[2J[sudo] password for alice: '; sleep 3";
         let argv = vec!["sh".into(), "-c".into(), script.into()];
-        let s = Session::spawn(&argv, 24, 80, None, false).unwrap();
+        let s = Session::spawn(&argv, 24, 80, vec![], false).unwrap();
         let end = Instant::now() + Duration::from_secs(2);
         while !s.sudo_prompt() && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(20));

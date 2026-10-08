@@ -137,10 +137,12 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.offset = app.offset.min(app.rows.len().saturating_sub(1));
 
     if app.rows.is_empty() {
-        let hint = Paragraph::new(vec![
-            Line::from(Span::styled("No servers yet.", Style::new().fg(MUTED))),
-            Line::from(Span::styled("Click “+ Server” or press a.", Style::new().fg(MUTED))),
-        ]);
+        let lines: Vec<&str> = if app.view == View::Jump && !app.store.servers.is_empty() {
+            vec!["No jump hosts yet.", "Edit a server and set “Jump via”: the", "bastion appears here with what is", "reached through it."]
+        } else {
+            vec!["No servers yet.", "Click “+ Server” or press a."]
+        };
+        let hint = Paragraph::new(lines.into_iter().map(|l| Line::from(Span::styled(l, Style::new().fg(MUTED)))).collect::<Vec<_>>());
         f.render_widget(hint, list);
         return;
     }

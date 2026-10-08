@@ -59,7 +59,7 @@ cargo test
 Press `v` (or click the header) to switch:
 
 - **Folders** — how you organize things.
-- **Jump hosts** — how you reach them. A server with “Jump via” set to another server is nested under it, so chains like `bastion → web → db` become a tree. Opening it runs `ssh` through every hop.
+- **Jump hosts** — how you reach them. Only bastions are roots here (servers that others are reached through), and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. Servers that are not part of any jump chain are hidden in this view. To start one, edit a server and set “Jump via”. Opening it runs `ssh` through every hop.
 
 ## Keyboard (sidebar)
 
@@ -106,7 +106,7 @@ Passwords you type in the server form (the login password or key passphrase, and
 
 - A session is the system `ssh` inside a PTY, so `known_hosts`, the agent and your keys work as usual. New or changed host keys are asked inside the tab.
 - The vault is a single file sealed with XChaCha20-Poly1305; the key comes from the master password via Argon2id (64 MiB, 3 passes). The master password and key exist only in memory while unlocked. The file is created with `0600` permissions, and `servers.json` only records *that* a secret exists.
-- A saved login secret is sent once when `ssh` asks for it. Jump hosts should use keys or the agent.
+- Saved secrets are sent once, and only to the prompt that belongs to them: a jump host's password or key passphrase answers that host's prompt, and the destination's answers its own, so you are only asked for what is not saved. A secret is never retried.
 
 ## License
 

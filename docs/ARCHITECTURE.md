@@ -31,7 +31,7 @@ Everything runs in one process; there is no IPC and no separate renderer.
 A server has two independent attributes: `parent` (its folder, for organizing) and `jump` (the server it is reached through, for routing). The sidebar is one tree with two lenses over the same data, so nothing is duplicated:
 
 - **Folders view** — roots are top-level folders; jump servers show a dim `↪ bastion` hint.
-- **Jump hosts view** — roots are servers with no `jump`; children are the servers behind them, to any depth.
+- **Jump hosts view** — roots are bastions only (servers with no `jump` that other servers are reached through); children are the servers behind them, to any depth. Servers outside any jump chain are not listed.
 
 `ssh_argv` resolves the chain. If every hop uses the agent/default keys it emits `-J a,b`. If a hop has its own key it builds a nested `ProxyCommand`, because `-J` cannot give each hop an identity. Loops are rejected (`Store::would_cycle`), and deleting a bastion detaches the servers behind it.
 
