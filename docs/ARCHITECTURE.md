@@ -22,6 +22,7 @@ Each tab runs the system `ssh` inside a PTY (`portable-pty`). Its output goes th
 | `vault.rs` | Encrypted password vault (Argon2id + XChaCha20-Poly1305), master-password lock |
 | `spaces.rs` | Spaces (named project directories, saved in `spaces.json`) and the git branch of a directory |
 | `agent.rs` | Recognising an AI agent from the foreground process of a PTY, and the working/finished state machine |
+| `clipboard.rs` | Copying to the system clipboard: OSC 52 plus the platform's clipboard tool |
 | `notify.rs` | The sound played when an agent finishes |
 | `daemon.rs` | The background server (Unix): protocol, server, client, `RemoteSession`. `daemon_stub.rs` stands in on other platforms |
 | `settings.rs` | `settings.json` |
@@ -48,6 +49,7 @@ Every tab has a `Scope`: the SSH section, or one space. The tab bar shows only t
 
 The PTYs and their `vt100` screens live in `ship daemon`, a process started on demand (`setsid`, detached from the terminal). The interface talks to it over a Unix socket with one JSON object per line (terminal bytes in base64).
 
+- Each session also keeps its last few MiB of raw output. `Attach` replays it into the client's emulator before the snapshot, which is what rebuilds the scroll-back; the snapshot (which starts by clearing the screen) then sets the exact screen and modes.
 - `Spawn` creates a session (with the client's environment, working directory and the secrets to autofill); `Attach` returns a **snapshot** of the screen (`state_formatted`) and then streams `Output`. Snapshot and subscription happen while the screen is locked, so no output is lost or repeated.
 - The server watches its sessions twice a second: exit codes, sudo prompts, and the agent in the foreground (and whether it is working or just finished). If an agent finishes with no interface attached, it plays the sound itself and remembers it for the next attach.
 - Each tab sends a small description of itself (`SetMeta`: title, space, order) whenever it changes; that is how the next interface rebuilds the tabs in the right scope.

@@ -107,6 +107,9 @@ enum Ev {
         agent: Option<AgentMsg>,
         /// An agent finished while nobody was attached.
         done: bool,
+        /// The raw output so far, replayed before `data` to rebuild the scroll-back.
+        #[serde(default)]
+        replay: String,
     },
     Output { sid: u64, data: String },
     Exit { sid: u64, code: u32 },
@@ -400,6 +403,7 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
                     sudo,
                     agent: agent.map(Into::into),
                     done,
+                    replay: B64.encode(p.history()),
                 };
                 let _ = tx.try_send(snapshot);
                 lock(&subs).push(Sub { client: cid, tx: tx.clone(), stream: Arc::clone(ctl) });
@@ -493,9 +497,11 @@ impl ClientShared {
                     let _ = w.send(ev);
                 }
             }
-            Ev::Snapshot { sid, rows, cols, data, exit, sudo, agent, done } => {
+            Ev::Snapshot { sid, rows, cols, data, exit, sudo, agent, done, replay } => {
                 if let Some(r) = lock(&self.sessions).get(&sid) {
                     let mut parser = vt100::Parser::new(rows, cols, SCROLLBACK);
+                    // Replaying the output rebuilds the scroll-back; the snapshot then sets the exact screen and modes.
+                    parser.process(&B64.decode(replay).unwrap_or_default());
                     parser.process(&B64.decode(data).unwrap_or_default());
                     *lock(&r.parser) = parser;
                     *lock(&r.exit) = exit;
@@ -851,6 +857,24 @@ mod tests {
         assert!(wait_for(&mut s, "before-the-detach"), "the screen comes back");
         s.write(b"again\r");
         assert!(wait_for(&mut s, "after:again"), "and the process was never interrupted");
+    }
+
+    /// What scrolled off the screen before the interface came back can still be scrolled up to.
+    #[test]
+    fn scroll_back_survives_reattaching() {
+        let path = start("history");
+        let sid = {
+            let d = Daemon::connect_at(&path).ok().unwrap();
+            let mut s = Session::spawn_with(sh("for i in $(seq 1 120); do echo history-line-$i; done; read x"), Some(&d)).unwrap();
+            assert!(wait_for(&mut s, "history-line-120"));
+            d.list().unwrap()[0].sid
+        };
+        let d2 = Daemon::connect_at(&path).ok().unwrap();
+        let mut s = Session::from_remote(d2.attach(sid, 24, 80));
+        assert!(wait_for(&mut s, "history-line-120"));
+        s.scroll(100_000); // as far back as it goes
+        let top = s.with_screen(|sc| sc.contents());
+        assert!(top.lines().any(|l| l == "history-line-1"), "the oldest line is reachable: {top:?}");
     }
 
     #[test]

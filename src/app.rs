@@ -1,6 +1,7 @@
 //! Application state and keyboard/mouse handling. Drawing lives in `ui.rs`.
 
 use crate::keys;
+use crate::clipboard;
 use crate::daemon::Daemon;
 use crate::session::{Autofill, Session, SpawnOpts};
 use crate::spaces::{self, Spaces};
@@ -153,6 +154,20 @@ impl Input {
 pub struct Row {
     pub node: NodeId,
     pub depth: usize,
+}
+
+/// Text selected with the mouse in the terminal area, as (row, column) cells of that area.
+#[derive(Clone, Copy)]
+pub struct Selection {
+    pub anchor: (u16, u16),
+    pub head: (u16, u16),
+}
+
+impl Selection {
+    /// The two ends, first one first.
+    pub fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        if self.anchor <= self.head { (self.anchor, self.head) } else { (self.head, self.anchor) }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -526,7 +541,7 @@ pub enum Hit {
 
 /// Sidebar menu items in keyboard order: the button row (0..3), the view row (3..6), and the terminal entry at the bottom (6).
 pub const HEADER: [Hit; 7] =
-    [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewFolders, Hit::ViewJump, Hit::ViewSpaces, Hit::LocalTerm];
+    [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewSpaces, Hit::ViewFolders, Hit::ViewJump, Hit::LocalTerm];
 
 /// `Tab::server_id` of the terminal of this computer (real servers start at 1).
 pub const LOCAL: u64 = 0;
@@ -591,6 +606,9 @@ pub struct App {
     branches_at: Option<Instant>,
     /// Play a sound when an agent finishes.
     pub sound: bool,
+    pub selection: Option<Selection>,
+    /// The mouse button is down and the selection is being dragged out.
+    selecting: bool,
     /// The background server holding the sessions, if there is one.
     pub daemon: Option<Arc<Daemon>>,
     lost_warned: bool,
@@ -631,6 +649,8 @@ impl App {
             branches: HashMap::new(),
             branches_at: None,
             sound: true,
+            selection: None,
+            selecting: false,
             daemon: None,
             lost_warned: false,
             left_running: 0,
@@ -1457,6 +1477,8 @@ impl App {
     }
 
     fn on_key_inner(&mut self, key: KeyEvent) {
+        self.selection = None;
+        self.selecting = false;
         if self.modal.is_some() {
             self.modal_key(key);
             return;
@@ -1505,6 +1527,8 @@ impl App {
             match key.code {
                 KeyCode::PageUp => return tab.session.scroll(tab.session.size().0 as i32 / 2),
                 KeyCode::PageDown => return tab.session.scroll(-(tab.session.size().0 as i32 / 2)),
+                KeyCode::Home => return tab.session.scroll(1_000_000),
+                KeyCode::End => return tab.session.reset_scroll(),
                 _ => {}
             }
         }
@@ -1518,9 +1542,9 @@ impl App {
     /// The header item (index into `HEADER`) of the current view.
     fn view_index(&self) -> usize {
         match self.view {
-            View::Folders => 3,
-            View::Jump => 4,
-            View::Spaces => 5,
+            View::Spaces => 3,
+            View::Folders => 4,
+            View::Jump => 5,
         }
     }
 
@@ -1614,9 +1638,9 @@ impl App {
                 None => {}
             },
             KeyCode::Char('v') | KeyCode::Tab => self.set_view(match self.view {
+                View::Spaces => View::Folders,
                 View::Folders => View::Jump,
                 View::Jump => View::Spaces,
-                View::Spaces => View::Folders,
             }),
             KeyCode::Char(c @ '1'..='9') if !ctrl && !alt => self.goto_tab(c as usize - '1' as usize),
             KeyCode::Char('t') => self.open_server(LOCAL),
@@ -2117,6 +2141,7 @@ impl App {
         }
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => self.mouse_down(x, y),
+            MouseEventKind::Drag(MouseButton::Left) if self.selecting => self.drag_select(x, y),
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.drop_hover = match self.drag {
                     Some(Drag::Node(_)) => self.row_at(x, y).filter(|&i| i < self.rows.len()),
@@ -2130,6 +2155,7 @@ impl App {
                     let max = self.rows.len().saturating_sub(1);
                     self.offset = if up { self.offset.saturating_sub(3) } else { (self.offset + 3).min(max) };
                 } else if inside(self.layout.content, x, y) {
+                    self.selection = None; // the text moves under it
                     if let Some(t) = self.tabs.get(self.active) {
                         t.session.scroll(if up { 3 } else { -3 });
                     }
@@ -2143,6 +2169,8 @@ impl App {
         let double = self.is_double_click(x, y);
         self.drag = None;
         self.header = None;
+        self.selection = None;
+        self.selecting = false;
         if let Some(&(_, hit)) = self.layout.toolbar.iter().find(|(r, _)| inside(*r, x, y)) {
             self.header = None;
             self.activate(hit);
@@ -2180,13 +2208,101 @@ impl App {
                     self.drag = Some(Drag::Tab(i));
                 }
             }
-        } else if inside(self.layout.content, x, y) && !self.tabs.is_empty() {
+        } else if inside(self.layout.content, x, y) && !self.scoped().is_empty() {
             self.focus = Focus::Terminal;
+            let cell = self.content_cell(x, y);
+            if double {
+                self.select_word(cell);
+            } else {
+                self.selection = Some(Selection { anchor: cell, head: cell });
+                self.selecting = true;
+            }
         }
+    }
+
+    /// The cell of the terminal area under (x, y), clamped to the area.
+    fn content_cell(&self, x: u16, y: u16) -> (u16, u16) {
+        let c = self.layout.content;
+        let row = y.clamp(c.y, (c.y + c.height).saturating_sub(1)) - c.y;
+        let col = x.clamp(c.x, (c.x + c.width).saturating_sub(1)) - c.x;
+        (row, col)
+    }
+
+    fn scroll_active(&self, delta: i32) {
+        if let Some(t) = self.tabs.get(self.active) {
+            t.session.scroll(delta);
+        }
+    }
+
+    /// Extends the selection to the pointer; dragging past the top or bottom edge scrolls the history.
+    fn drag_select(&mut self, x: u16, y: u16) {
+        let c = self.layout.content;
+        let mut cell = self.content_cell(x, y);
+        let last = c.height.saturating_sub(1);
+        if y < c.y {
+            self.scroll_active(1);
+            // The text moved down with the scroll; the anchor stays on it.
+            if let Some(sel) = self.selection.as_mut() {
+                sel.anchor.0 = (sel.anchor.0 + 1).min(last);
+            }
+            cell.0 = 0;
+        } else if y >= c.y + c.height {
+            self.scroll_active(-1);
+            if let Some(sel) = self.selection.as_mut() {
+                sel.anchor.0 = sel.anchor.0.saturating_sub(1);
+            }
+            cell.0 = last;
+        }
+        if let Some(sel) = self.selection.as_mut() {
+            sel.head = cell;
+        }
+    }
+
+    /// Double click: selects the run of non-blank characters under the pointer (a word, a path, a URL) and copies it.
+    fn select_word(&mut self, (row, col): (u16, u16)) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let cols = tab.session.size().1;
+        let line: Vec<char> = tab.session.with_screen(|s| s.contents_between(row, 0, row, cols)).chars().collect();
+        let c = col as usize;
+        if c >= line.len() || line[c].is_whitespace() {
+            return;
+        }
+        let mut a = c;
+        while a > 0 && !line[a - 1].is_whitespace() {
+            a -= 1;
+        }
+        let mut b = c;
+        while b + 1 < line.len() && !line[b + 1].is_whitespace() {
+            b += 1;
+        }
+        self.selection = Some(Selection { anchor: (row, a as u16), head: (row, b as u16) });
+        self.copy_selection();
+    }
+
+    /// Puts the selected text on the clipboard.
+    fn copy_selection(&mut self) {
+        let Some(sel) = self.selection else { return };
+        let ((r1, c1), (r2, c2)) = sel.ordered();
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let cols = tab.session.size().1;
+        let text = tab.session.with_screen(|s| s.contents_between(r1, c1, r2, c2.saturating_add(1).min(cols)));
+        let text = text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
+        if text.trim().is_empty() {
+            return;
+        }
+        clipboard::copy(&text);
+        self.set_flash(format!("Copied {} characters", text.chars().count()));
     }
 
     fn mouse_up(&mut self, x: u16, y: u16) {
         self.drop_hover = None;
+        if std::mem::take(&mut self.selecting) {
+            match self.selection {
+                Some(s) if s.anchor != s.head => self.copy_selection(),
+                _ => self.selection = None, // a plain click: just focus
+            }
+            return;
+        }
         match self.drag.take() {
             Some(Drag::Tab(from)) => {
                 if let Some(to) = self.layout.tabs.iter().find(|t| inside(t.rect, x, y)).map(|t| t.idx) {
@@ -2516,10 +2632,12 @@ mod tests {
         assert_eq!((app.selected, app.header), (1, None));
         press(&mut app, KeyCode::Up);
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(3), "the view row (Folders) is the first stop");
+        assert_eq!(app.header, Some(4), "the view row (Folders) is the first stop");
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.header, Some(3), "Spaces is to the left of Folders");
         press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Right);
-        assert_eq!(app.header, Some(5), "Folders, Jump hosts, Spaces");
+        assert_eq!(app.header, Some(5), "Spaces, Folders, Jump hosts");
         press(&mut app, KeyCode::Right);
         assert_eq!(app.header, Some(5), "stops at the end of the row");
         press(&mut app, KeyCode::Up);
@@ -2537,10 +2655,10 @@ mod tests {
     fn enter_on_a_view_tab_switches_view_and_keeps_the_header() {
         let mut app = app_with_servers(1);
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(3));
+        assert_eq!(app.header, Some(4));
         press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Enter);
-        assert_eq!((app.view, app.header), (View::Jump, Some(4)));
+        assert_eq!((app.view, app.header), (View::Jump, Some(5)));
     }
 
     #[test]
@@ -2722,6 +2840,71 @@ mod tests {
         i.handle(ctrl('e'));
         i.handle(ctrl('u'));
         assert_eq!(i.value, "");
+    }
+
+    /// An app whose only tab shows `text` (one line per entry) in a terminal area at (32, 1), 80x24.
+    #[cfg(unix)]
+    fn app_showing(lines: &[&str]) -> App {
+        let mut app = app_with_servers(0);
+        let script = format!("printf '%s\\n' {}; sleep 8", lines.iter().map(|l| format!("'{l}'")).collect::<Vec<_>>().join(" "));
+        let argv = vec!["sh".into(), "-c".into(), script];
+        let session = Session::spawn(&argv, 24, 80, vec![], false).unwrap();
+        app.next_tab_id += 1;
+        app.tabs.push(Tab {
+            id: app.next_tab_id,
+            title: "t".into(),
+            server_id: LOCAL,
+            scope: Scope::Ssh,
+            session,
+            attention: false,
+            meta_sent: String::new(),
+        });
+        app.layout.content = Rect::new(32, 1, 80, 24);
+        let last = lines.last().unwrap();
+        assert!(wait_for_screen(&app, 0, last));
+        app
+    }
+
+    #[cfg(unix)]
+    fn copied() -> String {
+        crate::clipboard::LAST.with(|l| l.borrow().clone())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dragging_over_the_terminal_selects_and_copies() {
+        let mut app = app_showing(&["alpha beta gamma"]);
+        app.mouse_down(32 + 6, 1);
+        assert!(app.selecting);
+        app.drag_select(32 + 9, 1);
+        app.mouse_up(32 + 9, 1);
+        assert_eq!(copied(), "beta");
+        assert!(app.selection.is_some(), "the highlight stays until the next click or key");
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.selection.is_none(), "typing clears it");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_selection_can_span_lines_and_be_dragged_backwards() {
+        let mut app = app_showing(&["one", "two"]);
+        app.mouse_down(32 + 1, 1 + 1); // second line, column 1
+        app.drag_select(32 + 1, 1); // up to the first line: selection made backwards
+        app.mouse_up(32 + 1, 1);
+        assert_eq!(copied(), "ne\ntw");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn double_click_copies_the_word_and_a_plain_click_copies_nothing() {
+        let mut app = app_showing(&["see /etc/ssh/ssh_config now"]);
+        app.select_word((0, 8));
+        assert_eq!(copied(), "/etc/ssh/ssh_config", "a path counts as one word");
+        let before = copied();
+        app.mouse_down(32 + 2, 1);
+        app.mouse_up(32 + 2, 1);
+        assert_eq!(copied(), before, "a click without dragging copies nothing");
+        assert!(app.selection.is_none());
     }
 
     #[test]

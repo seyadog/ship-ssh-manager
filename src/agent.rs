@@ -5,10 +5,12 @@
 //! after a stretch of work, it is done.
 
 /// Programs treated as agents. Matched against the file name of the command or of its script.
+#[cfg_attr(not(unix), allow(dead_code))]
 const AGENTS: &[&str] =
     &["claude", "opencode", "codex", "gemini", "aider", "amp", "crush", "goose", "cursor-agent", "qwen"];
 
 /// Programs that run an agent that is a script.
+#[cfg_attr(not(unix), allow(dead_code))]
 const INTERPRETERS: &[&str] = &["node", "nodejs", "bun", "deno", "python", "python3", "npx"];
 
 /// Output newer than this means the agent is working.
@@ -25,6 +27,7 @@ pub struct AgentInfo {
 }
 
 /// The agent a command line belongs to, if any: `claude`, `node /x/bin/claude`, `/usr/bin/opencode run`.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn agent_from_args(args: &[String]) -> Option<&'static str> {
     let base = |a: &str| {
         let b = a.rsplit(['/', '\\']).next().unwrap_or(a).to_string();

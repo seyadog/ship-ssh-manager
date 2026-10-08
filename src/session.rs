@@ -16,6 +16,32 @@ use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 
 pub const SCROLLBACK: usize = 5000;
+/// How much raw output a session remembers, to give a late-attaching interface its scroll-back.
+const HISTORY_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most recent raw output of a session.
+#[derive(Default)]
+pub struct History(Vec<u8>);
+
+impl History {
+    fn push(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+        // Trim in big steps so the cost is amortised, and start again at a line boundary so that
+        // replaying it does not begin in the middle of an escape sequence.
+        if self.0.len() > HISTORY_BYTES + HISTORY_BYTES / 4 {
+            let mut cut = self.0.len() - HISTORY_BYTES;
+            if let Some(nl) = self.0[cut..].iter().take(8192).position(|&b| b == b'\n') {
+                cut += nl + 1;
+            }
+            self.0.drain(..cut);
+        }
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -64,6 +90,8 @@ pub struct PtySession {
     agent: Option<AgentInfo>,
     done: bool,
     probed: Instant,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    history: Arc<Mutex<History>>,
 }
 
 impl PtySession {
@@ -100,6 +128,7 @@ impl PtySession {
         let started = Instant::now();
         let last_output = Arc::new(AtomicU64::new(0));
         let last_input = Arc::new(AtomicU64::new(0));
+        let history = Arc::new(Mutex::new(History::default()));
         let sudo_prompt = Arc::new(AtomicBool::new(false));
         let typed_flag = Arc::new(AtomicBool::new(false));
         {
@@ -108,6 +137,7 @@ impl PtySession {
             let sudo_flag = Arc::clone(&sudo_prompt);
             let typed = Arc::clone(&typed_flag);
             let last_output = Arc::clone(&last_output);
+            let history = Arc::clone(&history);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 16 * 1024];
                 let mut fills: Vec<Option<Autofill>> = fills.into_iter().map(Some).collect();
@@ -124,6 +154,7 @@ impl PtySession {
                         let Ok(mut p) = parser.lock() else { break };
                         p.process(&buf[..n]);
                         last_output.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                        history.lock().unwrap_or_else(|e| e.into_inner()).push(&buf[..n]);
                         if let Some(tap) = &tap {
                             tap(&buf[..n]);
                         }
@@ -188,6 +219,7 @@ impl PtySession {
             agent: None,
             done: false,
             probed: started,
+            history,
         })
     }
 
@@ -265,6 +297,12 @@ impl PtySession {
 
     pub fn kill(&mut self) {
         let _ = self.child.kill();
+    }
+
+    /// The raw output remembered so far. Take it inside `with_screen` to have it match the screen exactly.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub fn history(&self) -> Vec<u8> {
+        self.history.lock().unwrap_or_else(|e| e.into_inner()).bytes().to_vec()
     }
 
     /// True once after an agent finishes a stretch of work.

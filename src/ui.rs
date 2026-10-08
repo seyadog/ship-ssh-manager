@@ -109,9 +109,9 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     // View switch
     let views = [
+        (" Spaces ", View::Spaces, Hit::ViewSpaces),
         (" Folders ", View::Folders, Hit::ViewFolders),
         (" Jump hosts ", View::Jump, Hit::ViewJump),
-        (" Spaces ", View::Spaces, Hit::ViewSpaces),
     ];
     let mut vx = inner.x;
     let mut spans = vec![];
@@ -363,9 +363,11 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut cursor = None;
     let mut blank = false;
+    let mut scrolled = 0usize;
     let buf = f.buffer_mut();
     tab.session.with_screen(|screen| {
         blank = screen.contents().trim().is_empty();
+        scrolled = screen.scrollback();
         for row in 0..area.height {
             for col in 0..area.width {
                 let Some(cell) = screen.cell(row, col) else { continue };
@@ -396,6 +398,20 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
             cursor = Some((area.x + c, area.y + r));
         }
     });
+    // Selected text, highlighted.
+    if let Some(sel) = app.selection {
+        let ((r1, c1), (r2, c2)) = sel.ordered();
+        let last_row = area.height.saturating_sub(1);
+        let last_col = area.width.saturating_sub(1);
+        for row in r1.min(last_row)..=r2.min(last_row) {
+            let from = if row == r1 { c1 } else { 0 };
+            let to = if row == r2 { c2 } else { last_col };
+            for col in from.min(last_col)..=to.min(last_col) {
+                let cell = &mut f.buffer_mut()[(area.x + col, area.y + row)];
+                cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+            }
+        }
+    }
     // ssh prints nothing while it waits for an unreachable host: say what is going on.
     let waited = tab.session.started.elapsed().as_secs();
     if blank && tab.session.exit_code.is_none() && waited >= 2 {
@@ -403,6 +419,14 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
         let msg = format!("Connecting to {target}… {waited}s (gives up after 15s; Alt+W closes this tab)");
         let w = (msg.width() as u16).min(area.width);
         f.render_widget(Paragraph::new(msg).style(Style::new().fg(MUTED)), Rect::new(area.x, area.y, w, 1));
+    }
+    if scrolled > 0 {
+        let msg = format!(" ↑ {scrolled} lines up · Shift+End or type: back to live ");
+        let w = (msg.width() as u16).min(area.width);
+        f.render_widget(
+            Paragraph::new(msg).style(Style::new().fg(Color::Black).bg(AMBER)),
+            Rect::new(area.x + area.width - w, area.y, w, 1),
+        );
     }
     if focused {
         if let (Some((x, y)), None) = (cursor, tab.session.exit_code) {
@@ -493,7 +517,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.modal.is_some() {
         "Esc cancel".to_string()
     } else if app.focus == Focus::Terminal {
-        "F6 panel · Alt+←/→ tabs · Alt+Shift+←/→ move · Alt+W close · F2 rename · Shift+PgUp scrollback".to_string()
+        "F6 panel · Alt+←/→ tabs · Alt+W close · F2 rename · drag: select+copy · Shift+PgUp/PgDn/Home/End history".to_string()
     } else if app.header.is_some() {
         "←→ choose · Enter activate · ↓ back to the list · Esc list".to_string()
     } else if app.view == View::Spaces && app.header.is_none() {

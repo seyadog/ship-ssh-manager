@@ -56,7 +56,7 @@ cargo test
 
 ## Spaces: projects with their own terminals
 
-A **space** is a project directory with its own terminals. Press `v` (or click `Spaces`) for the third view, then `a` and give it a directory. Each space shows its **git branch**, and its terminals start in that directory.
+A **space** is a project directory with its own terminals. Press `v` (or click `Spaces`, the first view), then `a` and give it a directory. Each space shows its **git branch**, and its terminals start in that directory.
 
 - Every terminal belongs to where it was opened: the SSH section, or one space. The tab bar only shows the tabs of what you are looking at, so what runs in a space (an AI agent, say) never mixes with your SSH tabs.
 - **Agents.** Run `claude`, `opencode`, `codex`, `gemini`, `aider`... in any terminal and it shows up under **agents** at the bottom of the sidebar, with the space it runs in. `●` amber is working, `○` is idle, a green `●` means it finished and is waiting for you. Click one (or press `Alt+n`) to jump to its terminal wherever it lives.
@@ -73,12 +73,18 @@ Terminals live in a small background server (`ship daemon`) that starts by itsel
 - Closing a tab (`Alt+W`, `✕`, `c`) does end that session.
 - After updating ship, run `ship kill-server` once so the new version replaces the old server (it ends the sessions).
 - The server listens on a private Unix socket (mode `0600` inside a `0700` directory) under `$XDG_RUNTIME_DIR`. Saved passwords are sent to it once, in memory, when you connect; they are not written anywhere.
-- Limits: the scroll-back history is only what arrived since you attached; sessions use the environment of the ship that opened them (an `ssh-agent` socket that later changes is not picked up). Set `SHIP_NO_DAEMON=1` to keep sessions inside the window instead.
+- Limits: only the last few MiB of each session's output are kept as history; sessions use the environment of the ship that opened them (an `ssh-agent` socket that later changes is not picked up). Set `SHIP_NO_DAEMON=1` to keep sessions inside the window instead.
 - Windows has no background server yet: sessions end with the window.
+
+## Selecting, copying and scrolling in a terminal
+
+- **Select and copy with the mouse.** Drag over the terminal area to select; the text is copied as soon as you let go (the selection stays highlighted until your next click or key). Double-click selects the word under the pointer (a path or a URL counts as one word). Drag past the top or bottom edge to keep going through the history.
+- The copy goes to the system clipboard through the terminal (OSC 52, which also works over SSH) and through `wl-copy`, `xclip`, `xsel`, `pbcopy` or `clip`, whichever is there. Paste with your terminal's paste shortcut (`Ctrl+Shift+V` in most), which ship forwards as a paste.
+- **History.** The mouse wheel scrolls it; `Shift+PgUp` / `Shift+PgDn` go by half a page, `Shift+Home` to the oldest line, `Shift+End` (or just typing) back to live. An amber bar shows how far up you are. With the background server the history survives closing ship (up to the last few MiB of output of each session).
 
 ## Two views of the same servers
 
-Press `v` (or click the header) to switch between the first two:
+The sidebar has three views, left to right: **Spaces**, **Folders** and **Jump hosts**. Press `v` (or click the header) to switch. The last two show the same servers in two ways:
 
 - **Folders** — how you organize things.
 - **Jump hosts** — how you reach them. Only bastions are roots here (servers that others are reached through), and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. Servers that are not part of any jump chain are hidden in this view. To start one, edit a server and set “Jump via”. Opening it runs `ssh` through every hop.

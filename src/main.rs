@@ -1,5 +1,6 @@
 mod agent;
 mod app;
+mod clipboard;
 #[cfg(unix)]
 mod daemon;
 #[cfg(not(unix))]
