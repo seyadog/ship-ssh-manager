@@ -512,7 +512,8 @@ pub struct App {
     pub drop_hover: Option<usize>,
     pub view: View,
     /// Servers whose hidden hosts are unfolded in the jump view.
-    jump_open: HashSet<u64>,
+    /// Bastions the user folded in the jump view (everything is unfolded by default).
+    jump_collapsed: HashSet<u64>,
     drag: Option<Drag>,
     last_click: Option<(Instant, u16, u16)>,
 }
@@ -535,7 +536,7 @@ impl App {
             flash: None,
             drop_hover: None,
             view: View::Folders,
-            jump_open: HashSet::new(),
+            jump_collapsed: HashSet::new(),
             drag: None,
             last_click: None,
         };
@@ -559,7 +560,7 @@ impl App {
                 out.push(Row { node: NodeId::Server(s.id), depth });
             }
         }
-        fn walk_jump(store: &Store, via: Option<u64>, depth: usize, open: &HashSet<u64>, out: &mut Vec<Row>) {
+        fn walk_jump(store: &Store, via: Option<u64>, depth: usize, collapsed: &HashSet<u64>, out: &mut Vec<Row>) {
             if depth > 16 {
                 return;
             }
@@ -569,15 +570,15 @@ impl App {
                     continue;
                 }
                 out.push(Row { node: NodeId::Server(s.id), depth });
-                if open.contains(&s.id) {
-                    walk_jump(store, Some(s.id), depth + 1, open, out);
+                if !collapsed.contains(&s.id) {
+                    walk_jump(store, Some(s.id), depth + 1, collapsed, out);
                 }
             }
         }
         self.rows.clear();
         match self.view {
             View::Folders => walk(&self.store, None, 0, &mut self.rows),
-            View::Jump => walk_jump(&self.store, None, 0, &self.jump_open, &mut self.rows),
+            View::Jump => walk_jump(&self.store, None, 0, &self.jump_collapsed, &mut self.rows),
         }
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
     }
@@ -596,7 +597,7 @@ impl App {
     pub fn is_open(&self, node: NodeId) -> bool {
         match node {
             NodeId::Folder(id) => self.store.folder(id).is_some_and(|f| f.expanded),
-            NodeId::Server(id) => self.jump_open.contains(&id),
+            NodeId::Server(id) => !self.jump_collapsed.contains(&id),
         }
     }
 
@@ -610,9 +611,9 @@ impl App {
             }
             NodeId::Server(id) => {
                 if open {
-                    self.jump_open.insert(id);
+                    self.jump_collapsed.remove(&id);
                 } else {
-                    self.jump_open.remove(&id);
+                    self.jump_collapsed.insert(id);
                 }
             }
         }
@@ -1681,7 +1682,7 @@ impl App {
             };
             if self.store.move_via(id, via) {
                 if let Some(v) = via {
-                    self.jump_open.insert(v);
+                    self.jump_collapsed.remove(&v);
                 }
                 self.persist();
                 self.rebuild();
