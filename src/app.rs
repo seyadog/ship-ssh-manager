@@ -1161,7 +1161,8 @@ impl App {
 
     fn modal_mouse(&mut self, ev: MouseEvent) {
         let (x, y) = (ev.column, ev.row);
-        let hit = self.layout.modal.iter().find(|(r, _)| inside(*r, x, y)).map(|&(_, h)| h);
+        // Later entries (buttons) sit on top of earlier ones (field rows).
+        let hit = self.layout.modal.iter().rev().find(|(r, _)| inside(*r, x, y)).map(|&(_, h)| h);
         let Some(modal) = self.modal.take() else { return };
         let double = matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) && self.is_double_click(x, y);
         let down = matches!(ev.kind, MouseEventKind::Down(MouseButton::Left));
