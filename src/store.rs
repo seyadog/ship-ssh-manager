@@ -79,6 +79,8 @@ pub enum NodeId {
     Server(u64),
     /// A space (see `spaces`). Spaces are not part of this store, so every operation here ignores them.
     Space(u64),
+    /// The “bastions” section title of the SSH view. Not part of this store either.
+    BastionsHeader,
 }
 
 /// Sibling order is the order of the vectors (folders first, then servers).
@@ -199,7 +201,7 @@ impl Store {
         match node {
             NodeId::Folder(id) => self.folder(id).and_then(|f| f.parent),
             NodeId::Server(id) => self.server(id).and_then(|s| s.parent),
-            NodeId::Space(_) => None,
+            NodeId::Space(_) | NodeId::BastionsHeader => None,
         }
     }
 
@@ -229,7 +231,7 @@ impl Store {
 
     fn delete_nodes(&mut self, node: NodeId) -> Vec<u64> {
         match node {
-            NodeId::Space(_) => vec![],
+            NodeId::Space(_) | NodeId::BastionsHeader => vec![],
             NodeId::Server(id) => {
                 self.servers.retain(|s| s.id != id);
                 vec![id]
@@ -258,7 +260,7 @@ impl Store {
             }
         }
         match node {
-            NodeId::Space(_) => return false,
+            NodeId::Space(_) | NodeId::BastionsHeader => return false,
             NodeId::Folder(id) => {
                 let Some(pos) = self.folders.iter().position(|f| f.id == id) else { return false };
                 let mut f = self.folders.remove(pos);
@@ -311,7 +313,7 @@ impl Store {
             false
         }
         match node {
-            NodeId::Space(_) => false,
+            NodeId::Space(_) | NodeId::BastionsHeader => false,
             NodeId::Folder(id) => {
                 let Some(i) = self.folders.iter().position(|f| f.id == id) else { return false };
                 go(&mut self.folders, i, delta, |a, b| a.parent == b.parent)

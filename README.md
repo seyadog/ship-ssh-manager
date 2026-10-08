@@ -58,7 +58,7 @@ cargo test
 
 An **agent** is a project with its own terminals (what earlier versions called a *space*). Press `v` (or click `Agents`, the first view) and then `a`: a normal terminal opens, and you move around in it like in any terminal (`cd`, `mkdir`, `git clone`...). **The space stays in the last directory you leave it in**: that directory gives it its name and shows its **git branch**, and new terminals of the space start there. Rename it with `e` and your name is kept from then on.
 
-- Every terminal belongs to where it was opened: the SSH section, or one space. The tab bar only shows the tabs of what you are looking at, so what runs in an agent's project (an AI agent, say) never mixes with your SSH tabs.
+- Every terminal belongs to where it was opened: the SSH section, or one agent's project. The tab bar shows all of them, like a browser, but an agent's terminal always lives in its project: it is listed there in the sidebar and never among your SSH servers.
 - **Agents.** Run `claude`, `opencode`, `codex`, `gemini`, `aider`... in any terminal and it shows up under **running** at the bottom of the sidebar, with the project it runs in. `●` amber is working, `○` is idle, a green `●` means it finished and is waiting for you. Click one (or press `Alt+n`) to jump to its terminal wherever it lives.
 - **Sound.** When an agent finishes a stretch of work, ship plays a sound (the system's player, or the terminal bell). Set `{"sound": false}` in `settings.json` (next to `servers.json`) to silence it.
 - Detection looks at the foreground process of the terminal and at its output: an agent that keeps drawing is working; when it goes quiet after a while, it is done. Linux and macOS only.
@@ -82,16 +82,18 @@ Terminals live in a small background server (`ship daemon`) that starts by itsel
 - The copy goes to the system clipboard through the terminal (OSC 52, which also works over SSH) and through `wl-copy`, `xclip`, `xsel`, `pbcopy` or `clip`, whichever is there. Paste with your terminal's paste shortcut (`Ctrl+Shift+V` in most), which ship forwards as a paste.
 - **History.** The mouse wheel scrolls it; `Shift+PgUp` / `Shift+PgDn` go by half a page, `Shift+Home` to the oldest line, `Shift+End` (or just typing) back to live. An amber bar shows how far up you are. With the background server the history survives closing ship (up to the last few MiB of output of each session).
 
-## Two views of the same servers
+## The sidebar: Agents and SSH
 
-The sidebar has three views, left to right: **Agents**, **SSH** and **Bastions**. Press `v` (or click the header) to switch; or press `↑` on the first row and use `←` `→`: the view changes as you move, no `Enter` needed. The last two show the same servers in two ways:
+The sidebar has two views, left to right: **Agents** and **SSH**. Press `v` (or click the header) to switch; or press `↑` on the first row and use `←` `→`: the view changes as you move, no `Enter` needed.
 
-- **SSH** — your servers, organized in folders.
-- **Bastions** — how you reach them. Only bastions are roots here (servers that others are reached through), and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. Servers that are not part of any jump chain are hidden in this view. To start one, edit a server and set “Jump via”. Opening it runs `ssh` through every hop.
+- **Agents** — your project workspaces (see above).
+- **SSH** — your servers, organized in folders. Below the folders there is a **bastions** section (it shows up once a server is reached through another): the bastions are its roots, and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. Fold it with `←` on its title. To start one, edit a server and set “Jump via”, or drag a server onto a bastion. Opening a server runs `ssh` through every hop.
+
+The **tab bar** at the top is like a browser's: it shows every tab, SSH sessions and agent terminals alike (an agent's terminal carries its project's name). Pick one (click, `Alt+←/→`, `Alt+1..9`) and the sidebar jumps to its place.
 
 ## Keyboard (sidebar)
 
-Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `←` folds it or goes back up, `Enter` opens a session.
+Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or a bastion, `←` folds it or goes back up, `Enter` opens a session.
 
 | Key | Action |
 |---|---|
@@ -99,9 +101,9 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 | `→` / `l` | unfold, or step into the first child |
 | `←` / `h` | fold, or go back to the parent |
 | `Enter` | open server / toggle folder |
-| `↑` on the first row | focus the views at the top (`Agents`, `SSH`, `Bastions`; `←` `→` switch view at once); `↓` from the last row focuses the buttons at the bottom (`+ Server`, `+ Folder`, `Edit`). `←` `→` choose, `Enter` activate, `Esc` (or the arrow back towards the list) leaves |
+| `↑` on the first row | focus the views at the top (`Agents`, `SSH`; `←` `→` switch view at once); `↓` from the last row focuses the buttons at the bottom (`+ Server`, `+ Folder`, `Edit`). `←` `→` choose, `Enter` activate, `Esc` (or the arrow back towards the list) leaves |
 | `v` / `Tab` | switch view |
-| `a` / `f` | new server / new folder (in the jump view, `a` on a server creates a host behind it) |
+| `a` / `f` | new server / new folder (on a server of the bastions section, `a` creates a host behind it) |
 | `e` / `d` | edit / delete |
 | `c` | close the open session of the selected server (in the Agents view: the current terminal) |
 | `Alt+↑` `Alt+↓` | reorder among siblings |
@@ -111,7 +113,7 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 
 **Global:** `Alt+n` jump to the agent that wants attention (or the next one) · `F6` panel ⇄ terminal · `Alt+←/→` switch tab · `Alt+Shift+←/→` move tab · `Alt+1..9` jump to tab (from the sidebar, plain `1`..`9` also work; some terminals, e.g. Ptyxis, keep `Alt+N` for their own tabs) · `Alt+W` close · `F2` rename · `Shift+PgUp/PgDn` scrollback.
 
-**Mouse:** double-click opens a server or toggles a folder · drag to move (onto a folder: inside it; onto a server: right before it; in the jump view: behind that server, or drop on empty space to reach it directly) · drag tabs to reorder · ✕ closes a tab · double-click a tab renames it · wheel scrolls the history.
+**Mouse:** double-click opens a server or toggles a folder · drag to move (onto a folder: inside it; onto a server: right before it; onto a bastion: it is reached through it from then on; from the bastions section onto its title or empty space: directly again) · drag tabs to reorder · ✕ closes a tab · double-click a tab renames it · wheel scrolls the history.
 
 In the server form, `Ctrl+O` (or “Browse…”) opens a file browser that starts in `~/.ssh` and highlights private keys.
 

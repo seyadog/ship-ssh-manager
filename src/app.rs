@@ -131,6 +131,8 @@ impl Input {
 pub struct Row {
     pub node: NodeId,
     pub depth: usize,
+    /// The row sits in the bastions section (the jump tree), not in the folder tree.
+    pub jump: bool,
 }
 
 /// Text selected with the mouse in the terminal area, as (row, column) cells of that area.
@@ -500,7 +502,6 @@ pub enum Modal {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hit {
     ViewFolders,
-    ViewJump,
     AddServer,
     AddFolder,
     Edit,
@@ -514,9 +515,9 @@ pub enum Hit {
     No,
 }
 
-/// Sidebar menu items in keyboard order: the three buttons in the line at the bottom (0..3), then the three
-/// views at the top (3..6).
-pub const HEADER: [Hit; 6] = [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewSpaces, Hit::ViewFolders, Hit::ViewJump];
+/// Sidebar menu items in keyboard order: the three buttons in the line at the bottom (0..3), then the two
+/// views at the top (3..5).
+pub const HEADER: [Hit; 5] = [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewSpaces, Hit::ViewFolders];
 
 /// `Tab::server_id` of the terminal of this computer (real servers start at 1).
 pub const LOCAL: u64 = 0;
@@ -551,13 +552,15 @@ fn inside(r: Rect, x: u16, y: u16) -> bool {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
+    /// Shown as “SSH”: the folder tree, and below it the bastions.
     Folders,
-    Jump,
+    /// Shown as “Agents”.
     Spaces,
 }
 
 enum Drag {
-    Node(NodeId),
+    /// A row of the list and whether it was in the bastions section.
+    Node(NodeId, bool),
     Tab(usize),
 }
 
@@ -604,6 +607,8 @@ pub struct App {
     /// Servers whose hidden hosts are unfolded in the jump view.
     /// Bastions the user folded in the jump view (everything is unfolded by default).
     jump_collapsed: HashSet<u64>,
+    /// The bastions section of the SSH view is folded.
+    bastions_collapsed: bool,
     drag: Option<Drag>,
     last_click: Option<(Instant, u16, u16)>,
 }
@@ -639,6 +644,7 @@ impl App {
             drop_hover: None,
             view: View::Folders,
             jump_collapsed: HashSet::new(),
+            bastions_collapsed: false,
             header: None,
             drag: None,
             last_click: None,
@@ -666,13 +672,13 @@ impl App {
     pub fn rebuild(&mut self) {
         fn walk(store: &Store, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
             for f in store.folders.iter().filter(|f| f.parent == parent) {
-                out.push(Row { node: NodeId::Folder(f.id), depth });
+                out.push(Row { node: NodeId::Folder(f.id), depth, jump: false });
                 if f.expanded {
                     walk(store, Some(f.id), depth + 1, out);
                 }
             }
             for s in store.servers.iter().filter(|s| s.parent == parent) {
-                out.push(Row { node: NodeId::Server(s.id), depth });
+                out.push(Row { node: NodeId::Server(s.id), depth, jump: false });
             }
         }
         fn walk_jump(store: &Store, via: Option<u64>, depth: usize, collapsed: &HashSet<u64>, out: &mut Vec<Row>) {
@@ -684,7 +690,7 @@ impl App {
                 if via.is_none() && !store.servers.iter().any(|x| x.jump == Some(s.id)) {
                     continue;
                 }
-                out.push(Row { node: NodeId::Server(s.id), depth });
+                out.push(Row { node: NodeId::Server(s.id), depth, jump: true });
                 if !collapsed.contains(&s.id) {
                     walk_jump(store, Some(s.id), depth + 1, collapsed, out);
                 }
@@ -692,35 +698,51 @@ impl App {
         }
         self.rows.clear();
         match self.view {
-            View::Folders => walk(&self.store, None, 0, &mut self.rows),
-            View::Jump => walk_jump(&self.store, None, 0, &self.jump_collapsed, &mut self.rows),
-            View::Spaces => self.rows.extend(self.spaces.spaces.iter().map(|s| Row { node: NodeId::Space(s.id), depth: 0 })),
+            View::Folders => {
+                walk(&self.store, None, 0, &mut self.rows);
+                // Below the folders, the bastions and what is reached through them (only if there are any).
+                let bastions = self
+                    .store
+                    .servers
+                    .iter()
+                    .any(|s| s.jump.is_none() && self.store.servers.iter().any(|x| x.jump == Some(s.id)));
+                if bastions {
+                    self.rows.push(Row { node: NodeId::BastionsHeader, depth: 0, jump: false });
+                    if !self.bastions_collapsed {
+                        walk_jump(&self.store, None, 1, &self.jump_collapsed, &mut self.rows);
+                    }
+                }
+            }
+            View::Spaces => self.rows.extend(
+                self.spaces.spaces.iter().map(|s| Row { node: NodeId::Space(s.id), depth: 0, jump: false }),
+            ),
         }
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
     }
 
-    pub fn has_children(&self, node: NodeId) -> bool {
-        match (node, self.view) {
-            (NodeId::Folder(id), _) => {
+    pub fn has_children(&self, row: &Row) -> bool {
+        match row.node {
+            NodeId::Folder(id) => {
                 self.store.folders.iter().any(|f| f.parent == Some(id))
                     || self.store.servers.iter().any(|s| s.parent == Some(id))
             }
-            (NodeId::Server(id), View::Jump) => self.store.servers.iter().any(|s| s.jump == Some(id)),
-            (NodeId::Server(_), _) => false,
-            (NodeId::Space(_), _) => false,
+            NodeId::Server(id) if row.jump => self.store.servers.iter().any(|s| s.jump == Some(id)),
+            NodeId::BastionsHeader => true,
+            NodeId::Server(_) | NodeId::Space(_) => false,
         }
     }
 
-    pub fn is_open(&self, node: NodeId) -> bool {
-        match node {
+    pub fn is_open(&self, row: &Row) -> bool {
+        match row.node {
             NodeId::Folder(id) => self.store.folder(id).is_some_and(|f| f.expanded),
             NodeId::Server(id) => !self.jump_collapsed.contains(&id),
+            NodeId::BastionsHeader => !self.bastions_collapsed,
             NodeId::Space(_) => false,
         }
     }
 
-    fn set_open(&mut self, node: NodeId, open: bool) {
-        match node {
+    fn set_open(&mut self, row: Row, open: bool) {
+        match row.node {
             NodeId::Folder(id) => {
                 if let Some(f) = self.store.folders.iter_mut().find(|f| f.id == id) {
                     f.expanded = open;
@@ -734,6 +756,7 @@ impl App {
                     self.jump_collapsed.insert(id);
                 }
             }
+            NodeId::BastionsHeader => self.bastions_collapsed = !open,
             NodeId::Space(_) => {}
         }
         self.rebuild();
@@ -781,7 +804,13 @@ impl App {
             self.remembered.insert(self.scope, t.id);
         }
         self.scope = scope;
-        let back = self.remembered.get(&scope).and_then(|id| self.tabs.iter().position(|t| t.id == *id));
+        // Going to another part of the sidebar brings back the tab you had there. If it has none, the tab
+        // you were looking at stays.
+        let back = self
+            .remembered
+            .get(&scope)
+            .and_then(|id| self.tabs.iter().position(|t| t.id == *id))
+            .or_else(|| self.tabs.iter().rposition(|t| t.scope == scope));
         if let Some(i) = back {
             self.active = i;
         }
@@ -793,13 +822,24 @@ impl App {
         self.tabs.iter().enumerate().filter(|(_, t)| t.scope == self.scope).map(|(i, _)| i).collect()
     }
 
-    /// Keeps `active` pointing at a tab of the current scope, and the keyboard off an empty terminal.
+    /// Keeps `active` pointing at a tab, and the keyboard off an empty terminal.
     fn fix_active(&mut self) {
-        let sc = self.scoped();
-        match sc.last() {
-            None => self.focus = Focus::Sidebar,
-            Some(&last) if !sc.contains(&self.active) => self.active = last,
-            _ => {}
+        if self.tabs.is_empty() {
+            self.focus = Focus::Sidebar;
+        } else {
+            self.active = self.active.min(self.tabs.len() - 1);
+        }
+    }
+
+    /// What a tab is called in the tab bar, which shows every tab of every part of ship: a terminal of an
+    /// agent's project carries the project's name.
+    pub fn tab_label(&self, t: &Tab) -> String {
+        match t.scope {
+            Scope::Space(id) => {
+                let place = self.spaces.get(id).map(|s| s.name.as_str()).unwrap_or("?");
+                if t.title == "shell" { place.to_string() } else { format!("{place}/{}", t.title) }
+            }
+            Scope::Ssh => t.title.clone(),
         }
     }
 
@@ -816,8 +856,9 @@ impl App {
         }
     }
 
-    /// Shows tab `idx` wherever it lives and puts the keyboard on it.
-    pub fn focus_tab(&mut self, idx: usize) {
+    /// Makes tab `idx` the one on screen, wherever it lives: the sidebar moves to its place (the agent's
+    /// project, or the SSH section), like a browser jumping between sites.
+    pub fn select_tab(&mut self, idx: usize) {
         let Some(scope) = self.tabs.get(idx).map(|t| t.scope) else { return };
         match scope {
             Scope::Space(id) => {
@@ -829,8 +870,15 @@ impl App {
         }
         self.sync_scope();
         self.active = idx;
-        self.tabs[idx].attention = false;
-        self.focus = Focus::Terminal;
+    }
+
+    /// Like `select_tab`, and puts the keyboard on the terminal.
+    pub fn focus_tab(&mut self, idx: usize) {
+        self.select_tab(idx);
+        if let Some(t) = self.tabs.get_mut(idx) {
+            t.attention = false;
+            self.focus = Focus::Terminal;
+        }
     }
 
     /// Alt+N: the agent that wants attention, else the next one after the current tab.
@@ -846,6 +894,18 @@ impl App {
             Some(i) => self.focus_tab(i),
             None => self.set_flash("No agents running"),
         }
+    }
+
+    /// Selects a row of the bastions section (`jump`) or of the folder tree: a server shows up in both.
+    fn select_row(&mut self, node: NodeId, jump: bool) {
+        match self.rows.iter().position(|r| r.node == node && r.jump == jump) {
+            Some(i) => self.selected = i,
+            None => self.select_node(node),
+        }
+    }
+
+    pub fn selected_row(&self) -> Option<Row> {
+        self.rows.get(self.selected).copied()
     }
 
     fn select_node(&mut self, node: NodeId) {
@@ -927,7 +987,7 @@ impl App {
             });
         }
         if !list.is_empty() {
-            self.fix_active();
+            self.select_tab(0);
             self.set_flash(format!("Restored {} session(s) from the background server", list.len()));
         }
     }
@@ -952,8 +1012,7 @@ impl App {
         }
         // Looking at an agent's tab is the attention it asked for.
         if self.focus == Focus::Terminal && self.modal.is_none() {
-            let scope = self.scope;
-            if let Some(t) = self.tabs.get_mut(self.active).filter(|t| t.scope == scope) {
+            if let Some(t) = self.tabs.get_mut(self.active) {
                 t.attention = false;
             }
         }
@@ -1390,11 +1449,8 @@ impl App {
         if idx >= self.tabs.len() {
             return;
         }
-        // The tab to land on: its neighbour in the same scope.
-        let scope = self.tabs[idx].scope;
-        let same: Vec<usize> = self.tabs.iter().enumerate().filter(|(_, t)| t.scope == scope).map(|(i, _)| i).collect();
-        let pos = same.iter().position(|&i| i == idx).unwrap_or(0);
-        let neighbour = if pos > 0 { Some(same[pos - 1]) } else { same.get(1).copied() };
+        // The tab to land on: its neighbour in the bar.
+        let neighbour = if idx > 0 { Some(idx - 1) } else if self.tabs.len() > 1 { Some(1) } else { None };
         let was_active = idx == self.active;
         self.tabs.remove(idx).session.kill();
         if self.active > idx {
@@ -1406,6 +1462,9 @@ impl App {
             }
         }
         self.fix_active();
+        if was_active && !self.tabs.is_empty() {
+            self.select_tab(self.active); // the sidebar follows the tab we land on
+        }
     }
 
     /// Closes the open session of the selected server (the active tab if it is that server's, else the newest one).
@@ -1432,9 +1491,8 @@ impl App {
 
     /// Switches to tab `i` (0-based) and puts the keyboard on its terminal.
     fn goto_tab(&mut self, i: usize) {
-        if let Some(&g) = self.scoped().get(i) {
-            self.active = g;
-            self.focus = Focus::Terminal;
+        if i < self.tabs.len() {
+            self.focus_tab(i);
         } else {
             self.set_flash(format!("No tab {}", i + 1));
         }
@@ -1475,9 +1533,8 @@ impl App {
         }
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let scoped = self.scoped();
-        let n = scoped.len();
-        let pos = scoped.iter().position(|&g| g == self.active).unwrap_or(0);
+        let n = self.tabs.len();
+        let pos = self.active.min(n.saturating_sub(1));
         match key.code {
             KeyCode::F(6) => {
                 self.focus = if self.focus == Focus::Terminal || n == 0 { Focus::Sidebar } else { Focus::Terminal };
@@ -1488,10 +1545,10 @@ impl App {
                 self.modal = self.gate(Pending::FillSudo(self.active));
                 return;
             }
-            KeyCode::Left if alt && shift && n > 0 => return self.move_tab(self.active, scoped[pos.saturating_sub(1)]),
-            KeyCode::Right if alt && shift && n > 0 => return self.move_tab(self.active, scoped[(pos + 1).min(n - 1)]),
-            KeyCode::Left if alt && n > 0 => return self.active = scoped[(pos + n - 1) % n],
-            KeyCode::Right if alt && n > 0 => return self.active = scoped[(pos + 1) % n],
+            KeyCode::Left if alt && shift && n > 0 => return self.move_tab(self.active, pos.saturating_sub(1)),
+            KeyCode::Right if alt && shift && n > 0 => return self.move_tab(self.active, (pos + 1).min(n - 1)),
+            KeyCode::Left if alt && n > 0 => return self.select_tab((pos + n - 1) % n),
+            KeyCode::Right if alt && n > 0 => return self.select_tab((pos + 1) % n),
             KeyCode::Char('n') if alt => return self.next_agent(),
             KeyCode::Char('w') if alt && n > 0 => return self.close_tab(self.active),
             KeyCode::Char(c @ '1'..='9') if alt => return self.goto_tab(c as usize - '1' as usize),
@@ -1534,7 +1591,6 @@ impl App {
         match self.view {
             View::Spaces => 3,
             View::Folders => 4,
-            View::Jump => 5,
         }
     }
 
@@ -1543,7 +1599,6 @@ impl App {
         let spaces = self.view == View::Spaces;
         match hit {
             Hit::ViewFolders => self.set_view(View::Folders),
-            Hit::ViewJump => self.set_view(View::Jump),
             Hit::ViewSpaces => self.set_view(View::Spaces),
             Hit::AddServer if spaces => self.new_space(),
             Hit::AddServer => self.new_server_form(),
@@ -1567,7 +1622,7 @@ impl App {
     /// key was consumed.
     fn header_key(&mut self, i: usize, key: KeyEvent) -> bool {
         let buttons = i < 3;
-        let (row_start, row_end) = if buttons { (0, 3) } else { (3, 6) };
+        let (row_start, row_end) = if buttons { (0, 3) } else { (3, 5) };
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => self.move_in_menu(i.saturating_sub(1).max(row_start), buttons),
             KeyCode::Right | KeyCode::Char('l') => self.move_in_menu((i + 1).min(row_end - 1), buttons),
@@ -1614,16 +1669,15 @@ impl App {
             }
             KeyCode::Right | KeyCode::Char('l') => self.step_in(),
             KeyCode::Left | KeyCode::Char('h') => self.step_out(),
-            KeyCode::Enter | KeyCode::Char(' ') => match self.selected_node() {
-                Some(NodeId::Space(id)) => self.open_space(id),
-                Some(NodeId::Server(id)) => self.open_server(id),
-                Some(n @ NodeId::Folder(_)) => self.toggle(n),
+            KeyCode::Enter | KeyCode::Char(' ') => match self.selected_row() {
+                Some(Row { node: NodeId::Space(id), .. }) => self.open_space(id),
+                Some(Row { node: NodeId::Server(id), .. }) => self.open_server(id),
+                Some(row @ Row { node: NodeId::Folder(_) | NodeId::BastionsHeader, .. }) => self.toggle(row),
                 None => {}
             },
             KeyCode::Char('v') | KeyCode::Tab => self.set_view(match self.view {
                 View::Spaces => View::Folders,
-                View::Folders => View::Jump,
-                View::Jump => View::Spaces,
+                View::Folders => View::Spaces,
             }),
             KeyCode::Char(c @ '1'..='9') if !ctrl && !alt => self.goto_tab(c as usize - '1' as usize),
             KeyCode::Char('t') => self.open_server(LOCAL),
@@ -1650,49 +1704,49 @@ impl App {
             return;
         }
         if let Some(n) = self.selected_node() {
-            if self.store.shift(n, delta, self.view == View::Jump) {
+            let jump = self.selected_row().is_some_and(|r| r.jump);
+            if self.store.shift(n, delta, jump) {
                 self.persist();
                 self.rebuild();
-                self.select_node(n);
+                self.select_row(n, jump);
             }
         }
     }
 
-    fn toggle(&mut self, node: NodeId) {
-        let open = self.is_open(node);
-        self.set_open(node, !open);
+    fn toggle(&mut self, row: Row) {
+        let open = self.is_open(&row);
+        self.set_open(row, !open);
     }
 
     /// Right arrow: unfold, or move into the first child if already unfolded.
     fn step_in(&mut self) {
-        let Some(node) = self.selected_node() else { return };
-        if !self.has_children(node) {
+        let Some(row) = self.selected_row() else { return };
+        if !self.has_children(&row) {
             return;
         }
-        if !self.is_open(node) {
-            return self.set_open(node, true);
+        if !self.is_open(&row) {
+            return self.set_open(row, true);
         }
-        let depth = self.rows[self.selected].depth;
-        if self.rows.get(self.selected + 1).is_some_and(|r| r.depth > depth) {
+        if self.rows.get(self.selected + 1).is_some_and(|r| r.depth > row.depth) {
             self.selected += 1;
         }
     }
 
     /// Left arrow: fold, or go back up to the parent row.
     fn step_out(&mut self) {
-        let Some(node) = self.selected_node() else { return };
-        if self.has_children(node) && self.is_open(node) {
-            return self.set_open(node, false);
+        let Some(row) = self.selected_row() else { return };
+        if self.has_children(&row) && self.is_open(&row) {
+            return self.set_open(row, false);
         }
-        let depth = self.rows[self.selected].depth;
-        if let Some(i) = self.rows[..self.selected].iter().rposition(|r| r.depth < depth) {
+        if let Some(i) = self.rows[..self.selected].iter().rposition(|r| r.depth < row.depth) {
             self.selected = i;
         }
     }
 
     fn new_server_form(&mut self) {
-        let jump = match (self.view, self.selected_node()) {
-            (View::Jump, Some(NodeId::Server(id))) => Some(id),
+        // From a bastion (or something behind one), the new server goes behind it.
+        let jump = match self.selected_row() {
+            Some(Row { node: NodeId::Server(id), jump: true, .. }) => Some(id),
             _ => None,
         };
         self.modal = Some(Modal::Form(Box::new(ServerForm::new(self.current_parent(), jump))));
@@ -1794,13 +1848,17 @@ impl App {
                     }));
                 }
             }
-            None => {}
+            Some(NodeId::BastionsHeader) | None => {}
         }
     }
 
     fn ask_delete(&mut self) {
         let Some(node) = self.selected_node() else { return };
+        if node == NodeId::BastionsHeader {
+            return;
+        }
         let text = match node {
+            NodeId::BastionsHeader => return,
             NodeId::Space(id) => format!(
                 "Delete “{}”? Its terminals are closed; the directory is not touched.",
                 self.spaces.get(id).map(|s| s.name.as_str()).unwrap_or("?")
@@ -2150,7 +2208,7 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) if self.selecting => self.drag_select(x, y),
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.drop_hover = match self.drag {
-                    Some(Drag::Node(_)) => self.row_at(x, y).filter(|&i| i < self.rows.len()),
+                    Some(Drag::Node(..)) => self.row_at(x, y).filter(|&i| i < self.rows.len()),
                     _ => None,
                 };
             }
@@ -2189,15 +2247,15 @@ impl App {
             self.focus = Focus::Sidebar;
             if let Some(i) = self.row_at(x, y).filter(|&i| i < self.rows.len()) {
                 self.selected = i;
-                let node = self.rows[i].node;
+                let row = self.rows[i];
                 if double {
-                    match node {
-                        NodeId::Folder(_) => self.toggle(node),
+                    match row.node {
+                        NodeId::Folder(_) | NodeId::BastionsHeader => self.toggle(row),
                         NodeId::Server(id) => self.open_server(id),
                         NodeId::Space(id) => self.open_space(id),
                     }
                 } else {
-                    self.drag = Some(Drag::Node(node));
+                    self.drag = Some(Drag::Node(row.node, row.jump));
                 }
             }
         } else if inside(self.layout.tabbar, x, y) {
@@ -2206,8 +2264,7 @@ impl App {
                 if inside(close, x, y) {
                     return self.close_tab(i);
                 }
-                self.active = i;
-                self.focus = Focus::Terminal;
+                self.focus_tab(i);
                 if double {
                     self.rename_tab_prompt();
                 } else {
@@ -2315,49 +2372,58 @@ impl App {
                     self.move_tab(from, to);
                 }
             }
-            Some(Drag::Node(node)) => self.drop_node(node, x, y),
+            Some(Drag::Node(node, jump)) => self.drop_node(node, jump, x, y),
             None => {}
         }
     }
 
-    fn drop_node(&mut self, node: NodeId, x: u16, y: u16) {
-        if !inside(self.layout.sidebar, x, y) {
+    fn drop_node(&mut self, node: NodeId, from_jump: bool, x: u16, y: u16) {
+        if !inside(self.layout.sidebar, x, y) || self.view == View::Spaces {
             return;
         }
-        if self.view == View::Spaces {
-            return;
-        }
-        if self.view == View::Jump {
-            let NodeId::Server(id) = node else { return };
-            let target = self.row_at(x, y).and_then(|i| self.rows.get(i)).map(|r| r.node);
-            let via = match target {
-                Some(NodeId::Server(s)) if s == id => return,
-                Some(NodeId::Server(s)) => Some(s),
+        let target = self.row_at(x, y).and_then(|i| self.rows.get(i)).copied();
+        // A server dropped on a bastion (or on something behind one) is reached through it from then on; one that
+        // was already behind a bastion and is dropped on the section title or on empty space is reached directly.
+        if let NodeId::Server(id) = node {
+            let on_bastion = target.filter(|r| r.jump).and_then(|r| match r.node {
+                NodeId::Server(s) => Some(s),
+                _ => None,
+            });
+            let via = match (on_bastion, target) {
+                (Some(s), _) if s == id => return,
+                (Some(s), _) => Some(Some(s)),
+                (None, Some(r)) if from_jump && r.node == NodeId::BastionsHeader => Some(None),
+                (None, None) if from_jump => Some(None),
                 _ => None,
             };
-            if self.store.move_via(id, via) {
-                if let Some(v) = via {
-                    self.jump_collapsed.remove(&v);
+            if let Some(via) = via {
+                if self.store.move_via(id, via) {
+                    if let Some(v) = via {
+                        self.jump_collapsed.remove(&v);
+                    }
+                    self.persist();
+                    self.rebuild();
+                    self.select_row(node, via.is_some());
+                } else {
+                    self.set_flash("Invalid move: that would create a loop");
                 }
-                self.persist();
-                self.rebuild();
-                self.select_node(node);
-            } else {
-                self.set_flash("Invalid move: that would create a loop");
+                return;
             }
-            return;
         }
-        let moved = match self.row_at(x, y).and_then(|i| self.rows.get(i)).map(|r| r.node) {
-            Some(target) if target == node => return,
-            Some(NodeId::Space(_)) => false,
-            Some(NodeId::Folder(f)) => self.store.move_into(node, Some(f)),
-            Some(NodeId::Server(s)) => match node {
+        if from_jump {
+            return; // rows of the bastions section only move within it
+        }
+        let moved = match target.map(|r| (r.node, r.jump)) {
+            Some((t, _)) if t == node => return,
+            Some((_, true)) | Some((NodeId::BastionsHeader, _)) | Some((NodeId::Space(_), _)) => false,
+            Some((NodeId::Folder(f), _)) => self.store.move_into(node, Some(f)),
+            Some((NodeId::Server(s), _)) => match node {
                 NodeId::Server(id) => self.store.move_server_before(id, s),
                 NodeId::Folder(_) => {
                     let parent = self.store.server(s).and_then(|s| s.parent);
                     self.store.move_into(node, parent)
                 }
-                NodeId::Space(_) => false,
+                NodeId::Space(_) | NodeId::BastionsHeader => false,
             },
             None if inside(self.layout.list, x, y) || y >= self.layout.list.y => self.store.move_into(node, None),
             None => false,
@@ -2662,11 +2728,11 @@ mod tests {
         assert_eq!((app.header, app.view), (Some(3), View::Spaces), "stops at the first");
         press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Right);
-        assert_eq!((app.header, app.view), (Some(5), View::Jump), "Bastions at the end");
+        assert_eq!((app.header, app.view), (Some(4), View::Folders), "SSH is the last view");
         press(&mut app, KeyCode::Right);
-        assert_eq!((app.header, app.view), (Some(5), View::Jump));
+        assert_eq!((app.header, app.view), (Some(4), View::Folders));
         press(&mut app, KeyCode::Left);
-        assert_eq!(app.view, View::Folders, "and back");
+        assert_eq!(app.view, View::Spaces, "and back");
     }
 
     #[test]
@@ -2759,8 +2825,8 @@ mod tests {
 
         app.set_view(View::Folders);
         assert_eq!(app.scope, Scope::Ssh);
-        assert!(app.scoped().is_empty(), "nothing from the space shows among the SSH tabs");
-        assert_eq!(app.focus, Focus::Sidebar);
+        assert!(app.scoped().is_empty(), "nothing of the space belongs to the SSH section");
+        assert_eq!(app.tabs[app.active].scope, Scope::Space(id), "but its tab stays on screen, like a browser tab");
         app.open_server(LOCAL);
         assert_eq!(app.tabs[1].scope, Scope::Ssh, "a local terminal outside the spaces belongs to the SSH section");
         assert_eq!(app.scoped(), vec![1]);
@@ -2963,6 +3029,122 @@ mod tests {
         assert_eq!(app.row_at(5, 10), Some(2), "rows are counted from the scroll offset");
         app.layout.row_h = 1;
         assert_eq!(app.row_at(5, 12), Some(4), "one-line rows as before");
+    }
+
+    /// Three servers: `bastion`, `inner` (behind it) and `plain` (neither). Returns their ids.
+    fn bastion_setup(app: &mut App) -> (u64, u64, u64) {
+        let ids: Vec<u64> = app.store.servers.iter().map(|s| s.id).collect();
+        let (b, inner, plain) = (ids[0], ids[1], ids[2]);
+        app.store.move_via(inner, Some(b));
+        app.rebuild();
+        (b, inner, plain)
+    }
+
+    #[test]
+    fn the_ssh_view_has_a_bastions_section_below_the_folders() {
+        let mut app = app_with_servers(3);
+        assert!(app.rows.iter().all(|r| !r.jump && r.node != NodeId::BastionsHeader), "no bastions yet: no section");
+        let (b, inner, _) = bastion_setup(&mut app);
+        let nodes: Vec<(NodeId, bool, usize)> = app.rows.iter().map(|r| (r.node, r.jump, r.depth)).collect();
+        let header = nodes.iter().position(|n| n.0 == NodeId::BastionsHeader).expect("the section title");
+        assert_eq!(header, 3, "after the three servers of the folder tree");
+        assert_eq!(nodes[header + 1], (NodeId::Server(b), true, 1), "the bastion, under the title");
+        assert_eq!(nodes[header + 2], (NodeId::Server(inner), true, 2), "and what is behind it, one level deeper");
+        assert_eq!(nodes.len(), 6);
+    }
+
+    #[test]
+    fn the_bastions_section_can_be_folded() {
+        let mut app = app_with_servers(3);
+        bastion_setup(&mut app);
+        app.selected = 3; // the title
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.rows.len(), 4, "folded: just the title");
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.rows.len(), 6, "unfolded again");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.rows.len(), 4, "Enter toggles it too");
+    }
+
+    #[test]
+    fn dropping_a_server_on_a_bastion_routes_it_through_that_bastion() {
+        let mut app = app_with_servers(3);
+        let (b, _, plain) = bastion_setup(&mut app);
+        app.layout.sidebar = Rect::new(0, 0, 32, 40);
+        app.layout.list = Rect::new(1, 5, 30, 30);
+        app.layout.row_h = 1;
+        let bastion_row = app.rows.iter().position(|r| r.node == NodeId::Server(b) && r.jump).unwrap();
+        app.drop_node(NodeId::Server(plain), false, 5, 5 + bastion_row as u16);
+        assert_eq!(app.store.server(plain).unwrap().jump, Some(b));
+        // and dropped on the section title (or on empty space) it is reached directly again
+        let header_row = app.rows.iter().position(|r| r.node == NodeId::BastionsHeader).unwrap();
+        app.drop_node(NodeId::Server(plain), true, 5, 5 + header_row as u16);
+        assert_eq!(app.store.server(plain).unwrap().jump, None);
+    }
+
+    #[test]
+    fn a_new_server_from_a_bastion_row_starts_behind_it() {
+        let mut app = app_with_servers(3);
+        let (b, _, _) = bastion_setup(&mut app);
+        app.selected = app.rows.iter().position(|r| r.node == NodeId::Server(b) && r.jump).unwrap();
+        press(&mut app, KeyCode::Char('a'));
+        let Some(Modal::Form(f)) = &app.modal else { panic!("the form should be open") };
+        assert_eq!(f.jump, Some(b));
+    }
+
+    /// Two tabs: an agent project's terminal (index 0) and a local SSH-section terminal (index 1).
+    #[cfg(unix)]
+    fn app_with_two_tabs() -> (App, u64, PathBuf) {
+        let dir = temp_dir("bar");
+        let mut app = app_with_servers(1);
+        let id = app.spaces.add("proj".into(), dir.display().to_string());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        app.open_space(id);
+        app.set_view(View::Folders);
+        app.open_server(LOCAL);
+        assert_eq!((app.tabs.len(), app.active, app.view), (2, 1, View::Folders));
+        (app, id, dir)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_tab_bar_travels_between_agents_and_ssh() {
+        let (mut app, id, dir) = app_with_two_tabs();
+        app.select_tab(0);
+        assert_eq!((app.view, app.scope, app.active), (View::Spaces, Scope::Space(id), 0), "the sidebar goes to the agent");
+        assert_eq!(app.selected_node(), Some(NodeId::Space(id)));
+        app.select_tab(1);
+        assert_eq!((app.view, app.scope, app.active), (View::Folders, Scope::Ssh, 1), "and back to SSH");
+        // Alt+Right goes through every tab, and the sidebar follows.
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        assert_eq!((app.active, app.view), (0, View::Spaces));
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!((app.active, app.view), (1, View::Folders));
+        // The digits are global too.
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!((app.active, app.view), (0, View::Spaces));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn closing_a_tab_lands_on_its_neighbour_and_the_sidebar_follows() {
+        let (mut app, _, dir) = app_with_two_tabs();
+        app.close_tab(1);
+        assert_eq!((app.tabs.len(), app.active, app.view), (1, 0, View::Spaces), "the agent's tab is the neighbour");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tabs_of_a_project_carry_its_name_in_the_bar() {
+        let (mut app, _, dir) = app_with_two_tabs();
+        assert_eq!(app.tab_label(&app.tabs[0]), "proj");
+        assert_eq!(app.tab_label(&app.tabs[1]), "Local");
+        app.tabs[0].title = "build".into();
+        assert_eq!(app.tab_label(&app.tabs[0]), "proj/build");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -113,7 +113,6 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let views = [
         (" Agents ", View::Spaces, Hit::ViewSpaces),
         (" SSH ", View::Folders, Hit::ViewFolders),
-        (" Bastions ", View::Jump, Hit::ViewJump),
     ];
     let mut vx = inner.x;
     let mut spans = vec![];
@@ -208,8 +207,6 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     if app.rows.is_empty() {
         let lines: Vec<&str> = if app.view == View::Spaces {
             vec!["No agents yet.", "Press a: a terminal opens;", "run claude, opencode… in it.", "It stays where you leave it (cd)."]
-        } else if app.view == View::Jump && !app.store.servers.is_empty() {
-            vec!["No bastions yet.", "Edit a server and set “Jump via”: the", "bastion appears here with what is", "reached through it."]
         } else {
             vec!["No servers yet.", "Click “+ Server” or press a."]
         };
@@ -271,6 +268,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let mut spans = vec![Span::raw(indent.clone())];
         match row.node {
             NodeId::Space(_) => {}
+            NodeId::BastionsHeader => {
+                let arrow = if app.is_open(row) { "▾ " } else { "▸ " };
+                spans.push(Span::styled(arrow, Style::new().fg(MUTED)));
+                spans.push(Span::styled("bastions", Style::new().fg(MUTED).add_modifier(Modifier::BOLD)));
+            }
             NodeId::Folder(id) => {
                 let fo = app.store.folder(id);
                 let open = fo.is_some_and(|f| f.expanded);
@@ -284,8 +286,8 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 let name = s.map(|s| s.name.as_str()).unwrap_or("?");
                 let live = app.tabs.iter().any(|t| t.server_id == id && t.session.exit_code.is_none());
                 let label = fit(name, width.saturating_sub(indent.width() + 3));
-                if app.has_children(row.node) {
-                    let arrow = if app.is_open(row.node) { "▾ " } else { "▸ " };
+                if app.has_children(row) {
+                    let arrow = if app.is_open(row) { "▾ " } else { "▸ " };
                     spans.push(Span::styled(arrow, Style::new().fg(ACCENT)));
                 } else {
                     spans.push(Span::styled(
@@ -296,8 +298,8 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 spans.push(Span::styled(label, Style::new().fg(if live { GREEN } else { FG })));
                 if let Some(s) = s {
                     let room = width.saturating_sub(indent.width() + 2 + name.width() + 2);
-                    let via = match (app.view, s.jump.and_then(|j| app.store.server(j))) {
-                        (View::Folders, Some(j)) => format!("{} ↪ {}", s.host, j.name),
+                    let via = match (row.jump, s.jump.and_then(|j| app.store.server(j))) {
+                        (false, Some(j)) => format!("{} ↪ {}", s.host, j.name),
                         _ => s.host.clone(),
                     };
                     if room > 6 {
@@ -315,7 +317,8 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let end = area.x + area.width;
-    let scoped = app.scoped();
+    // Every tab of every part of ship, like the tabs of a browser.
+    let scoped: Vec<usize> = (0..app.tabs.len()).collect();
     let n = scoped.len();
     let mut x = area.x + 1;
     let mut hits = vec![];
@@ -323,8 +326,8 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
         // Shrink titles so that as many tabs as possible fit, then scroll the bar so the active tab is always visible.
         let avail = area.width.saturating_sub(4) as usize;
         let max_title = (avail / n).saturating_sub(9).clamp(6, 20);
-        let cell = |p: usize| fit(&app.tabs[scoped[p]].title, max_title).width() + 8 + 1;
-        let active = scoped.iter().position(|&g| g == app.active).unwrap_or(0);
+        let cell = |p: usize| fit(&app.tab_label(&app.tabs[scoped[p]]), max_title).width() + 8 + 1;
+        let active = app.active.min(n - 1);
         let mut start = 0;
         while start < active && (start..=active).map(cell).sum::<usize>() > avail {
             start += 1;
@@ -333,7 +336,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
             let i = scoped[pos];
             let tab = &app.tabs[i];
             let dead = tab.session.exit_code.is_some();
-            let title = fit(&tab.title, max_title);
+            let title = fit(&app.tab_label(tab), max_title);
             let num = if pos < 9 { format!("{} ", pos + 1) } else { "  ".to_string() };
             let text = format!(" {num}{} {} ✕ ", if dead { "○" } else { "●" }, title);
             let w = text.width() as u16;
@@ -380,7 +383,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
 // ---------------------------------------------------------------- contenido
 
 fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.scoped().is_empty() {
+    if app.tabs.is_empty() {
         return draw_welcome(f, app, area);
     }
     let focused = app.focus == Focus::Terminal && app.modal.is_none();
