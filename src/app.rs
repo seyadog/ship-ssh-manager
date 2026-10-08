@@ -1029,7 +1029,7 @@ impl App {
             None => Scope::Ssh,
         };
         if reuse.is_none() && id == LOCAL && self.view == View::Spaces && !in_space {
-            return self.set_flash("Create a space first (press a)");
+            return self.set_flash("Create an agent first (press a)");
         }
         let cwd = match scope {
             Scope::Space(sid) => self.spaces.get(sid).map(|s| PathBuf::from(expand_tilde(&s.cwd))),
@@ -1415,7 +1415,7 @@ impl App {
             Some(NodeId::Space(_)) => {
                 return match self.scoped().contains(&self.active) {
                     true => self.close_tab(self.active),
-                    false => self.set_flash("No open terminal in this space"),
+                    false => self.set_flash("No open terminal in this agent"),
                 };
             }
             _ => return,
@@ -1555,21 +1555,29 @@ impl App {
         }
     }
 
+    /// Moves the menu highlight. On the views it also opens the view, so the arrows are enough to switch.
+    fn move_in_menu(&mut self, to: usize, buttons: bool) {
+        self.header = Some(to);
+        if !buttons {
+            self.activate(HEADER[to]);
+        }
+    }
+
     /// Keys while the menu has focus: the views above the list or the buttons below it. Returns true if the
     /// key was consumed.
     fn header_key(&mut self, i: usize, key: KeyEvent) -> bool {
         let buttons = i < 3;
         let (row_start, row_end) = if buttons { (0, 3) } else { (3, 6) };
         match key.code {
-            KeyCode::Left | KeyCode::Char('h') => self.header = Some(i.saturating_sub(1).max(row_start)),
-            KeyCode::Right | KeyCode::Char('l') => self.header = Some((i + 1).min(row_end - 1)),
+            KeyCode::Left | KeyCode::Char('h') => self.move_in_menu(i.saturating_sub(1).max(row_start), buttons),
+            KeyCode::Right | KeyCode::Char('l') => self.move_in_menu((i + 1).min(row_end - 1), buttons),
             // The buttons are below the list and the views above it: the arrow that leads back to the list.
             KeyCode::Up | KeyCode::Char('k') if buttons => self.header = None,
             KeyCode::Down | KeyCode::Char('j') if !buttons => self.header = None,
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {}
             KeyCode::Esc => self.header = None,
             KeyCode::Enter | KeyCode::Char(' ') => {
-                // Switching view keeps the focus on the views; a button opens a form or prompt.
+                // A button opens a form or prompt; on a view, Enter is just a way to (re)open it.
                 if buttons {
                     self.header = None;
                 }
@@ -1692,7 +1700,7 @@ impl App {
 
     fn new_folder_prompt(&mut self) {
         if self.view != View::Folders {
-            return self.set_flash("Folders are created in the Folders view (press v)");
+            return self.set_flash("Folders are created in the SSH view (press v)");
         }
         self.modal = Some(Modal::Prompt(Prompt {
             title: "New folder".into(),
@@ -1703,7 +1711,7 @@ impl App {
 
     fn save_spaces(&mut self) {
         if let Err(e) = self.spaces.save() {
-            self.set_flash(format!("Could not save spaces: {e}"));
+            self.set_flash(format!("Could not save agents: {e}"));
         }
     }
 
@@ -1766,7 +1774,7 @@ impl App {
             Some(NodeId::Space(id)) => {
                 if let Some(sp) = self.spaces.get(id) {
                     self.modal = Some(Modal::Prompt(Prompt {
-                        title: "Rename space".into(),
+                        title: "Rename agent".into(),
                         input: Input::new(&sp.name),
                         kind: PromptKind::RenameSpace(id),
                     }));
@@ -1794,7 +1802,7 @@ impl App {
         let Some(node) = self.selected_node() else { return };
         let text = match node {
             NodeId::Space(id) => format!(
-                "Delete space “{}”? Its terminals are closed; the directory is not touched.",
+                "Delete “{}”? Its terminals are closed; the directory is not touched.",
                 self.spaces.get(id).map(|s| s.name.as_str()).unwrap_or("?")
             ),
             NodeId::Server(id) => {
@@ -2635,28 +2643,30 @@ mod tests {
         assert_eq!((app.selected, app.header), (1, None));
         press(&mut app, KeyCode::Up);
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(4), "the views row (Folders) is the first stop");
-        press(&mut app, KeyCode::Left);
-        assert_eq!(app.header, Some(3), "Spaces is to the left of Folders");
-        press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Right);
-        assert_eq!(app.header, Some(5), "Spaces, Folders, Bastions");
-        press(&mut app, KeyCode::Right);
-        assert_eq!(app.header, Some(5), "stops at the end of the row");
+        assert_eq!((app.header, app.view), (Some(4), View::Folders), "the views row (SSH) is the first stop");
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(5), "nothing above the views");
+        assert_eq!(app.header, Some(4), "nothing above the views");
         press(&mut app, KeyCode::Down);
         assert_eq!(app.header, None, "back on the list");
     }
 
+    /// The arrows alone switch view: no Enter needed.
     #[test]
-    fn enter_on_a_view_switches_view_and_keeps_the_menu() {
+    fn arrows_on_the_views_switch_view_without_enter() {
         let mut app = app_with_servers(1);
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(4));
+        assert_eq!((app.header, app.view), (Some(4), View::Folders));
+        press(&mut app, KeyCode::Left);
+        assert_eq!((app.header, app.view), (Some(3), View::Spaces), "Agents is to the left of SSH");
+        press(&mut app, KeyCode::Left);
+        assert_eq!((app.header, app.view), (Some(3), View::Spaces), "stops at the first");
         press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Enter);
-        assert_eq!((app.view, app.header), (View::Jump, Some(5)));
+        press(&mut app, KeyCode::Right);
+        assert_eq!((app.header, app.view), (Some(5), View::Jump), "Bastions at the end");
+        press(&mut app, KeyCode::Right);
+        assert_eq!((app.header, app.view), (Some(5), View::Jump));
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.view, View::Folders, "and back");
     }
 
     #[test]

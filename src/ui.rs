@@ -94,7 +94,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Buttons: one small line at the very bottom. Everything also has a key, shown in the status bar.
     let buttons = [
-        (if in_spaces { " + Space " } else { " + Server " }, Hit::AddServer),
+        (if in_spaces { " + Agent " } else { " + Server " }, Hit::AddServer),
         (if in_spaces { " + Terminal " } else { " + Folder " }, Hit::AddFolder),
         (" Edit ", Hit::Edit),
     ];
@@ -111,8 +111,8 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // Views, at the top.
     let views_y = inner.y;
     let views = [
-        (" Spaces ", View::Spaces, Hit::ViewSpaces),
-        (" Folders ", View::Folders, Hit::ViewFolders),
+        (" Agents ", View::Spaces, Hit::ViewSpaces),
+        (" SSH ", View::Folders, Hit::ViewFolders),
         (" Bastions ", View::Jump, Hit::ViewJump),
     ];
     let mut vx = inner.x;
@@ -148,7 +148,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let top = inner.y + inner.height - bottom_h - panel_h;
         let extra = if agents.len() > shown { format!(" +{}", agents.len() - shown) } else { String::new() };
         f.render_widget(
-            Paragraph::new(format!("agents{extra}")).style(Style::new().fg(MUTED).add_modifier(Modifier::BOLD)),
+            Paragraph::new(format!("running{extra}")).style(Style::new().fg(MUTED).add_modifier(Modifier::BOLD)),
             Rect::new(inner.x, top, inner.width, 1),
         );
         for (k, &ti) in agents.iter().take(shown).enumerate() {
@@ -207,7 +207,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.rows.is_empty() {
         let lines: Vec<&str> = if app.view == View::Spaces {
-            vec!["No spaces yet.", "Press a: a terminal opens, and", "the space stays wherever you", "leave it (cd, mkdir...)."]
+            vec!["No agents yet.", "Press a: a terminal opens;", "run claude, opencode… in it.", "It stays where you leave it (cd)."]
         } else if app.view == View::Jump && !app.store.servers.is_empty() {
             vec!["No bastions yet.", "Edit a server and set “Jump via”: the", "bastion appears here with what is", "reached through it."]
         } else {
@@ -518,9 +518,9 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
             "F6 switches between the panel and the terminal.".into(),
         ],
         Scope::Space(0) => vec![
-            "No spaces yet.".into(),
-            "Press a (or “+ Space”): a terminal opens. Move around with cd and mkdir:".into(),
-            "the space stays in the last directory you leave it in.".into(),
+            "No agents yet.".into(),
+            "Press a (or “+ Agent”): a terminal opens. Move around with cd and mkdir:".into(),
+            "it stays in the last directory you leave it in.".into(),
         ],
         Scope::Space(id) => {
             let sp = app.spaces.get(id);
@@ -528,7 +528,7 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
                 sp.map(|s| s.name.clone()).unwrap_or_default(),
                 sp.map(|s| s.cwd.clone()).unwrap_or_default(),
                 "Press Enter or t to open a terminal here.".into(),
-                "Run claude, opencode… in it: it shows under “agents”.".into(),
+                "Run claude, opencode… in it: it shows under “running”.".into(),
             ]
         }
     };
@@ -552,7 +552,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.header.is_some() {
         "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
     } else if app.view == View::Spaces && app.header.is_none() {
-        "↑↓ choose · Enter open · a new space · e rename · d delete · t terminal · Alt+n next agent · q quit".to_string()
+        "↑↓ choose · Enter open · a new agent · e rename · d delete · t terminal · Alt+n next agent · q quit".to_string()
     } else if app.header.is_some() {
         "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
     } else {

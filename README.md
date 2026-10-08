@@ -2,7 +2,7 @@
 
 An SSH connection manager and terminal workspace: a modern TUI with mouse support. Keep your servers in folders, see them by jump host, open every session in a tab, and group local terminals and AI agents into project **spaces**. Sessions keep running when you close it. A lightweight, keyboard- and mouse-friendly alternative to GUI SSH clients.
 
-> Status: servers, folders, jump hosts, the encrypted password vault, spaces with an agents panel, and sessions that survive closing the window (Linux and macOS). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+> Status: servers, folders, jump hosts, the encrypted password vault, agents (project workspaces) with a running panel, and sessions that survive closing the window (Linux and macOS). Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Install
 
@@ -54,20 +54,20 @@ cargo run
 cargo test
 ```
 
-## Spaces: projects with their own terminals
+## Agents: projects with their own terminals
 
-A **space** is a project with its own terminals. Press `v` (or click `Spaces`, the first view) and then `a`: a normal terminal opens, and you move around in it like in any terminal (`cd`, `mkdir`, `git clone`...). **The space stays in the last directory you leave it in**: that directory gives it its name and shows its **git branch**, and new terminals of the space start there. Rename it with `e` and your name is kept from then on.
+An **agent** is a project with its own terminals (what earlier versions called a *space*). Press `v` (or click `Agents`, the first view) and then `a`: a normal terminal opens, and you move around in it like in any terminal (`cd`, `mkdir`, `git clone`...). **The space stays in the last directory you leave it in**: that directory gives it its name and shows its **git branch**, and new terminals of the space start there. Rename it with `e` and your name is kept from then on.
 
-- Every terminal belongs to where it was opened: the SSH section, or one space. The tab bar only shows the tabs of what you are looking at, so what runs in a space (an AI agent, say) never mixes with your SSH tabs.
-- **Agents.** Run `claude`, `opencode`, `codex`, `gemini`, `aider`... in any terminal and it shows up under **agents** at the bottom of the sidebar, with the space it runs in. `●` amber is working, `○` is idle, a green `●` means it finished and is waiting for you. Click one (or press `Alt+n`) to jump to its terminal wherever it lives.
+- Every terminal belongs to where it was opened: the SSH section, or one space. The tab bar only shows the tabs of what you are looking at, so what runs in an agent's project (an AI agent, say) never mixes with your SSH tabs.
+- **Agents.** Run `claude`, `opencode`, `codex`, `gemini`, `aider`... in any terminal and it shows up under **running** at the bottom of the sidebar, with the project it runs in. `●` amber is working, `○` is idle, a green `●` means it finished and is waiting for you. Click one (or press `Alt+n`) to jump to its terminal wherever it lives.
 - **Sound.** When an agent finishes a stretch of work, ship plays a sound (the system's player, or the terminal bell). Set `{"sound": false}` in `settings.json` (next to `servers.json`) to silence it.
 - Detection looks at the foreground process of the terminal and at its output: an agent that keeps drawing is working; when it goes quiet after a while, it is done. Linux and macOS only.
 
-The sidebar is kept clean: the views on top, then the list, then the agents, and one small line of buttons at the bottom; everything also has a key. In a window tall enough, spaces and agents are bigger blocks (a space shows its branch or directory under its name); in a short window they shrink back to one line. `a` new space (opens a terminal) · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
+The sidebar is kept clean: the views on top, then the list, then what is running, and one small line of buttons at the bottom; everything also has a key. In a window tall enough, the agents and what is running are bigger blocks (a space shows its branch or directory under its name); in a short window they shrink back to one line. `a` new space (opens a terminal) · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
 
 ## Sessions survive closing ship (Linux and macOS)
 
-Terminals live in a small background server (`ship daemon`) that starts by itself the first time. Closing ship, or its window, only disconnects: open it again and every terminal is back, in the same space, with its screen and its process still running, including agents. If an agent finishes while ship is closed, the server plays the sound and the tab is marked when you return.
+Terminals live in a small background server (`ship daemon`) that starts by itself the first time. Closing ship, or its window, only disconnects: open it again and every terminal is back, in the same agent, with its screen and its process still running, including agents. If an agent finishes while ship is closed, the server plays the sound and the tab is marked when you return.
 
 - `q` leaves the sessions running (it says how many). `ship kill-server` stops the server and every session in it. The server exits by itself when it holds nothing.
 - Closing a tab (`Alt+W`, `✕`, `c`) does end that session.
@@ -84,9 +84,9 @@ Terminals live in a small background server (`ship daemon`) that starts by itsel
 
 ## Two views of the same servers
 
-The sidebar has three views, left to right: **Spaces**, **Folders** and **Bastions**. Press `v` (or click the header) to switch. The last two show the same servers in two ways:
+The sidebar has three views, left to right: **Agents**, **SSH** and **Bastions**. Press `v` (or click the header) to switch; or press `↑` on the first row and use `←` `→`: the view changes as you move, no `Enter` needed. The last two show the same servers in two ways:
 
-- **Folders** — how you organize things.
+- **SSH** — your servers, organized in folders.
 - **Bastions** — how you reach them. Only bastions are roots here (servers that others are reached through), and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. Servers that are not part of any jump chain are hidden in this view. To start one, edit a server and set “Jump via”. Opening it runs `ssh` through every hop.
 
 ## Keyboard (sidebar)
@@ -99,11 +99,11 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 | `→` / `l` | unfold, or step into the first child |
 | `←` / `h` | fold, or go back to the parent |
 | `Enter` | open server / toggle folder |
-| `↑` on the first row | focus the views at the top (`Spaces`, `Folders`, `Bastions`); `↓` from the last row focuses the buttons at the bottom (`+ Server`, `+ Folder`, `Edit`). `←` `→` choose, `Enter` activate, `Esc` (or the arrow back towards the list) leaves |
+| `↑` on the first row | focus the views at the top (`Agents`, `SSH`, `Bastions`; `←` `→` switch view at once); `↓` from the last row focuses the buttons at the bottom (`+ Server`, `+ Folder`, `Edit`). `←` `→` choose, `Enter` activate, `Esc` (or the arrow back towards the list) leaves |
 | `v` / `Tab` | switch view |
 | `a` / `f` | new server / new folder (in the jump view, `a` on a server creates a host behind it) |
 | `e` / `d` | edit / delete |
-| `c` | close the open session of the selected server (in the Spaces view: the current terminal) |
+| `c` | close the open session of the selected server (in the Agents view: the current terminal) |
 | `Alt+↑` `Alt+↓` | reorder among siblings |
 | `t` | open a terminal of this computer in a new tab (also the `+` in the tab bar) |
 | `p` | open the password vault |
@@ -144,6 +144,6 @@ MIT, see [LICENSE](LICENSE).
 
 ## Roadmap
 
-1. **Done** — tree, forms, tabs, resize, errors, drag & drop, jump hosts, password vault (with sudo fill), spaces with git branch, agents panel with sound, background server for persistent sessions. ✔
+1. **Done** — tree, forms, tabs, resize, errors, drag & drop, jump hosts, password vault (with sudo fill), agents (project workspaces) with git branch, a running panel with sound, background server for persistent sessions. ✔
 2. **Next:** `ship <alias>` / `list` / `add`, `~/.ssh/config` import (mapping `ProxyJump` to jump hosts), Ctrl+K quick search, auto-reconnect.
 3. **Later:** SFTP, saved tunnels, snippets, themes (including per-server colors), remembering the chosen view.
