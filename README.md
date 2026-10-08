@@ -56,14 +56,14 @@ cargo test
 
 ## Spaces: projects with their own terminals
 
-A **space** is a project directory with its own terminals. Press `v` (or click `Spaces`, the first view), then `a` and give it a directory. Each space shows its **git branch**, and its terminals start in that directory.
+A **space** is a project with its own terminals. Press `v` (or click `Spaces`, the first view) and then `a`: a normal terminal opens, and you move around in it like in any terminal (`cd`, `mkdir`, `git clone`...). **The space stays in the last directory you leave it in**: that directory gives it its name and shows its **git branch**, and new terminals of the space start there. Rename it with `e` and your name is kept from then on.
 
 - Every terminal belongs to where it was opened: the SSH section, or one space. The tab bar only shows the tabs of what you are looking at, so what runs in a space (an AI agent, say) never mixes with your SSH tabs.
 - **Agents.** Run `claude`, `opencode`, `codex`, `gemini`, `aider`... in any terminal and it shows up under **agents** at the bottom of the sidebar, with the space it runs in. `●` amber is working, `○` is idle, a green `●` means it finished and is waiting for you. Click one (or press `Alt+n`) to jump to its terminal wherever it lives.
 - **Sound.** When an agent finishes a stretch of work, ship plays a sound (the system's player, or the terminal bell). Set `{"sound": false}` in `settings.json` (next to `servers.json`) to silence it.
 - Detection looks at the foreground process of the terminal and at its output: an agent that keeps drawing is working; when it goes quiet after a while, it is done. Linux and macOS only.
 
-`a` new space · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
+`a` new space (opens a terminal) · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
 
 ## Sessions survive closing ship (Linux and macOS)
 

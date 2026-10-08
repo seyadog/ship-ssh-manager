@@ -110,10 +110,14 @@ enum Ev {
         /// The raw output so far, replayed before `data` to rebuild the scroll-back.
         #[serde(default)]
         replay: String,
+        /// Directory of the session's shell.
+        #[serde(default)]
+        cwd: Option<String>,
     },
     Output { sid: u64, data: String },
     Exit { sid: u64, code: u32 },
     Sudo { sid: u64, on: bool },
+    Cwd { sid: u64, cwd: String },
     Agent { sid: u64, agent: Option<AgentMsg>, done: bool },
 }
 
@@ -181,6 +185,7 @@ struct Sent {
     exit: bool,
     sudo: bool,
     agent: Option<AgentInfo>,
+    cwd: Option<String>,
 }
 
 struct Hosted {
@@ -252,12 +257,20 @@ fn tick_loop(server: &Server) {
         std::thread::sleep(Duration::from_millis(250));
         let mut st = lock(&server.state);
         for (&sid, h) in st.sessions.iter_mut() {
-            let (exit, agent, done, sudo) = {
+            let (exit, agent, done, sudo, cwd) = {
                 let mut p = lock(&h.pty);
                 p.poll_exit();
                 p.poll_agent();
-                (p.exit_code, p.agent().cloned(), p.take_done(), p.sudo_prompt())
+                p.poll_cwd();
+                let cwd = p.cwd().map(|c| c.display().to_string());
+                (p.exit_code, p.agent().cloned(), p.take_done(), p.sudo_prompt(), cwd)
             };
+            if cwd != h.sent.cwd {
+                if let Some(c) = &cwd {
+                    broadcast(&h.subs, Ev::Cwd { sid, cwd: c.clone() });
+                }
+                h.sent.cwd = cwd;
+            }
             let attached = !lock(&h.subs).is_empty();
             if done {
                 if attached {
@@ -391,6 +404,7 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
             let mut p = lock(&pty);
             p.resize(rows, cols);
             let (exit, sudo, agent) = (p.exit_code, p.sudo_prompt(), p.agent().cloned());
+            let cwd = p.cwd().map(|c| c.display().to_string());
             // Snapshot and subscription happen under the screen lock: the output that follows the snapshot
             // is exactly the output that came after it.
             p.with_screen(|screen| {
@@ -404,6 +418,7 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
                     agent: agent.map(Into::into),
                     done,
                     replay: B64.encode(p.history()),
+                    cwd,
                 };
                 let _ = tx.try_send(snapshot);
                 lock(&subs).push(Sub { client: cid, tx: tx.clone(), stream: Arc::clone(ctl) });
@@ -461,6 +476,7 @@ pub struct Remote {
     sudo: AtomicBool,
     agent: Mutex<Option<AgentInfo>>,
     done: AtomicBool,
+    cwd: Mutex<Option<String>>,
 }
 
 struct ClientShared {
@@ -497,7 +513,7 @@ impl ClientShared {
                     let _ = w.send(ev);
                 }
             }
-            Ev::Snapshot { sid, rows, cols, data, exit, sudo, agent, done, replay } => {
+            Ev::Snapshot { sid, rows, cols, data, exit, sudo, agent, done, replay, cwd } => {
                 if let Some(r) = lock(&self.sessions).get(&sid) {
                     let mut parser = vt100::Parser::new(rows, cols, SCROLLBACK);
                     // Replaying the output rebuilds the scroll-back; the snapshot then sets the exact screen and modes.
@@ -505,6 +521,9 @@ impl ClientShared {
                     parser.process(&B64.decode(data).unwrap_or_default());
                     *lock(&r.parser) = parser;
                     *lock(&r.exit) = exit;
+                    if cwd.is_some() {
+                        *lock(&r.cwd) = cwd;
+                    }
                     r.sudo.store(sudo, Ordering::Relaxed);
                     *lock(&r.agent) = agent.map(Into::into);
                     if done {
@@ -520,6 +539,11 @@ impl ClientShared {
             Ev::Exit { sid, code } => {
                 if let Some(r) = lock(&self.sessions).get(&sid) {
                     *lock(&r.exit) = Some(code);
+                }
+            }
+            Ev::Cwd { sid, cwd } => {
+                if let Some(r) = lock(&self.sessions).get(&sid) {
+                    *lock(&r.cwd) = Some(cwd);
                 }
             }
             Ev::Sudo { sid, on } => {
@@ -644,6 +668,7 @@ impl Daemon {
             sudo: AtomicBool::new(false),
             agent: Mutex::new(None),
             done: AtomicBool::new(false),
+            cwd: Mutex::new(None),
         });
         lock(&self.shared.sessions).insert(sid, Arc::clone(&remote));
         self.shared.send(&Req::Attach { sid, rows, cols });
@@ -701,6 +726,11 @@ impl RemoteSession {
 
     pub fn agent(&self) -> Option<AgentInfo> {
         lock(&self.remote.agent).clone()
+    }
+
+    /// The directory the session's shell is in.
+    pub fn cwd(&self) -> Option<String> {
+        lock(&self.remote.cwd).clone()
     }
 
     pub fn take_done(&mut self) -> bool {
@@ -875,6 +905,20 @@ mod tests {
         s.scroll(100_000); // as far back as it goes
         let top = s.with_screen(|sc| sc.contents());
         assert!(top.lines().any(|l| l == "history-line-1"), "the oldest line is reachable: {top:?}");
+    }
+
+    /// The directory of a session's shell reaches the interface, also through the server.
+    #[test]
+    fn the_shell_directory_travels_through_the_server() {
+        let path = start("cwd");
+        let d = Daemon::connect_at(&path).ok().unwrap();
+        let mut s = Session::spawn_with(sh("cd / ; echo moved; sleep 6"), Some(&d)).unwrap();
+        assert!(wait_for(&mut s, "moved"));
+        let end = Instant::now() + Duration::from_secs(5);
+        while s.cwd().as_deref() != Some(std::path::Path::new("/")) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(s.cwd().as_deref(), Some(std::path::Path::new("/")));
     }
 
     #[test]

@@ -20,7 +20,7 @@ Each tab runs the system `ssh` inside a PTY (`portable-pty`). Its output goes th
 | `store.rs` | Model (folders, servers, jump chains) and JSON persistence in `~/.config/ship/servers.json` |
 | `session.rs` | `PtySession`: a PTY + emulator (spawn, resize, input, scrollback, exit, per-prompt secret autofill, agent probe). `Session`: what the interface uses; it owns a `PtySession` or talks to one in the server |
 | `vault.rs` | Encrypted password vault (Argon2id + XChaCha20-Poly1305), master-password lock |
-| `spaces.rs` | Spaces (named project directories, saved in `spaces.json`) and the git branch of a directory |
+| `spaces.rs` | Spaces (a name and the directory their terminal was left in, saved in `spaces.json`) and the git branch of a directory |
 | `agent.rs` | Recognising an AI agent from the foreground process of a PTY, and the working/finished state machine |
 | `clipboard.rs` | Copying to the system clipboard: OSC 52 plus the platform's clipboard tool |
 | `notify.rs` | The sound played when an agent finishes |
@@ -43,7 +43,7 @@ A server has two independent attributes: `parent` (its folder, for organizing) a
 
 ## Tabs, scopes and spaces
 
-Every tab has a `Scope`: the SSH section, or one space. The tab bar shows only the tabs of the current scope, and the scope follows the sidebar: the Folders and Jump hosts views show the SSH scope, and in the Spaces view it is the selected space. A terminal opened in a space starts in that space's directory. Keeping tabs per scope is what keeps an AI agent where it was launched and out of the SSH tabs.
+Every tab has a `Scope`: the SSH section, or one space. The tab bar shows only the tabs of the current scope, and the scope follows the sidebar: the Folders and Jump hosts views show the SSH scope, and in the Spaces view it is the selected space. A terminal opened in a space starts in that space's directory, and the space follows its terminal: the directory of the shell (the PTY's child, read from `/proc` or `lsof` about once a second, by the process that owns the PTY) becomes the space's directory, and its name too until the user renames it. Keeping tabs per scope is what keeps an AI agent where it was launched and out of the SSH tabs.
 
 ## The background server
 

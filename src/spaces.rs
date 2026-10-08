@@ -9,7 +9,15 @@ use std::path::{Path, PathBuf};
 pub struct Space {
     pub id: u64,
     pub name: String,
+    /// Where the space's terminal was left: it follows the shell's directory.
     pub cwd: String,
+    /// The name follows the directory until the user renames the space.
+    #[serde(default = "yes")]
+    pub auto_name: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -56,14 +64,30 @@ impl Spaces {
 
     pub fn add(&mut self, name: String, cwd: String) -> u64 {
         self.next_id += 1;
-        self.spaces.push(Space { id: self.next_id, name, cwd });
+        self.spaces.push(Space { id: self.next_id, name, cwd, auto_name: true });
         self.next_id
     }
 
+    /// A name chosen by the user: it no longer follows the directory.
     pub fn rename(&mut self, id: u64, name: String) {
         if let Some(s) = self.spaces.iter_mut().find(|s| s.id == id) {
             s.name = name;
+            s.auto_name = false;
         }
+    }
+
+    /// The terminal moved to another directory (`auto_name` is the name it would get). Returns true if
+    /// anything changed.
+    pub fn follow_by_dir(&mut self, id: u64, cwd: &str, auto_name: String) -> bool {
+        let Some(s) = self.spaces.iter_mut().find(|s| s.id == id) else { return false };
+        if s.cwd == cwd {
+            return false;
+        }
+        s.cwd = cwd.to_string();
+        if s.auto_name {
+            s.name = auto_name;
+        }
+        true
     }
 
     pub fn remove(&mut self, id: u64) {
@@ -135,10 +159,15 @@ mod tests {
         let b = s.add("api".into(), "/work/api".into());
         assert!(s.shift(b, -1));
         s.rename(a, "web".into());
+        assert!(!s.follow_by_dir(a, "/work/app", "app".into()), "same directory: nothing changes");
+        assert!(s.follow_by_dir(a, "/work/app/sub", "sub".into()));
+        assert_eq!(s.get(a).unwrap().name, "web", "a name chosen by the user stays");
+        assert!(s.follow_by_dir(b, "/work/api/v2", "v2".into()));
+        assert_eq!(s.get(b).unwrap().name, "v2", "an automatic name follows the directory");
         s.save().unwrap();
         let t = Spaces::load_from(dir.join("spaces.json")).unwrap();
-        assert_eq!(t.spaces.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["api", "web"]);
-        assert_eq!(t.get(a).unwrap().cwd, "/work/app");
+        assert_eq!(t.spaces.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["v2", "web"]);
+        assert_eq!(t.get(a).unwrap().cwd, "/work/app/sub");
         let mut t = t;
         assert_eq!(t.add("x".into(), "/x".into()), 3, "ids keep growing");
         std::fs::remove_dir_all(dir).ok();

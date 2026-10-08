@@ -10,6 +10,8 @@ use std::io::{Read, Write};
 use crate::agent::{self, AgentInfo};
 use crate::daemon::{Daemon, RemoteSession};
 use std::path::PathBuf;
+#[cfg(all(unix, not(target_os = "linux")))]
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
@@ -92,6 +94,9 @@ pub struct PtySession {
     probed: Instant,
     #[cfg_attr(not(unix), allow(dead_code))]
     history: Arc<Mutex<History>>,
+    /// Directory of the shell (the child), refreshed about once a second.
+    cwd: Option<PathBuf>,
+    cwd_probed: Instant,
 }
 
 impl PtySession {
@@ -220,6 +225,8 @@ impl PtySession {
             done: false,
             probed: started,
             history,
+            cwd: None,
+            cwd_probed: started - Duration::from_secs(5),
         })
     }
 
@@ -288,6 +295,22 @@ impl PtySession {
             a.working = self.tracker.working;
         }
         self.done |= finished;
+    }
+
+    /// Looks up the shell's current directory (rate-limited: about once a second).
+    pub fn poll_cwd(&mut self) {
+        if self.exit_code.is_some() || self.cwd_probed.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.cwd_probed = Instant::now();
+        if let Some(dir) = self.child.process_id().and_then(process_cwd) {
+            self.cwd = Some(dir);
+        }
+    }
+
+    /// The last known directory of the shell.
+    pub fn cwd(&self) -> Option<&PathBuf> {
+        self.cwd.as_ref()
     }
 
     /// The agent running in this terminal, if any.
@@ -409,10 +432,20 @@ impl Session {
         }
     }
 
-    /// Looks at what runs in the foreground (only for sessions of this process: the server does it for the rest).
+    /// Looks at what runs in the foreground and in which directory (only for sessions of this process:
+    /// the server does it for the rest).
     pub fn poll_agent(&mut self) {
         if let Backend::Pty(p) = &mut self.backend {
             p.poll_agent();
+            p.poll_cwd();
+        }
+    }
+
+    /// The directory the terminal's shell is in.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        match &self.backend {
+            Backend::Pty(p) => p.cwd().cloned(),
+            Backend::Remote(r) => r.cwd().map(PathBuf::from),
         }
     }
 
@@ -468,6 +501,23 @@ impl Session {
             r.set_meta(meta);
         }
     }
+}
+
+/// Current directory of a process.
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    let out = Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix('n')).map(PathBuf::from)
+}
+
+#[cfg(not(unix))]
+fn process_cwd(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 #[derive(Debug, PartialEq, Eq)]

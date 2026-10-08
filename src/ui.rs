@@ -195,7 +195,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.rows.is_empty() {
         let lines: Vec<&str> = if app.view == View::Spaces {
-            vec!["No spaces yet.", "A space is a project directory", "with its own terminals.", "Click “+ Space” or press a."]
+            vec!["No spaces yet.", "Press a: a terminal opens, and", "the space stays wherever you", "leave it (cd, mkdir...)."]
         } else if app.view == View::Jump && !app.store.servers.is_empty() {
             vec!["No jump hosts yet.", "Edit a server and set “Jump via”: the", "bastion appears here with what is", "reached through it."]
         } else {
@@ -490,7 +490,11 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
             "Drag servers and folders to reorganize them.".into(),
             "F6 switches between the panel and the terminal.".into(),
         ],
-        Scope::Space(0) => vec!["No spaces yet.".into(), "Press a (or “+ Space”) and give it a project directory.".into()],
+        Scope::Space(0) => vec![
+            "No spaces yet.".into(),
+            "Press a (or “+ Space”): a terminal opens. Move around with cd and mkdir:".into(),
+            "the space stays in the last directory you leave it in.".into(),
+        ],
         Scope::Space(id) => {
             let sp = app.spaces.get(id);
             vec![

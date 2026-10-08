@@ -57,8 +57,6 @@ pub struct Input {
     pub value: String,
     /// Cursor position, in characters.
     pub cursor: usize,
-    /// The next edit replaces the whole text (a suggested value that is easy to overwrite).
-    fresh: bool,
 }
 
 impl Drop for Input {
@@ -69,21 +67,7 @@ impl Drop for Input {
 
 impl Input {
     pub fn new(s: &str) -> Self {
-        Input { value: s.to_string(), cursor: s.chars().count(), fresh: false }
-    }
-
-    /// Like `new`, but the first thing typed replaces the text.
-    pub fn suggested(s: &str) -> Self {
-        let mut i = Input::new(s);
-        i.fresh = true;
-        i
-    }
-
-    fn take_fresh(&mut self) {
-        if std::mem::take(&mut self.fresh) {
-            self.value.clear();
-            self.cursor = 0;
-        }
+        Input { value: s.to_string(), cursor: s.chars().count() }
     }
 
     fn byte_idx(&self) -> usize {
@@ -91,7 +75,6 @@ impl Input {
     }
 
     pub fn insert_str(&mut self, s: &str) {
-        self.take_fresh();
         for c in s.chars().filter(|c| !c.is_control()) {
             let i = self.byte_idx();
             self.value.insert(i, c);
@@ -102,12 +85,6 @@ impl Input {
     pub fn handle(&mut self, key: KeyEvent) {
         let plain = !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if matches!(key.code, KeyCode::Backspace | KeyCode::Delete) && self.fresh {
-            return self.take_fresh();
-        }
-        if !matches!(key.code, KeyCode::Char(_)) || ctrl {
-            self.fresh = false;
-        }
         match key.code {
             KeyCode::Char('u') if ctrl => {
                 let at = self.byte_idx();
@@ -413,7 +390,6 @@ fn looks_like_private_key(path: &Path) -> bool {
 }
 
 pub enum PromptKind {
-    NewSpace,
     RenameSpace(u64),
     NewFolder(Option<u64>),
     RenameFolder(u64),
@@ -968,6 +944,7 @@ impl App {
                 t.attention = false;
             }
         }
+        self.follow_directories();
         self.sync_meta();
         if !self.lost_warned && self.daemon.as_ref().is_some_and(|d| !d.alive()) {
             self.lost_warned = true;
@@ -1555,7 +1532,7 @@ impl App {
             Hit::ViewFolders => self.set_view(View::Folders),
             Hit::ViewJump => self.set_view(View::Jump),
             Hit::ViewSpaces => self.set_view(View::Spaces),
-            Hit::AddServer if spaces => self.new_space_prompt(),
+            Hit::AddServer if spaces => self.new_space(),
             Hit::AddServer => self.new_server_form(),
             Hit::AddFolder if spaces => self.open_server(LOCAL),
             Hit::AddFolder => self.new_folder_prompt(),
@@ -1645,7 +1622,7 @@ impl App {
             KeyCode::Char(c @ '1'..='9') if !ctrl && !alt => self.goto_tab(c as usize - '1' as usize),
             KeyCode::Char('t') => self.open_server(LOCAL),
             KeyCode::Char('p') => self.modal = self.gate(Pending::OpenVault),
-            KeyCode::Char('a') if self.view == View::Spaces => self.new_space_prompt(),
+            KeyCode::Char('a') if self.view == View::Spaces => self.new_space(),
             KeyCode::Char('a') => self.new_server_form(),
             KeyCode::Char('f') => self.new_folder_prompt(),
             KeyCode::Char('e') | KeyCode::F(4) => self.edit_selected(),
@@ -1732,13 +1709,47 @@ impl App {
         }
     }
 
-    fn new_space_prompt(&mut self) {
-        let start = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
-        self.modal = Some(Modal::Prompt(Prompt {
-            title: "New space: directory".into(),
-            input: Input::suggested(&start),
-            kind: PromptKind::NewSpace,
-        }));
+    /// A new space: opens a plain terminal. Wherever you leave it (`cd`, `mkdir`...) becomes the space's directory.
+    fn new_space(&mut self) {
+        let start = match self.selected_node() {
+            Some(NodeId::Space(id)) if self.view == View::Spaces => {
+                self.spaces.get(id).map(|s| PathBuf::from(expand_tilde(&s.cwd)))
+            }
+            _ => None,
+        };
+        let dir = start.filter(|d| d.is_dir()).or_else(home_dir).unwrap_or_else(|| PathBuf::from("/"));
+        let id = self.spaces.add(space_name(&dir), dir.display().to_string());
+        self.save_spaces();
+        self.rebuild();
+        self.open_space(id);
+    }
+
+    /// Spaces follow their terminal: the directory the shell is in becomes the space's directory (and,
+    /// unless it was renamed, its name and git branch).
+    fn follow_directories(&mut self) {
+        let mut moved = vec![];
+        for sp in &self.spaces.spaces {
+            let scope = Scope::Space(sp.id);
+            // The terminal that counts is the one the space is showing, or the one it showed last.
+            let tab = if scope == self.scope {
+                self.tabs.get(self.active).filter(|t| t.scope == scope)
+            } else {
+                self.remembered
+                    .get(&scope)
+                    .and_then(|id| self.tabs.iter().find(|t| t.id == *id))
+                    .or_else(|| self.tabs.iter().find(|t| t.scope == scope))
+            };
+            if let Some(dir) = tab.and_then(|t| t.session.cwd()) {
+                moved.push((sp.id, dir.display().to_string()));
+            }
+        }
+        let mut changed = false;
+        for (id, dir) in moved {
+            changed |= self.spaces.follow_by_dir(id, &dir, space_name(Path::new(&dir)));
+        }
+        if changed {
+            self.save_spaces();
+        }
     }
 
     /// Shows a space and puts the keyboard on its terminal, opening the first one if it has none.
@@ -1910,17 +1921,6 @@ impl App {
             return;
         }
         match p.kind {
-            PromptKind::NewSpace => {
-                let dir = PathBuf::from(expand_tilde(&name));
-                if !dir.is_dir() {
-                    return self.set_flash(format!("Not a directory: {}", dir.display()));
-                }
-                let dir = dir.canonicalize().unwrap_or(dir);
-                let id = self.spaces.add(spaces::default_name(&dir), dir.display().to_string());
-                self.save_spaces();
-                self.rebuild();
-                self.open_space(id);
-            }
             PromptKind::RenameSpace(id) => {
                 self.spaces.rename(id, name);
                 self.save_spaces();
@@ -2452,6 +2452,11 @@ pub fn expand_tilde(p: &str) -> String {
     p.to_string()
 }
 
+/// Name a space gets from its directory: the folder name, or `home` for the home directory.
+fn space_name(dir: &Path) -> String {
+    if home_dir().is_some_and(|h| h == dir) { "home".into() } else { spaces::default_name(dir) }
+}
+
 /// The user's shell, for the local terminal tab.
 fn local_shell() -> Vec<String> {
     if cfg!(windows) {
@@ -2811,22 +2816,6 @@ mod tests {
     }
 
     #[test]
-    fn a_suggested_value_is_replaced_by_the_first_edit() {
-        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-        let mut i = Input::suggested("/work/here");
-        i.handle(key('/'));
-        i.handle(key('x'));
-        assert_eq!(i.value, "/x");
-        let mut i = Input::suggested("/work/here");
-        i.handle(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        i.handle(key('!'));
-        assert_eq!(i.value, "/work/here!", "moving the cursor keeps the suggestion to edit it");
-        let mut i = Input::suggested("abc");
-        i.handle(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(i.value, "", "backspace clears a suggestion");
-    }
-
-    #[test]
     fn line_editing_shortcuts() {
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let mut i = Input::new("one two  three");
@@ -2905,6 +2894,53 @@ mod tests {
         app.mouse_up(32 + 2, 1);
         assert_eq!(copied(), before, "a click without dragging copies nothing");
         assert!(app.selection.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_opens_a_terminal_right_away_without_asking_for_a_path() {
+        let mut app = app_with_servers(0);
+        app.set_view(View::Spaces);
+        press(&mut app, KeyCode::Char('a'));
+        assert!(app.modal.is_none(), "no prompt");
+        assert_eq!(app.spaces.spaces.len(), 1);
+        let id = app.spaces.spaces[0].id;
+        assert_eq!((app.scope, app.focus), (Scope::Space(id), Focus::Terminal));
+        assert_eq!(app.scoped().len(), 1, "a terminal is already open in it");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_space_stays_where_its_terminal_is_left() {
+        let dir = temp_dir("follow");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let mut app = app_with_servers(0);
+        let id = app.spaces.add("proj".into(), dir.display().to_string());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        app.open_space(id);
+        assert_eq!(app.spaces.get(id).unwrap().name, "proj");
+
+        let wait_for_dir = |app: &mut App, want: &Path| {
+            let end = Instant::now() + Duration::from_secs(6);
+            while Instant::now() < end {
+                app.tick();
+                if Path::new(&app.spaces.get(id).unwrap().cwd) == want {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            false
+        };
+        app.tabs[0].session.write(b"cd sub\r");
+        assert!(wait_for_dir(&mut app, &dir.join("sub")), "the space follows `cd`");
+        assert_eq!(app.spaces.get(id).unwrap().name, "sub", "and its automatic name follows too");
+
+        app.spaces.rename(id, "mine".into());
+        app.tabs[0].session.write(b"cd ..\r");
+        assert!(wait_for_dir(&mut app, &dir));
+        assert_eq!(app.spaces.get(id).unwrap().name, "mine", "a name chosen by the user is kept");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

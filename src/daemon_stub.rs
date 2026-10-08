@@ -60,6 +60,9 @@ impl RemoteSession {
     pub fn agent(&self) -> Option<AgentInfo> {
         match self.0 {}
     }
+    pub fn cwd(&self) -> Option<String> {
+        match self.0 {}
+    }
     pub fn take_done(&mut self) -> bool {
         match self.0 {}
     }
