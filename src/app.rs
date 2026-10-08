@@ -504,7 +504,6 @@ pub enum Hit {
     AddServer,
     AddFolder,
     Edit,
-    LocalTerm,
     ViewSpaces,
     NewTab,
     Field(usize),
@@ -515,9 +514,9 @@ pub enum Hit {
     No,
 }
 
-/// Sidebar menu items in keyboard order: the button row (0..3), the view row (3..6), and the terminal entry at the bottom (6).
-pub const HEADER: [Hit; 7] =
-    [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewSpaces, Hit::ViewFolders, Hit::ViewJump, Hit::LocalTerm];
+/// Sidebar menu items in keyboard order: the three buttons in the line at the bottom (0..3), then the three
+/// views at the top (3..6).
+pub const HEADER: [Hit; 6] = [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewSpaces, Hit::ViewFolders, Hit::ViewJump];
 
 /// `Tab::server_id` of the terminal of this computer (real servers start at 1).
 pub const LOCAL: u64 = 0;
@@ -1551,42 +1550,27 @@ impl App {
             Hit::AddFolder if spaces => self.open_server(LOCAL),
             Hit::AddFolder => self.new_folder_prompt(),
             Hit::Edit => self.edit_selected(),
-            Hit::LocalTerm | Hit::NewTab => self.open_server(LOCAL),
+            Hit::NewTab => self.open_server(LOCAL),
             _ => {}
         }
     }
 
-    /// Keys while the header has focus. Returns true if the key was consumed.
+    /// Keys while the menu has focus: the views above the list or the buttons below it. Returns true if the
+    /// key was consumed.
     fn header_key(&mut self, i: usize, key: KeyEvent) -> bool {
-        if i == 6 {
-            // The terminal entry sits below the list.
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') | KeyCode::Esc => self.header = None,
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    self.header = None;
-                    self.activate(Hit::LocalTerm);
-                }
-                KeyCode::Down | KeyCode::Char('j') | KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {}
-                _ => return false,
-            }
-            return true;
-        }
-        let (row_start, row_end) = if i < 3 { (0, 3) } else { (3, 6) };
+        let buttons = i < 3;
+        let (row_start, row_end) = if buttons { (0, 3) } else { (3, 6) };
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => self.header = Some(i.saturating_sub(1).max(row_start)),
             KeyCode::Right | KeyCode::Char('l') => self.header = Some((i + 1).min(row_end - 1)),
-            KeyCode::Up | KeyCode::Char('k') => {
-                if i >= 3 {
-                    self.header = Some(0);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.header = if i < 3 { Some(self.view_index()) } else { None }
-            }
+            // The buttons are below the list and the views above it: the arrow that leads back to the list.
+            KeyCode::Up | KeyCode::Char('k') if buttons => self.header = None,
+            KeyCode::Down | KeyCode::Char('j') if !buttons => self.header = None,
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {}
             KeyCode::Esc => self.header = None,
             KeyCode::Enter | KeyCode::Char(' ') => {
-                // Switching view keeps the focus in the header; the rest open a form or prompt.
-                if i < 3 {
+                // Switching view keeps the focus on the views; a button opens a form or prompt.
+                if buttons {
                     self.header = None;
                 }
                 self.activate(HEADER[i]);
@@ -1611,7 +1595,7 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
             KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => self.header = Some(self.view_index()),
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') if self.selected >= last => self.header = Some(6),
+            KeyCode::Down | KeyCode::Char('j') if self.selected >= last => self.header = Some(0),
             KeyCode::Down | KeyCode::Char('j') => self.selected += 1,
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
             KeyCode::End | KeyCode::Char('G') => self.selected = last,
@@ -2645,13 +2629,13 @@ mod tests {
     }
 
     #[test]
-    fn up_from_the_first_row_reaches_the_header_and_back() {
+    fn up_from_the_first_row_reaches_the_views_and_down_returns() {
         let mut app = app_with_servers(2);
         press(&mut app, KeyCode::Down);
         assert_eq!((app.selected, app.header), (1, None));
         press(&mut app, KeyCode::Up);
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(4), "the view row (Folders) is the first stop");
+        assert_eq!(app.header, Some(4), "the views row (Folders) is the first stop");
         press(&mut app, KeyCode::Left);
         assert_eq!(app.header, Some(3), "Spaces is to the left of Folders");
         press(&mut app, KeyCode::Right);
@@ -2660,18 +2644,13 @@ mod tests {
         press(&mut app, KeyCode::Right);
         assert_eq!(app.header, Some(5), "stops at the end of the row");
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(0), "then the button row");
-        press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Right);
-        assert_eq!(app.header, Some(2));
-        press(&mut app, KeyCode::Down);
+        assert_eq!(app.header, Some(5), "nothing above the views");
         press(&mut app, KeyCode::Down);
         assert_eq!(app.header, None, "back on the list");
     }
 
     #[test]
-    fn enter_on_a_view_tab_switches_view_and_keeps_the_header() {
+    fn enter_on_a_view_switches_view_and_keeps_the_menu() {
         let mut app = app_with_servers(1);
         press(&mut app, KeyCode::Up);
         assert_eq!(app.header, Some(4));
@@ -2681,31 +2660,36 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_add_server_opens_the_form() {
-        let mut app = app_with_servers(1);
-        press(&mut app, KeyCode::Up);
-        press(&mut app, KeyCode::Up);
-        press(&mut app, KeyCode::Enter);
-        assert!(matches!(app.modal, Some(Modal::Form(_))));
-        assert_eq!(app.header, None);
-    }
-
-    #[test]
-    fn down_from_the_last_row_reaches_the_local_terminal_entry() {
+    fn down_from_the_last_row_reaches_the_buttons_below_the_list() {
         let mut app = app_with_servers(2);
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
-        assert_eq!(app.header, Some(6));
+        assert_eq!(app.header, Some(0), "the first button: + Server");
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.header, Some(2), "Edit is the last button");
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.header, Some(2), "nothing below the buttons");
         press(&mut app, KeyCode::Up);
         assert_eq!((app.header, app.selected), (None, 1), "Up returns to the last row");
     }
 
     #[test]
-    #[cfg(unix)]
-    fn local_terminal_opens_a_tab_with_the_users_shell() {
+    fn enter_on_a_button_acts_and_leaves_the_menu() {
         let mut app = app_with_servers(1);
         press(&mut app, KeyCode::Down);
+        assert_eq!(app.header, Some(0));
         press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.modal, Some(Modal::Form(_))), "+ Server opens the form");
+        assert_eq!(app.header, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_t_key_opens_a_local_terminal() {
+        let mut app = app_with_servers(1);
+        press(&mut app, KeyCode::Char('t'));
         assert_eq!(app.tabs.len(), 1);
         assert_eq!((app.tabs[0].server_id, app.tabs[0].title.as_str()), (LOCAL, "Local"));
         assert!(app.tabs[0].session.exit_code.is_none());

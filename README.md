@@ -63,7 +63,7 @@ A **space** is a project with its own terminals. Press `v` (or click `Spaces`, t
 - **Sound.** When an agent finishes a stretch of work, ship plays a sound (the system's player, or the terminal bell). Set `{"sound": false}` in `settings.json` (next to `servers.json`) to silence it.
 - Detection looks at the foreground process of the terminal and at its output: an agent that keeps drawing is working; when it goes quiet after a while, it is done. Linux and macOS only.
 
-In a window tall enough, the spaces, the agents and the terminal entry at the bottom are big blocks (a space shows its branch or directory under its name); in a short window they shrink back to one line. `a` new space (opens a terminal) · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
+The sidebar is kept clean: the views on top, then the list, then the agents, and one small line of buttons at the bottom; everything also has a key. In a window tall enough, spaces and agents are bigger blocks (a space shows its branch or directory under its name); in a short window they shrink back to one line. `a` new space (opens a terminal) · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
 
 ## Sessions survive closing ship (Linux and macOS)
 
@@ -99,13 +99,13 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 | `→` / `l` | unfold, or step into the first child |
 | `←` / `h` | fold, or go back to the parent |
 | `Enter` | open server / toggle folder |
-| `↑` on the first row | focus the menu at the top (`+ Server`, `+ Folder`, `Edit`, `Spaces`, `Folders`, `Bastions`): `←` `→` choose, `↑` `↓` change row, `Enter` activate, `Esc` or `↓` back to the list |
+| `↑` on the first row | focus the views at the top (`Spaces`, `Folders`, `Bastions`); `↓` from the last row focuses the buttons at the bottom (`+ Server`, `+ Folder`, `Edit`). `←` `→` choose, `Enter` activate, `Esc` (or the arrow back towards the list) leaves |
 | `v` / `Tab` | switch view |
 | `a` / `f` | new server / new folder (in the jump view, `a` on a server creates a host behind it) |
 | `e` / `d` | edit / delete |
 | `c` | close the open session of the selected server (in the Spaces view: the current terminal) |
 | `Alt+↑` `Alt+↓` | reorder among siblings |
-| `t` | open a terminal of this computer in a new tab (also the `⌂ Local terminal` entry at the bottom: `↓` from the last row, or click) |
+| `t` | open a terminal of this computer in a new tab (also the `+` in the tab bar) |
 | `p` | open the password vault |
 | `q` | quit |
 

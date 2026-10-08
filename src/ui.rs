@@ -92,27 +92,24 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let roomy = inner.height >= 24;
     let in_spaces = app.view == View::Spaces;
 
-    // Action buttons: one line, as they always were. The bigger blocks are for the lists below.
-    let btn_h: u16 = 1;
+    // Buttons: one small line at the very bottom. Everything also has a key, shown in the status bar.
     let buttons = [
-        (if in_spaces { " + Space " } else { " + Server " }, Hit::AddServer, true),
-        (if in_spaces { " + Terminal " } else { " + Folder " }, Hit::AddFolder, false),
-        (" Edit ", Hit::Edit, false),
+        (if in_spaces { " + Space " } else { " + Server " }, Hit::AddServer),
+        (if in_spaces { " + Terminal " } else { " + Folder " }, Hit::AddFolder),
+        (" Edit ", Hit::Edit),
     ];
+    let btn_y = inner.y + inner.height - 1;
     let mut bx = inner.x;
-    for (label, hit, primary) in buttons {
+    for (label, hit) in buttons {
         let w = (label.width() as u16).min(inner.width.saturating_sub(bx - inner.x));
-        let r = Rect::new(bx, inner.y, w, btn_h);
-        let (fg, bg) = if primary { (Color::Black, ACCENT) } else { (FG, SEL_BG) };
-        let mut lines: Vec<Line> = vec![Line::raw(""); btn_h as usize];
-        lines[btn_h as usize / 2] = Line::from(Span::styled(label, Style::new().fg(fg).bg(bg)));
-        block(f, r, lines, bg);
+        let r = Rect::new(bx, btn_y, w, 1);
+        f.render_widget(Paragraph::new(label).style(Style::new().fg(FG).bg(SEL_BG)), r);
         app.layout.toolbar.push((r, hit));
         bx += w + 1;
     }
 
-    // View switch
-    let views_y = inner.y + btn_h;
+    // Views, at the top.
+    let views_y = inner.y;
     let views = [
         (" Spaces ", View::Spaces, Hit::ViewSpaces),
         (" Folders ", View::Folders, Hit::ViewFolders),
@@ -133,22 +130,14 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
     f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, views_y, inner.width, 1));
 
-    // Terminal entry pinned at the bottom: this computer's shell, or a new terminal in the current space.
-    let bottom_h: u16 = if inner.height < 6 { 0 } else if roomy { 3 } else { 1 };
-    if bottom_h > 0 {
-        let label = if in_spaces { " ⌂ New terminal here " } else { " ⌂ Local terminal " };
-        let r = Rect::new(inner.x, inner.y + inner.height - bottom_h, (label.width() as u16).min(inner.width), bottom_h);
-        let mut lines: Vec<Line> = vec![Line::raw(""); bottom_h as usize];
-        lines[bottom_h as usize / 2] = Line::from(Span::styled(label, Style::new().fg(FG).bg(SEL_BG)));
-        block(f, r, lines, SEL_BG);
-        app.layout.toolbar.push((r, Hit::LocalTerm));
-    }
     // Keyboard focus on the header: highlight the chosen item.
     if let (Some(i), true) = (app.header, focused && app.modal.is_none()) {
         if let Some(&(r, _)) = app.layout.toolbar.get(i) {
             f.buffer_mut().set_style(r, Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD));
         }
     }
+    // The line of buttons, and one line of air above it.
+    let bottom_h: u16 = if inner.height >= 6 { 2 } else { 1 };
 
     // Agents panel: every AI agent running in any terminal, above the terminal entry.
     let agents = app.agent_tabs();
@@ -199,7 +188,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     // The list. Spaces are two-line blocks with a gap when there is room; servers stay dense.
     let list_top = views_y + 2;
-    let list_h = (inner.y + inner.height).saturating_sub(list_top + bottom_h + panel_h + if roomy && bottom_h > 0 { 1 } else { 0 });
+    let list_h = (inner.y + inner.height).saturating_sub(list_top + bottom_h + panel_h);
     let list = Rect::new(inner.x, list_top, inner.width, list_h);
     app.layout.list = list;
     let row_h: u16 = if roomy && in_spaces { 3 } else { 1 };
@@ -561,13 +550,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.focus == Focus::Terminal {
         "F6 panel · Alt+←/→ tabs · Alt+W close · F2 rename · drag: select+copy · Shift+PgUp/PgDn/Home/End history".to_string()
     } else if app.header.is_some() {
-        "←→ choose · Enter activate · ↓ back to the list · Esc list".to_string()
+        "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
     } else if app.view == View::Spaces && app.header.is_none() {
         "↑↓ choose · Enter open · a new space · e rename · d delete · t terminal · Alt+n next agent · q quit".to_string()
     } else if app.header.is_some() {
-        "←→ choose · Enter activate · ↓ back to the list · Esc list".to_string()
+        "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
     } else {
-        "↑↓ move · ↑ at the top for the menu · 1-9 go to tab · t local terminal · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
+        "↑↓ move · ↑ top: views · ↓ bottom: buttons · 1-9 go to tab · t terminal · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
             .to_string()
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);
