@@ -18,6 +18,8 @@ const SEL_BG: Color = Color::Rgb(40, 52, 87);
 const DROP_BG: Color = Color::Rgb(58, 82, 60);
 const GREEN: Color = Color::Rgb(158, 206, 106);
 const AMBER: Color = Color::Rgb(224, 175, 104);
+const REMOTE_GREEN: Color = Color::Rgb(187, 154, 247);
+const REMOTE_GREEN_BRIGHT: Color = Color::Rgb(208, 184, 255);
 const RED: Color = Color::Rgb(247, 118, 142);
 
 /// Truncates `s` to `w` columns, adding “…” if it does not fit.
@@ -304,6 +306,9 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
 fn map_color(c: vt100::Color) -> Color {
     match c {
         vt100::Color::Default => Color::Reset,
+        // Remote sessions show ANSI green as lilac, so they never look like the local shell.
+        vt100::Color::Idx(2) => REMOTE_GREEN,
+        vt100::Color::Idx(10) => REMOTE_GREEN_BRIGHT,
         vt100::Color::Idx(i) => Color::Indexed(i),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
@@ -565,4 +570,17 @@ fn draw_picker(f: &mut Frame, area: Rect, p: &mut Picker) -> Rect {
         Rect::new(inner.x + 1, inner.y + inner.height - 1, inner.width.saturating_sub(2), 1),
     );
     Rect::new(list.x, list.y, list.width, list.height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ansi_green_is_remapped_but_other_colors_are_not() {
+        assert_eq!(map_color(vt100::Color::Idx(2)), REMOTE_GREEN);
+        assert_eq!(map_color(vt100::Color::Idx(10)), REMOTE_GREEN_BRIGHT);
+        assert_eq!(map_color(vt100::Color::Idx(1)), Color::Indexed(1));
+        assert_eq!(map_color(vt100::Color::Default), Color::Reset);
+    }
 }
