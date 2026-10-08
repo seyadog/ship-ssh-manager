@@ -227,8 +227,8 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     }
     // Shrink titles so that as many tabs as possible fit, then scroll the bar so the active tab is always visible.
     let avail = area.width.saturating_sub(1) as usize;
-    let max_title = (avail / n).saturating_sub(7).clamp(6, 20);
-    let cell = |i: usize| fit(&app.tabs[i].title, max_title).width() + 6 + 1;
+    let max_title = (avail / n).saturating_sub(9).clamp(6, 20);
+    let cell = |i: usize| fit(&app.tabs[i].title, max_title).width() + 8 + 1;
     let active = app.active.min(n - 1);
     let mut start = 0;
     while start < active && (start..=active).map(cell).sum::<usize>() > avail {
@@ -241,7 +241,8 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
         let tab = &app.tabs[i];
         let dead = tab.session.exit_code.is_some();
         let title = fit(&tab.title, max_title);
-        let text = format!(" {} {} ✕ ", if dead { "○" } else { "●" }, title);
+        let num = if i < 9 { format!("{} ", i + 1) } else { "  ".to_string() };
+        let text = format!(" {num}{} {} ✕ ", if dead { "○" } else { "●" }, title);
         let w = text.width() as u16;
         if x + w > end {
             break;
@@ -254,6 +255,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" ", Style::new().bg(bg)),
+                Span::styled(num, Style::new().fg(MUTED).bg(bg)),
                 Span::styled(if dead { "○ " } else { "● " }, Style::new().fg(dot).bg(bg)),
                 Span::styled(
                     title,
@@ -403,7 +405,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.header.is_some() {
         "←→ choose · Enter activate · ↓ back to the list · Esc list".to_string()
     } else {
-        "↑↓ move · ↑ at the top for the menu · t local terminal · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
+        "↑↓ move · ↑ at the top for the menu · 1-9 go to tab · t local terminal · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
             .to_string()
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);

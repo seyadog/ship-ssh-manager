@@ -108,7 +108,7 @@ pub struct Row {
     pub depth: usize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Sidebar,
     Terminal,
@@ -1085,6 +1085,16 @@ impl App {
         }
     }
 
+    /// Switches to tab `i` (0-based) and puts the keyboard on its terminal.
+    fn goto_tab(&mut self, i: usize) {
+        if i < self.tabs.len() {
+            self.active = i;
+            self.focus = Focus::Terminal;
+        } else {
+            self.set_flash(format!("No tab {}", i + 1));
+        }
+    }
+
     fn move_tab(&mut self, from: usize, to: usize) {
         if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
             return;
@@ -1129,13 +1139,7 @@ impl App {
             KeyCode::Left if alt && n > 0 => return self.active = (self.active + n - 1) % n,
             KeyCode::Right if alt && n > 0 => return self.active = (self.active + 1) % n,
             KeyCode::Char('w') if alt && n > 0 => return self.close_tab(self.active),
-            KeyCode::Char(c @ '1'..='9') if alt => {
-                let i = c as usize - '1' as usize;
-                if i < n {
-                    self.active = i;
-                }
-                return;
-            }
+            KeyCode::Char(c @ '1'..='9') if alt => return self.goto_tab(c as usize - '1' as usize),
             _ => {}
         }
         if self.focus == Focus::Terminal && n > 0 {
@@ -1252,6 +1256,7 @@ impl App {
             KeyCode::Char('v') | KeyCode::Tab => {
                 self.set_view(if self.view == View::Folders { View::Jump } else { View::Folders })
             }
+            KeyCode::Char(c @ '1'..='9') if !ctrl && !alt => self.goto_tab(c as usize - '1' as usize),
             KeyCode::Char('t') => self.open_server(LOCAL),
             KeyCode::Char('p') => self.modal = self.gate(Pending::OpenVault),
             KeyCode::Char('a') => self.new_server_form(),
@@ -2110,6 +2115,23 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         assert_eq!((app.tabs[0].server_id, app.tabs[0].title.as_str()), (LOCAL, "Local"));
         assert!(app.tabs[0].session.exit_code.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn number_keys_jump_to_tabs_from_the_sidebar() {
+        let mut app = app_with_servers(1);
+        app.open_server(LOCAL);
+        app.open_server(LOCAL);
+        app.focus = Focus::Sidebar;
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!((app.active, app.focus), (0, Focus::Terminal));
+        app.focus = Focus::Sidebar;
+        press(&mut app, KeyCode::Char('2'));
+        assert_eq!(app.active, 1);
+        app.focus = Focus::Sidebar;
+        press(&mut app, KeyCode::Char('5'));
+        assert_eq!((app.active, app.focus), (1, Focus::Sidebar), "no such tab: nothing changes");
     }
 
     #[test]
