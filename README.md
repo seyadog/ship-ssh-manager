@@ -74,6 +74,7 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 | `v` / `Tab` | switch view |
 | `a` / `f` | new server / new folder (in the jump view, `a` on a server creates a host behind it) |
 | `e` / `d` | edit / delete |
+| `c` | close the open session of the selected server |
 | `Alt+↑` `Alt+↓` | reorder among siblings |
 | `p` | open the password vault |
 | `q` | quit |

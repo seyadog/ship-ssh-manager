@@ -1039,6 +1039,19 @@ impl App {
         }
     }
 
+    /// Closes the open session of the selected server (the active tab if it is that server's, else the newest one).
+    fn close_selected_tab(&mut self) {
+        let Some(NodeId::Server(id)) = self.selected_node() else { return };
+        let idx = match self.tabs.get(self.active) {
+            Some(t) if t.server_id == id => Some(self.active),
+            _ => self.tabs.iter().rposition(|t| t.server_id == id),
+        };
+        match idx {
+            Some(i) => self.close_tab(i),
+            None => self.set_flash("No open session for this server"),
+        }
+    }
+
     fn move_tab(&mut self, from: usize, to: usize) {
         if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
             return;
@@ -1148,6 +1161,7 @@ impl App {
             KeyCode::Char('f') => self.new_folder_prompt(),
             KeyCode::Char('e') | KeyCode::F(4) => self.edit_selected(),
             KeyCode::Char('d') | KeyCode::Delete => self.ask_delete(),
+            KeyCode::Char('c') if !ctrl => self.close_selected_tab(),
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('c') if ctrl => self.request_quit(),
             _ => {}

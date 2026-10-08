@@ -385,7 +385,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.focus == Focus::Terminal {
         "F6 panel · Alt+←/→ tabs · Alt+Shift+←/→ move · Alt+W close · F2 rename · Shift+PgUp scrollback".to_string()
     } else {
-        "↑↓ move · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · p passwords · q quit"
+        "↑↓ move · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
             .to_string()
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);
