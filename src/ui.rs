@@ -92,8 +92,8 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let roomy = inner.height >= 24;
     let in_spaces = app.view == View::Spaces;
 
-    // Action buttons
-    let btn_h: u16 = if roomy { 3 } else { 1 };
+    // Action buttons: one line, as they always were. The bigger blocks are for the lists below.
+    let btn_h: u16 = 1;
     let buttons = [
         (if in_spaces { " + Space " } else { " + Server " }, Hit::AddServer, true),
         (if in_spaces { " + Terminal " } else { " + Folder " }, Hit::AddFolder, false),
@@ -112,11 +112,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // View switch
-    let views_y = inner.y + btn_h + if roomy { 1 } else { 0 };
+    let views_y = inner.y + btn_h;
     let views = [
         (" Spaces ", View::Spaces, Hit::ViewSpaces),
         (" Folders ", View::Folders, Hit::ViewFolders),
-        (" Jump hosts ", View::Jump, Hit::ViewJump),
+        (" Bastions ", View::Jump, Hit::ViewJump),
     ];
     let mut vx = inner.x;
     let mut spans = vec![];
@@ -134,7 +134,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, views_y, inner.width, 1));
 
     // Terminal entry pinned at the bottom: this computer's shell, or a new terminal in the current space.
-    let bottom_h: u16 = if inner.height >= 6 { btn_h } else { 0 };
+    let bottom_h: u16 = if inner.height < 6 { 0 } else if roomy { 3 } else { 1 };
     if bottom_h > 0 {
         let label = if in_spaces { " ⌂ New terminal here " } else { " ⌂ Local terminal " };
         let r = Rect::new(inner.x, inner.y + inner.height - bottom_h, (label.width() as u16).min(inner.width), bottom_h);
@@ -198,7 +198,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // The list. Spaces are two-line blocks with a gap when there is room; servers stay dense.
-    let list_top = views_y + if roomy { 2 } else { 2 };
+    let list_top = views_y + 2;
     let list_h = (inner.y + inner.height).saturating_sub(list_top + bottom_h + panel_h + if roomy && bottom_h > 0 { 1 } else { 0 });
     let list = Rect::new(inner.x, list_top, inner.width, list_h);
     app.layout.list = list;
@@ -220,7 +220,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let lines: Vec<&str> = if app.view == View::Spaces {
             vec!["No spaces yet.", "Press a: a terminal opens, and", "the space stays wherever you", "leave it (cd, mkdir...)."]
         } else if app.view == View::Jump && !app.store.servers.is_empty() {
-            vec!["No jump hosts yet.", "Edit a server and set “Jump via”: the", "bastion appears here with what is", "reached through it."]
+            vec!["No bastions yet.", "Edit a server and set “Jump via”: the", "bastion appears here with what is", "reached through it."]
         } else {
             vec!["No servers yet.", "Click “+ Server” or press a."]
         };

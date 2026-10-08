@@ -63,7 +63,7 @@ A **space** is a project with its own terminals. Press `v` (or click `Spaces`, t
 - **Sound.** When an agent finishes a stretch of work, ship plays a sound (the system's player, or the terminal bell). Set `{"sound": false}` in `settings.json` (next to `servers.json`) to silence it.
 - Detection looks at the foreground process of the terminal and at its output: an agent that keeps drawing is working; when it goes quiet after a while, it is done. Linux and macOS only.
 
-In a window tall enough, the buttons, spaces, agents and the terminal entry are big blocks (a space shows its branch or directory under its name); in a short window they shrink back to one line. `a` new space (opens a terminal) · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
+In a window tall enough, the spaces, the agents and the terminal entry at the bottom are big blocks (a space shows its branch or directory under its name); in a short window they shrink back to one line. `a` new space (opens a terminal) · `e` rename · `d` delete (closes its terminals, never touches the directory) · `Alt+↑↓` reorder · `Enter` or `t` open a terminal in it · `c` close the current tab.
 
 ## Sessions survive closing ship (Linux and macOS)
 
@@ -84,10 +84,10 @@ Terminals live in a small background server (`ship daemon`) that starts by itsel
 
 ## Two views of the same servers
 
-The sidebar has three views, left to right: **Spaces**, **Folders** and **Jump hosts**. Press `v` (or click the header) to switch. The last two show the same servers in two ways:
+The sidebar has three views, left to right: **Spaces**, **Folders** and **Bastions**. Press `v` (or click the header) to switch. The last two show the same servers in two ways:
 
 - **Folders** — how you organize things.
-- **Jump hosts** — how you reach them. Only bastions are roots here (servers that others are reached through), and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. Servers that are not part of any jump chain are hidden in this view. To start one, edit a server and set “Jump via”. Opening it runs `ssh` through every hop.
+- **Bastions** — how you reach them. Only bastions are roots here (servers that others are reached through), and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. Servers that are not part of any jump chain are hidden in this view. To start one, edit a server and set “Jump via”. Opening it runs `ssh` through every hop.
 
 ## Keyboard (sidebar)
 
@@ -99,7 +99,7 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 | `→` / `l` | unfold, or step into the first child |
 | `←` / `h` | fold, or go back to the parent |
 | `Enter` | open server / toggle folder |
-| `↑` on the first row | focus the menu at the top (`+ Server`, `+ Folder`, `Edit`, `Folders`, `Jump hosts`): `←` `→` choose, `↑` `↓` change row, `Enter` activate, `Esc` or `↓` back to the list |
+| `↑` on the first row | focus the menu at the top (`+ Server`, `+ Folder`, `Edit`, `Spaces`, `Folders`, `Bastions`): `←` `→` choose, `↑` `↓` change row, `Enter` activate, `Esc` or `↓` back to the list |
 | `v` / `Tab` | switch view |
 | `a` / `f` | new server / new folder (in the jump view, `a` on a server creates a host behind it) |
 | `e` / `d` | edit / delete |

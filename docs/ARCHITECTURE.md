@@ -37,13 +37,13 @@ Everything runs in one process; there is no IPC and no separate renderer.
 A server has two independent attributes: `parent` (its folder, for organizing) and `jump` (the server it is reached through, for routing). The sidebar is one tree with two lenses over the same data, so nothing is duplicated:
 
 - **Folders view** — roots are top-level folders; jump servers show a dim `↪ bastion` hint.
-- **Jump hosts view** — roots are bastions only (servers with no `jump` that other servers are reached through); children are the servers behind them, to any depth. Servers outside any jump chain are not listed.
+- **Bastions view** — roots are bastions only (servers with no `jump` that other servers are reached through); children are the servers behind them, to any depth. Servers outside any jump chain are not listed.
 
 `ssh_argv` resolves the chain. If every hop uses the agent/default keys it emits `-J a,b`. If a hop has its own key it builds a nested `ProxyCommand`, because `-J` cannot give each hop an identity. Loops are rejected (`Store::would_cycle`), and deleting a bastion detaches the servers behind it.
 
 ## Tabs, scopes and spaces
 
-Every tab has a `Scope`: the SSH section, or one space. The tab bar shows only the tabs of the current scope, and the scope follows the sidebar: the Folders and Jump hosts views show the SSH scope, and in the Spaces view it is the selected space. A terminal opened in a space starts in that space's directory, and the space follows its terminal: the directory of the shell (the PTY's child, read from `/proc` or `lsof` about once a second, by the process that owns the PTY) becomes the space's directory, and its name too until the user renames it. Keeping tabs per scope is what keeps an AI agent where it was launched and out of the SSH tabs.
+Every tab has a `Scope`: the SSH section, or one space. The tab bar shows only the tabs of the current scope, and the scope follows the sidebar: the Folders and Bastions views show the SSH scope, and in the Spaces view it is the selected space. A terminal opened in a space starts in that space's directory, and the space follows its terminal: the directory of the shell (the PTY's child, read from `/proc` or `lsof` about once a second, by the process that owns the PTY) becomes the space's directory, and its name too until the user renames it. Keeping tabs per scope is what keeps an AI agent where it was launched and out of the SSH tabs.
 
 ## The background server
 

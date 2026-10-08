@@ -2656,7 +2656,7 @@ mod tests {
         assert_eq!(app.header, Some(3), "Spaces is to the left of Folders");
         press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Right);
-        assert_eq!(app.header, Some(5), "Spaces, Folders, Jump hosts");
+        assert_eq!(app.header, Some(5), "Spaces, Folders, Bastions");
         press(&mut app, KeyCode::Right);
         assert_eq!(app.header, Some(5), "stops at the end of the row");
         press(&mut app, KeyCode::Up);
