@@ -27,7 +27,8 @@ fn osc52(text: &str) {
 }
 
 impl VaultView {
-    fn new(store: &Store) -> Self {
+    /// Rebuilds the list, keeping `select` (a server id) and `col` (0 = login, 1 = sudo).
+    fn new(store: &Store, select: Option<u64>, col: usize) -> Self {
         let rows = store
             .servers
             .iter()
@@ -40,7 +41,9 @@ impl VaultView {
                 sudo: s.has_sudo,
             })
             .collect();
-        VaultView { rows, selected: 0, shown: None }
+        let rows: Vec<VaultRow> = rows;
+        let selected = select.and_then(|id| rows.iter().position(|r| r.id == id)).unwrap_or(0);
+        VaultView { rows, selected, col, shown: None }
     }
 }
 
@@ -146,6 +149,9 @@ pub struct ServerForm {
     pub error: Option<String>,
     pub secret_saved: bool,
     pub sudo_saved: bool,
+    /// Ctrl+X on a saved secret: remove it from the vault when the form is saved.
+    pub clear_secret: bool,
+    pub clear_sudo: bool,
 }
 
 impl ServerForm {
@@ -166,6 +172,8 @@ impl ServerForm {
             error: None,
             secret_saved: false,
             sudo_saved: false,
+            clear_secret: false,
+            clear_sudo: false,
         }
     }
 
@@ -186,6 +194,8 @@ impl ServerForm {
             error: None,
             secret_saved: s.has_secret,
             sudo_saved: s.has_sudo,
+            clear_secret: false,
+            clear_sudo: false,
         }
     }
 
@@ -340,6 +350,7 @@ pub struct Prompt {
 }
 
 pub enum ConfirmAction {
+    DeleteSecret(u64, Kind),
     Delete(NodeId),
     Quit,
 }
@@ -402,10 +413,25 @@ pub struct VaultRow {
 pub struct VaultView {
     pub rows: Vec<VaultRow>,
     pub selected: usize,
+    /// Highlighted column: 0 = login, 1 = sudo.
+    pub col: usize,
     pub shown: Option<Shown>,
 }
 
+/// Change one saved secret from the vault screen.
+pub struct SecretEdit {
+    pub id: u64,
+    pub kind: Kind,
+    pub title: String,
+    pub input: Input,
+    pub show: bool,
+    pub error: Option<String>,
+    /// Column to return to in the vault screen.
+    pub col: usize,
+}
+
 pub enum Modal {
+    SecretEdit(Box<SecretEdit>),
     Unlock(Box<UnlockModal>),
     Master(Box<MasterModal>),
     Vault(Box<VaultView>),
@@ -782,7 +808,7 @@ impl App {
                 }
                 None
             }
-            Pending::OpenVault => Some(Modal::Vault(Box::new(VaultView::new(&self.store)))),
+            Pending::OpenVault => Some(Modal::Vault(Box::new(VaultView::new(&self.store, None, 0)))),
         }
     }
 
@@ -907,10 +933,15 @@ impl App {
     fn vault_key(&mut self, mut v: Box<VaultView>, key: KeyEvent) -> Option<Modal> {
         self.vault.touch();
         let last = v.rows.len().saturating_sub(1);
+        let row = v.rows.get(v.selected).map(|r| (r.id, r.name.clone()));
+        let kind = if v.col == 0 { Kind::Login } else { Kind::Sudo };
+        let what = if v.col == 0 { "login password" } else { "sudo password" };
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return None,
             KeyCode::Up | KeyCode::Char('k') => v.selected = v.selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => v.selected = (v.selected + 1).min(last),
+            KeyCode::Left | KeyCode::Char('h') => v.col = 0,
+            KeyCode::Right | KeyCode::Char('l') => v.col = 1,
             KeyCode::Char('m') => {
                 return Some(Modal::Master(Box::new(MasterModal {
                     input: Input::default(),
@@ -920,7 +951,7 @@ impl App {
                 })));
             }
             KeyCode::Enter | KeyCode::Char('r') => {
-                let Some(id) = v.rows.get(v.selected).map(|r| r.id) else { return Some(Modal::Vault(v)) };
+                let Some((id, _)) = row else { return Some(Modal::Vault(v)) };
                 if v.shown.as_ref().is_some_and(|s| s.id == id) {
                     v.shown = None;
                 } else {
@@ -932,9 +963,8 @@ impl App {
                     });
                 }
             }
-            KeyCode::Char('c') | KeyCode::Char('s') => {
-                let kind = if key.code == KeyCode::Char('c') { Kind::Login } else { Kind::Sudo };
-                if let Some(id) = v.rows.get(v.selected).map(|r| r.id) {
+            KeyCode::Char('c') => {
+                if let Some((id, _)) = row {
                     match self.vault.get(id, kind) {
                         Some(mut pw) => {
                             osc52(&pw);
@@ -946,9 +976,74 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('e') => {
+                if let Some((id, name)) = row {
+                    return Some(Modal::SecretEdit(Box::new(SecretEdit {
+                        id,
+                        kind,
+                        title: format!("Change the {what} - {name}"),
+                        input: Input::default(),
+                        show: false,
+                        error: None,
+                        col: v.col,
+                    })));
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                if let Some((id, name)) = row {
+                    if self.vault.get(id, kind).is_none() {
+                        self.set_flash("Nothing saved there");
+                    } else {
+                        return Some(Modal::Confirm(Confirm {
+                            text: format!("Remove the saved {what} of “{name}”?"),
+                            action: ConfirmAction::DeleteSecret(id, kind),
+                        }));
+                    }
+                }
+            }
             _ => {}
         }
         Some(Modal::Vault(v))
+    }
+
+    /// Keeps the `has_secret` / `has_sudo` flag of a server in step with the vault.
+    fn set_secret_flag(&mut self, id: u64, kind: Kind, saved: bool) {
+        if let Some(s) = self.store.servers.iter_mut().find(|s| s.id == id) {
+            match kind {
+                Kind::Login => s.has_secret = saved,
+                Kind::Sudo => s.has_sudo = saved,
+            }
+        }
+        self.persist();
+    }
+
+    fn vault_view(&self, id: u64, col: usize) -> Option<Modal> {
+        Some(Modal::Vault(Box::new(VaultView::new(&self.store, Some(id), col))))
+    }
+
+    fn secret_edit_key(&mut self, mut e: Box<SecretEdit>, key: KeyEvent) -> Option<Modal> {
+        self.vault.touch();
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => return self.vault_view(e.id, e.col),
+            KeyCode::Char('t') if ctrl => e.show = !e.show,
+            KeyCode::Enter => {
+                if e.input.value.is_empty() {
+                    e.error = Some("Empty: use d in the vault to remove it instead".into());
+                } else {
+                    match self.vault.set(e.id, e.kind, Some(&e.input.value)) {
+                        Ok(()) => {
+                            self.set_secret_flag(e.id, e.kind, true);
+                            self.set_flash("Saved");
+                            return self.vault_view(e.id, e.col);
+                        }
+                        Err(err) => e.error = Some(format!("{err:#}")),
+                    }
+                }
+            }
+            _ => e.input.handle(key),
+        }
+        Some(Modal::SecretEdit(e))
     }
 
     fn sudo_ready(&self) -> bool {
@@ -1188,6 +1283,7 @@ impl App {
     fn modal_key(&mut self, key: KeyEvent) {
         let Some(modal) = self.modal.take() else { return };
         self.modal = match modal {
+            Modal::SecretEdit(e) => self.secret_edit_key(e, key),
             Modal::Unlock(u) => self.unlock_key(u, key),
             Modal::Master(m) => self.master_key(m, key),
             Modal::Vault(v) => self.vault_key(v, key),
@@ -1203,6 +1299,8 @@ impl App {
         match key.code {
             KeyCode::Esc => return None,
             KeyCode::Char('s') if ctrl => return self.save_form(f),
+            KeyCode::Char('x') if ctrl && f.focus == F_SECRET && f.secret_saved => f.clear_secret = !f.clear_secret,
+            KeyCode::Char('x') if ctrl && f.focus == F_SUDO && f.sudo_saved => f.clear_sudo = !f.clear_sudo,
             KeyCode::Char('o') if ctrl && f.auth == Auth::Key => return Some(open_picker(f)),
             KeyCode::Tab | KeyCode::Down => f.step(1),
             KeyCode::BackTab | KeyCode::Up => f.step(-1),
@@ -1311,13 +1409,27 @@ impl App {
     fn confirm_key(&mut self, c: Confirm, key: KeyEvent) -> Option<Modal> {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('s') | KeyCode::Enter => self.run_confirmed(c.action),
-            KeyCode::Char('n') | KeyCode::Esc => None,
+            KeyCode::Char('n') | KeyCode::Esc => match c.action {
+                ConfirmAction::DeleteSecret(id, kind) => self.vault_view(id, if kind == Kind::Login { 0 } else { 1 }),
+                _ => None,
+            },
             _ => Some(Modal::Confirm(c)),
         }
     }
 
     fn run_confirmed(&mut self, action: ConfirmAction) -> Option<Modal> {
         match action {
+            ConfirmAction::DeleteSecret(id, kind) => {
+                let col = if kind == Kind::Login { 0 } else { 1 };
+                match self.vault.set(id, kind, None) {
+                    Ok(()) => {
+                        self.set_secret_flag(id, kind, false);
+                        self.set_flash("Removed");
+                    }
+                    Err(e) => self.set_flash(format!("Could not remove: {e:#}")),
+                }
+                self.vault_view(id, col)
+            }
             ConfirmAction::Quit => {
                 self.quit = true;
                 None
@@ -1355,7 +1467,7 @@ impl App {
         let prev = f.editing.and_then(|id| self.store.server(id)).cloned();
         let typed_secret = f.auth != Auth::Agent && !f.secret.value.is_empty();
         let drops_secret = f.auth == Auth::Agent && prev.as_ref().is_some_and(|p| p.has_secret);
-        if typed_secret || !f.sudo.value.is_empty() || drops_secret {
+        if typed_secret || !f.sudo.value.is_empty() || drops_secret || f.clear_secret || f.clear_sudo {
             return self.gate(Pending::SaveForm(f));
         }
         self.finish_save(f)
@@ -1373,6 +1485,8 @@ impl App {
         let prev = f.editing.and_then(|id| self.store.server(id)).cloned();
         let typed_secret = f.auth != Auth::Agent && !f.secret.value.is_empty();
         let typed_sudo = !f.sudo.value.is_empty();
+        let clear_secret = f.clear_secret && !typed_secret;
+        let clear_sudo = f.clear_sudo && !typed_sudo;
         let had_secret = prev.as_ref().is_some_and(|p| p.has_secret);
         let server = Server {
             id: f.editing.unwrap_or(0),
@@ -1384,8 +1498,8 @@ impl App {
             key_path: if f.auth == Auth::Key { key_path } else { String::new() },
             parent: f.parent,
             jump: f.jump,
-            has_secret: f.auth != Auth::Agent && (typed_secret || had_secret),
-            has_sudo: typed_sudo || prev.as_ref().is_some_and(|p| p.has_sudo),
+            has_secret: f.auth != Auth::Agent && (typed_secret || (had_secret && !clear_secret)),
+            has_sudo: typed_sudo || (prev.as_ref().is_some_and(|p| p.has_sudo) && !clear_sudo),
         };
         let id = match f.editing {
             Some(id) => {
@@ -1397,11 +1511,13 @@ impl App {
         let mut result = Ok(());
         if typed_secret {
             result = result.and(self.vault.set(id, Kind::Login, Some(&f.secret.value)));
-        } else if f.auth == Auth::Agent && had_secret {
+        } else if (f.auth == Auth::Agent || clear_secret) && had_secret {
             result = result.and(self.vault.set(id, Kind::Login, None));
         }
         if typed_sudo {
             result = result.and(self.vault.set(id, Kind::Sudo, Some(&f.sudo.value)));
+        } else if clear_sudo {
+            result = result.and(self.vault.set(id, Kind::Sudo, None));
         }
         if let Err(e) = result {
             self.set_flash(format!("Could not save to the vault: {e:#}"));
@@ -1420,6 +1536,7 @@ impl App {
                 }
             }
             Some(Modal::Prompt(p)) => p.input.insert_str(text),
+            Some(Modal::SecretEdit(e)) => e.input.insert_str(text),
             Some(Modal::Unlock(u)) => {
                 let field = if u.focus == 0 { &mut u.input } else { &mut u.confirm };
                 field.insert_str(text);
@@ -1631,7 +1748,12 @@ impl App {
             }
             Modal::Confirm(c) if down => match hit {
                 Some(Hit::Yes) => self.run_confirmed(c.action),
-                Some(Hit::No) => None,
+                Some(Hit::No) => match c.action {
+                    ConfirmAction::DeleteSecret(id, kind) => {
+                        self.vault_view(id, if kind == Kind::Login { 0 } else { 1 })
+                    }
+                    _ => None,
+                },
                 _ => Some(Modal::Confirm(c)),
             },
             other => Some(other),

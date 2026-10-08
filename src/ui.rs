@@ -382,6 +382,7 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
     let mut cursor: Option<Position> = None;
 
     match modal {
+        Modal::SecretEdit(e) => cursor = Some(draw_secret_edit(f, area, e)),
         Modal::Unlock(u) => cursor = Some(draw_unlock(f, area, u)),
         Modal::Master(m) => cursor = Some(draw_master(f, area, m)),
         Modal::Vault(v) => draw_vault(f, area, v),
@@ -460,12 +461,20 @@ fn draw_form(
             F_KEY => ("Private key", "path to the key"),
             F_SUDO => (
                 "Sudo password",
-                if form.sudo_saved { "(saved in the vault)" } else { "optional - offered when sudo asks" },
+                if form.clear_sudo {
+                    "(will be removed on save - Ctrl+X to undo)"
+                } else if form.sudo_saved {
+                    "(saved in the vault - Ctrl+X to remove)"
+                } else {
+                    "optional - offered when sudo asks"
+                },
             ),
             _ => (
                 if form.auth == Auth::Password { "Password" } else { "Passphrase" },
-                if form.secret_saved {
-                    "(saved in the vault)"
+                if form.clear_secret {
+                    "(will be removed on save - Ctrl+X to undo)"
+                } else if form.secret_saved {
+                    "(saved in the vault - Ctrl+X to remove)"
                 } else if form.auth == Auth::Key {
                     "optional"
                 } else {
@@ -744,10 +753,48 @@ fn draw_vault(f: &mut Frame, area: Rect, v: &VaultView) {
         ]);
         let style = if n == v.selected { Style::new().bg(SEL_BG) } else { Style::new() };
         f.render_widget(Paragraph::new(line).style(style), Rect::new(x, y, w as u16, 1));
+        if n == v.selected {
+            // Underline the column the c / e / d keys act on.
+            let (cx, cw) = if v.col == 0 { (x + 50, 6 + 8) } else { (x + 50 + 14 + 8, 6 + 8) };
+            let col = Rect::new(cx.min(x + w as u16), y, cw.min((x + w as u16).saturating_sub(cx)), 1);
+            f.buffer_mut().set_style(col, Style::new().add_modifier(Modifier::UNDERLINED));
+        }
     }
     f.render_widget(
-        Paragraph::new("↑↓ select · r reveal (8 s) · c copy login · s copy sudo · m master password · Esc close")
+        Paragraph::new("↑↓ row · ←→ column · r reveal · c copy · e change · d remove · m master · Esc")
             .style(Style::new().fg(MUTED)),
         Rect::new(x, inner.y + inner.height - 1, w as u16, 1),
     );
+}
+
+fn draw_secret_edit(f: &mut Frame, area: Rect, e: &SecretEdit) -> Position {
+    let r = centered(64, 7, area);
+    f.render_widget(Clear, r);
+    let title = fit(&e.title, 58);
+    let block = modal_block(&title);
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let x = inner.x + 1;
+    let w = inner.width.saturating_sub(2);
+    let field = Rect::new(x + 6, inner.y + 1, w.saturating_sub(6), 1);
+    f.render_widget(Paragraph::new("New").style(Style::new().fg(MUTED)), Rect::new(x, inner.y + 1, 6, 1));
+    let cursor = if e.show {
+        let skip = e.input.cursor.saturating_sub(field.width.saturating_sub(1) as usize);
+        let shown: String = e.input.value.chars().skip(skip).collect();
+        f.render_widget(Paragraph::new(shown).style(Style::new().fg(FG).bg(SEL_BG)), field);
+        Position::new(field.x + (e.input.cursor - skip) as u16, field.y)
+    } else {
+        draw_secret_field(f, field, &e.input, true)
+    };
+    if let Some(err) = &e.error {
+        f.render_widget(
+            Paragraph::new(format!("✕ {err}")).style(Style::new().fg(RED)),
+            Rect::new(x, inner.y + 2, w, 1),
+        );
+    }
+    f.render_widget(
+        Paragraph::new("Enter save · Ctrl+T show/hide · Esc cancel").style(Style::new().fg(MUTED)),
+        Rect::new(x, inner.y + inner.height - 1, w, 1),
+    );
+    cursor
 }

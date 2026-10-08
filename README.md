@@ -52,7 +52,8 @@ Passwords you type in the server form (the login password or key passphrase, and
 
 - **First use** asks you to create the master password. Pick one you will not forget: **there is no recovery**.
 - It is asked only when needed (connecting to a server with a saved password, opening the vault, saving a secret) and the vault locks itself after 5 idle minutes.
-- `p` opens the vault: `r` reveals the selected entry for 8 seconds, `c` / `s` copy the login / sudo password to the clipboard (cleared after 30 s), `m` changes the master password.
+- `p` opens the vault. `↑↓` pick a server and `←→` pick the column (login / sudo); then `r` reveals it for 8 seconds, `c` copies it (cleared from the clipboard after 30 s), `e` changes it (`Ctrl+T` shows what you type) and `d` removes it after a confirmation. `m` changes the master password.
+- In the server form, type a new value over a saved one to replace it, or press `Ctrl+X` on the field to remove it when you save. Deleting a server removes its secrets too.
 - **sudo:** when a remote `sudo` or `su` asks for a password and one is saved for that server, a bar offers it. `Alt+P` fills it from the vault, and typing anything dismisses it. It is never sent without that keypress.
 - Passwords saved by older versions in the system keyring are moved into the vault the first time you unlock it.
 - Clipboard copy uses the terminal (OSC 52); inside tmux enable `set -g set-clipboard on`. Some terminals do not support it.
