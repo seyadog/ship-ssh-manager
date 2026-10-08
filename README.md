@@ -14,7 +14,7 @@ cargo test
 cargo install --path . --root ~/.local      # installs `ship` into ~/.local/bin
 ```
 
-Data lives in `~/.config/ship/servers.json` (or `$SHIP_CONFIG_DIR`). Passwords and passphrases go to the system keyring, never to that file.
+Data lives in `~/.config/ship/servers.json` (or `$SHIP_CONFIG_DIR`). Passwords never go in that file: they live in the encrypted vault (`vault.json`, next to it).
 
 ## Two views of the same servers
 
@@ -37,6 +37,7 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 | `a` / `f` | new server / new folder (in the jump view, `a` on a server creates a host behind it) |
 | `e` / `d` | edit / delete |
 | `Alt+↑` `Alt+↓` | reorder among siblings |
+| `p` | open the password vault |
 | `q` | quit |
 
 **Global:** `F6` panel ⇄ terminal · `Alt+←/→` switch tab · `Alt+Shift+←/→` move tab · `Alt+1..9` jump to tab · `Alt+W` close · `F2` rename · `Shift+PgUp/PgDn` scrollback.
@@ -45,10 +46,22 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or jump host, `
 
 In the server form, `Ctrl+O` (or “Browse…”) opens a file browser that starts in `~/.ssh` and highlights private keys.
 
+## Password vault
+
+Passwords you type in the server form (the login password or key passphrase, and an optional **sudo password**) are stored in an encrypted vault, protected by a master password.
+
+- **First use** asks you to create the master password. Pick one you will not forget: **there is no recovery**.
+- It is asked only when needed (connecting to a server with a saved password, opening the vault, saving a secret) and the vault locks itself after 5 idle minutes.
+- `p` opens the vault: `r` reveals the selected entry for 8 seconds, `c` / `s` copy the login / sudo password to the clipboard (cleared after 30 s), `m` changes the master password.
+- **sudo:** when a remote `sudo` or `su` asks for a password and one is saved for that server, a bar offers it. `Alt+P` fills it from the vault, and typing anything dismisses it. It is never sent without that keypress.
+- Passwords saved by older versions in the system keyring are moved into the vault the first time you unlock it.
+- Clipboard copy uses the terminal (OSC 52); inside tmux enable `set -g set-clipboard on`. Some terminals do not support it.
+
 ## Security
 
 - A session is the system `ssh` inside a PTY, so `known_hosts`, the agent and your keys work as usual. New or changed host keys are asked inside the tab.
-- A saved password/passphrase lives in the keyring and is sent once when `ssh` asks for it. Jump hosts should use keys or the agent.
+- The vault is a single file sealed with XChaCha20-Poly1305; the key comes from the master password via Argon2id (64 MiB, 3 passes). The master password and key exist only in memory while unlocked. The file is created with `0600` permissions, and `servers.json` only records *that* a secret exists.
+- A saved login secret is sent once when `ssh` asks for it. Jump hosts should use keys or the agent.
 
 ## Roadmap
 

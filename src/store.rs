@@ -51,6 +51,12 @@ pub struct Server {
     /// Server this one is reached through (bastion / jump host).
     #[serde(default)]
     pub jump: Option<u64>,
+    /// A login password / key passphrase is saved in the vault (never the secret itself).
+    #[serde(default)]
+    pub has_secret: bool,
+    /// A sudo/su password is saved in the vault.
+    #[serde(default)]
+    pub has_sudo: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -331,6 +337,8 @@ mod tests {
             key_path: String::new(),
             parent,
             jump: None,
+            has_secret: false,
+            has_sudo: false,
         }
     }
 

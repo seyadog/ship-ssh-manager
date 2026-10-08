@@ -160,6 +160,13 @@ impl Vault {
         self.state = None;
     }
 
+    /// Counts as activity, postponing the idle lock.
+    pub fn touch(&mut self) {
+        if let Some(st) = self.state.as_mut() {
+            st.last_used = Instant::now();
+        }
+    }
+
     /// Locks the vault after `after` without use.
     pub fn lock_if_idle(&mut self, after: Duration) {
         if self.state.as_ref().is_some_and(|s| s.last_used.elapsed() > after) {

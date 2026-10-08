@@ -1,5 +1,5 @@
-//! Passwords and passphrases in the system keyring (Secret Service, Keychain, Credential Manager).
-//! They are never written to `servers.json`.
+//! Read-only access to the system keyring, kept only to migrate passwords saved by older
+//! versions into the vault (see `App::migrate_keyring`).
 
 use anyhow::Result;
 use keyring::Entry;
@@ -8,11 +8,6 @@ const SERVICE: &str = "ship";
 
 fn entry(server_id: u64) -> Result<Entry> {
     Ok(Entry::new(SERVICE, &format!("server-{server_id}"))?)
-}
-
-pub fn set(server_id: u64, secret: &str) -> Result<()> {
-    entry(server_id)?.set_password(secret)?;
-    Ok(())
 }
 
 /// `None` if nothing is stored or the keyring is unavailable.

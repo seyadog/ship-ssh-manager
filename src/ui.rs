@@ -284,6 +284,18 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    if tab.session.exit_code.is_none()
+        && tab.session.sudo_prompt()
+        && app.store.server(tab.server_id).is_some_and(|s| s.has_sudo)
+    {
+        let bar = Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1);
+        let text = " sudo is asking for a password · Alt+P: fill it from the vault · or just type ";
+        f.render_widget(
+            Paragraph::new(fit(text, area.width as usize)).style(Style::new().fg(Color::Black).bg(ACCENT)),
+            bar,
+        );
+    }
+
     if let Some(code) = tab.session.exit_code {
         let msg = match code {
             0 => "Session closed.".to_string(),
@@ -343,7 +355,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.focus == Focus::Terminal {
         "F6 panel · Alt+←/→ tabs · Alt+Shift+←/→ move · Alt+W close · F2 rename · Shift+PgUp scrollback".to_string()
     } else {
-        "↑↓ move · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · Alt+↑↓ reorder · q quit".to_string()
+        "↑↓ move · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · p passwords · q quit"
+            .to_string()
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);
 }
@@ -369,6 +382,9 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
     let mut cursor: Option<Position> = None;
 
     match modal {
+        Modal::Unlock(u) => cursor = Some(draw_unlock(f, area, u)),
+        Modal::Master(m) => cursor = Some(draw_master(f, area, m)),
+        Modal::Vault(v) => draw_vault(f, area, v),
         Modal::Form(form) => draw_form(f, area, form, &app.store, &mut hits, &mut cursor),
         Modal::Picker(p, _) => picker_list = draw_picker(f, area, p),
         Modal::Prompt(p) => {
@@ -442,10 +458,14 @@ fn draw_form(
             F_AUTH => ("Auth", ""),
             F_JUMP => ("Jump via", ""),
             F_KEY => ("Private key", "path to the key"),
+            F_SUDO => (
+                "Sudo password",
+                if form.sudo_saved { "(saved in the vault)" } else { "optional - offered when sudo asks" },
+            ),
             _ => (
                 if form.auth == Auth::Password { "Password" } else { "Passphrase" },
                 if form.secret_saved {
-                    "(saved in the keyring)"
+                    "(saved in the vault)"
                 } else if form.auth == Auth::Key {
                     "optional"
                 } else {
@@ -478,10 +498,14 @@ fn draw_form(
             F_PORT => &form.port,
             F_USER => &form.user,
             F_KEY => &form.key,
+            F_SUDO => &form.sudo,
             _ => &form.secret,
         };
-        let shown: String =
-            if fi == F_SECRET { "•".repeat(input.value.chars().count()) } else { input.value.clone() };
+        let shown: String = if fi == F_SECRET || fi == F_SUDO {
+            "•".repeat(input.value.chars().count())
+        } else {
+            input.value.clone()
+        };
         let (text, style) = if shown.is_empty() {
             (placeholder.to_string(), Style::new().fg(MUTED).bg(bg))
         } else {
@@ -583,4 +607,147 @@ mod tests {
         assert_eq!(map_color(vt100::Color::Idx(1)), Color::Indexed(1));
         assert_eq!(map_color(vt100::Color::Default), Color::Reset);
     }
+}
+
+// ---------------------------------------------------------------- vault
+
+fn mask(s: &str) -> String {
+    "•".repeat(s.chars().count())
+}
+
+/// A masked single-line field; returns the cursor position when `focused`.
+fn draw_secret_field(f: &mut Frame, rect: Rect, input: &Input, focused: bool) -> Position {
+    let bg = if focused { SEL_BG } else { Color::Reset };
+    let skip = input.cursor.saturating_sub(rect.width.saturating_sub(1) as usize);
+    let shown: String = mask(&input.value).chars().skip(skip).collect();
+    f.render_widget(Paragraph::new(shown).style(Style::new().fg(FG).bg(bg)), rect);
+    Position::new(rect.x + (input.cursor - skip) as u16, rect.y)
+}
+
+fn draw_unlock(f: &mut Frame, area: Rect, u: &UnlockModal) -> Position {
+    let h = if u.creating { 11 } else { 7 };
+    let r = centered(60, h, area);
+    f.render_widget(Clear, r);
+    let block = modal_block(if u.creating { "Create the password vault" } else { "Unlock the vault" });
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let w = inner.width.saturating_sub(2);
+    let x = inner.x + 1;
+    let mut y = inner.y;
+    let mut cursor = Position::new(x, y);
+
+    if u.creating {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from("Your saved passwords will be encrypted with a master"),
+                Line::from("password that is never stored anywhere."),
+                Line::from(Span::styled("If you forget it, they cannot be recovered.", Style::new().fg(AMBER))),
+            ])
+            .style(Style::new().fg(FG)),
+            Rect::new(x, y, w, 3),
+        );
+        y += 4;
+    } else {
+        y += 1;
+    }
+
+    let label_w = 10;
+    f.render_widget(Paragraph::new("Master").style(Style::new().fg(MUTED)), Rect::new(x, y, label_w, 1));
+    let field = Rect::new(x + label_w, y, w.saturating_sub(label_w), 1);
+    let c = draw_secret_field(f, field, &u.input, u.focus == 0);
+    if u.focus == 0 {
+        cursor = c;
+    }
+    if u.creating {
+        y += 1;
+        f.render_widget(Paragraph::new("Repeat").style(Style::new().fg(MUTED)), Rect::new(x, y, label_w, 1));
+        let field = Rect::new(x + label_w, y, w.saturating_sub(label_w), 1);
+        let c = draw_secret_field(f, field, &u.confirm, u.focus == 1);
+        if u.focus == 1 {
+            cursor = c;
+        }
+    }
+    y += 1;
+    if let Some(e) = &u.error {
+        f.render_widget(Paragraph::new(format!("✕ {e}")).style(Style::new().fg(RED)), Rect::new(x, y, w, 1));
+    }
+    let hint = if u.creating { "Enter next/create · Esc cancel" } else { "Enter unlock · Esc skip" };
+    f.render_widget(Paragraph::new(hint).style(Style::new().fg(MUTED)), Rect::new(x, inner.y + inner.height - 1, w, 1));
+    cursor
+}
+
+fn draw_master(f: &mut Frame, area: Rect, m: &MasterModal) -> Position {
+    let r = centered(60, 8, area);
+    f.render_widget(Clear, r);
+    let block = modal_block("Change the master password");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let w = inner.width.saturating_sub(2);
+    let x = inner.x + 1;
+    let label_w = 10;
+    let mut cursor = Position::new(x, inner.y + 1);
+    for (i, (label, input)) in [("New", &m.input), ("Repeat", &m.confirm)].into_iter().enumerate() {
+        let y = inner.y + 1 + i as u16;
+        f.render_widget(Paragraph::new(label).style(Style::new().fg(MUTED)), Rect::new(x, y, label_w, 1));
+        let c = draw_secret_field(f, Rect::new(x + label_w, y, w.saturating_sub(label_w), 1), input, m.focus == i);
+        if m.focus == i {
+            cursor = c;
+        }
+    }
+    if let Some(e) = &m.error {
+        f.render_widget(Paragraph::new(format!("✕ {e}")).style(Style::new().fg(RED)), Rect::new(x, inner.y + 3, w, 1));
+    }
+    f.render_widget(
+        Paragraph::new("Enter next/save · Esc cancel").style(Style::new().fg(MUTED)),
+        Rect::new(x, inner.y + inner.height - 1, w, 1),
+    );
+    cursor
+}
+
+fn draw_vault(f: &mut Frame, area: Rect, v: &VaultView) {
+    let r = centered(78, 20, area);
+    f.render_widget(Clear, r);
+    let block = modal_block("Password vault");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let w = inner.width.saturating_sub(2) as usize;
+    let x = inner.x + 1;
+
+    if v.rows.is_empty() {
+        f.render_widget(
+            Paragraph::new("Nothing saved yet. Passwords you enter when adding a server appear here.")
+                .style(Style::new().fg(MUTED)),
+            Rect::new(x, inner.y + 1, w as u16, 1),
+        );
+    }
+    let list_h = inner.height.saturating_sub(3) as usize;
+    let top = v.selected.saturating_sub(list_h.saturating_sub(1));
+    for (n, row) in v.rows.iter().enumerate().skip(top).take(list_h) {
+        let y = inner.y + (n - top) as u16;
+        let shown = v.shown.as_ref().filter(|s| s.id == row.id);
+        let cell = |present: bool, value: Option<&String>| -> Span<'static> {
+            match (present, value) {
+                (false, _) => Span::styled("—".to_string(), Style::new().fg(MUTED)),
+                (true, Some(s)) => Span::styled(s.clone(), Style::new().fg(GREEN).add_modifier(Modifier::BOLD)),
+                (true, None) => Span::styled("••••••••".to_string(), Style::new().fg(FG)),
+            }
+        };
+        let name = fit(&row.name, 20);
+        let host = fit(&row.host, 22);
+        let line = Line::from(vec![
+            Span::styled(format!("{name:<21}"), Style::new().fg(FG)),
+            Span::styled(format!("{host:<23}"), Style::new().fg(MUTED)),
+            Span::styled("login ", Style::new().fg(MUTED)),
+            cell(row.login, shown.and_then(|s| s.login.as_ref())),
+            Span::styled("  sudo ", Style::new().fg(MUTED)),
+            cell(row.sudo, shown.and_then(|s| s.sudo.as_ref())),
+        ]);
+        let style = if n == v.selected { Style::new().bg(SEL_BG) } else { Style::new() };
+        f.render_widget(Paragraph::new(line).style(style), Rect::new(x, y, w as u16, 1));
+    }
+    f.render_widget(
+        Paragraph::new("↑↓ select · r reveal (8 s) · c copy login · s copy sudo · m master password · Esc close")
+            .style(Style::new().fg(MUTED)),
+        Rect::new(x, inner.y + inner.height - 1, w as u16, 1),
+    );
 }

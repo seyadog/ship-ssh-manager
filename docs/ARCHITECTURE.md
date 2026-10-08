@@ -19,7 +19,8 @@ Each tab runs the system `ssh` inside a PTY (`portable-pty`). Its output goes th
 | `main.rs` | Terminal setup (raw mode, mouse, paste), event loop |
 | `store.rs` | Model (folders, servers, jump chains) and JSON persistence in `~/.config/ship/servers.json` |
 | `session.rs` | PTY + emulator: spawn, resize, input, scrollback, exit detection, one-shot secret autofill |
-| `secrets.rs` | System keyring |
+| `vault.rs` | Encrypted password vault (Argon2id + XChaCha20-Poly1305), master-password lock |
+| `secrets.rs` | Read-only system keyring access, only to migrate old passwords into the vault |
 | `keys.rs` | Maps crossterm key events to terminal bytes |
 | `app.rs` | App state, focus, modals, keyboard and mouse handling, `ssh` argv building |
 | `ui.rs` | Drawing: sidebar, tabs, terminal, forms |
@@ -37,7 +38,9 @@ A server has two independent attributes: `parent` (its folder, for organizing) a
 
 ## Security
 
-- No password is written to disk. It goes to the OS keyring (`keyring` crate) and is written to the PTY once when `ssh` prompts.
+- No password is written to disk in the clear. Secrets live in `vault.json`, sealed with XChaCha20-Poly1305 under a key derived from the master password (Argon2id). The key exists only in memory while the vault is unlocked, and it relocks after 5 idle minutes. `servers.json` only stores booleans (`has_secret`, `has_sudo`).
+- A login secret is written to the PTY once when `ssh` prompts. Prompts are recognised on the interpreted `vt100` screen line, so escape sequences and wrapping cannot hide them.
+- A `sudo`/`su` password is only offered (banner) and sent when the user presses `Alt+P`.
 - Keys and the agent are preferred; the data file only stores the *path* of a key.
 
 ## Phases

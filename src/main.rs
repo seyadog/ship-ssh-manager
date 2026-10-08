@@ -17,7 +17,8 @@ use std::time::Duration;
 
 fn main() -> Result<()> {
     let store = store::Store::load()?;
-    let mut app = app::App::new(store);
+    let vault = vault::Vault::new(store::Store::config_dir().join("vault.json"));
+    let mut app = app::App::new(store, vault);
 
     let mut terminal = ratatui::init();
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;

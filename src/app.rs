@@ -4,11 +4,45 @@ use crate::keys;
 use crate::secrets;
 use crate::session::Session;
 use crate::store::{Auth, NodeId, Server, Store};
+use crate::vault::{Kind, UnlockError, Vault};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use zeroize::Zeroize;
+
+const VAULT_IDLE: Duration = Duration::from_secs(5 * 60);
+const REVEAL_FOR: Duration = Duration::from_secs(8);
+const CLIPBOARD_FOR: Duration = Duration::from_secs(30);
+const MIN_MASTER: usize = 8;
+
+/// Copies to the system clipboard through the terminal (OSC 52). An empty string clears it.
+fn osc52(text: &str) {
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{}\x07", B64.encode(text));
+    let _ = out.flush();
+}
+
+impl VaultView {
+    fn new(store: &Store) -> Self {
+        let rows = store
+            .servers
+            .iter()
+            .filter(|s| s.has_secret || s.has_sudo)
+            .map(|s| VaultRow {
+                id: s.id,
+                name: s.name.clone(),
+                host: if s.user.is_empty() { s.host.clone() } else { format!("{}@{}", s.user, s.host) },
+                login: s.has_secret,
+                sudo: s.has_sudo,
+            })
+            .collect();
+        VaultView { rows, selected: 0, shown: None }
+    }
+}
 
 // ---------------------------------------------------------------- text input
 
@@ -17,6 +51,12 @@ pub struct Input {
     pub value: String,
     /// Cursor position, in characters.
     pub cursor: usize,
+}
+
+impl Drop for Input {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
 }
 
 impl Input {
@@ -88,6 +128,7 @@ pub const F_AUTH: usize = 4;
 pub const F_KEY: usize = 5;
 pub const F_SECRET: usize = 6;
 pub const F_JUMP: usize = 7;
+pub const F_SUDO: usize = 8;
 
 pub struct ServerForm {
     pub editing: Option<u64>,
@@ -98,11 +139,13 @@ pub struct ServerForm {
     pub user: Input,
     pub key: Input,
     pub secret: Input,
+    pub sudo: Input,
     pub auth: Auth,
     pub jump: Option<u64>,
     pub focus: usize,
     pub error: Option<String>,
     pub secret_saved: bool,
+    pub sudo_saved: bool,
 }
 
 impl ServerForm {
@@ -117,10 +160,12 @@ impl ServerForm {
             user: Input::default(),
             key: Input::default(),
             secret: Input::default(),
+            sudo: Input::default(),
             auth: Auth::Agent,
             focus: F_NAME,
             error: None,
             secret_saved: false,
+            sudo_saved: false,
         }
     }
 
@@ -135,10 +180,12 @@ impl ServerForm {
             user: Input::new(&s.user),
             key: Input::new(&s.key_path),
             secret: Input::default(),
+            sudo: Input::default(),
             auth: s.auth,
             focus: F_NAME,
             error: None,
-            secret_saved: secrets::get(s.id).is_some(),
+            secret_saved: s.has_secret,
+            sudo_saved: s.has_sudo,
         }
     }
 
@@ -150,6 +197,7 @@ impl ServerForm {
             Auth::Key => v.extend([F_KEY, F_SECRET]),
             Auth::Password => v.push(F_SECRET),
         }
+        v.push(F_SUDO);
         v
     }
 
@@ -171,6 +219,7 @@ impl ServerForm {
             F_USER => Some(&mut self.user),
             F_KEY => Some(&mut self.key),
             F_SECRET => Some(&mut self.secret),
+            F_SUDO => Some(&mut self.sudo),
             _ => None,
         }
     }
@@ -300,7 +349,66 @@ pub struct Confirm {
     pub action: ConfirmAction,
 }
 
+/// What to do once the vault is unlocked.
+pub enum Pending {
+    Open(u64),
+    Reconnect(usize),
+    FillSudo(usize),
+    SaveForm(Box<ServerForm>),
+    Purge(Vec<u64>),
+    OpenVault,
+}
+
+pub struct UnlockModal {
+    pub input: Input,
+    pub confirm: Input,
+    /// First use: the master password is being chosen, not entered.
+    pub creating: bool,
+    pub focus: usize,
+    pub error: Option<String>,
+    pub pending: Pending,
+}
+
+pub struct MasterModal {
+    pub input: Input,
+    pub confirm: Input,
+    pub focus: usize,
+    pub error: Option<String>,
+}
+
+/// Secrets currently revealed in the vault screen; wiped on drop.
+pub struct Shown {
+    pub id: u64,
+    pub login: Option<String>,
+    pub sudo: Option<String>,
+    pub at: Instant,
+}
+
+impl Drop for Shown {
+    fn drop(&mut self) {
+        self.login.zeroize();
+        self.sudo.zeroize();
+    }
+}
+
+pub struct VaultRow {
+    pub id: u64,
+    pub name: String,
+    pub host: String,
+    pub login: bool,
+    pub sudo: bool,
+}
+
+pub struct VaultView {
+    pub rows: Vec<VaultRow>,
+    pub selected: usize,
+    pub shown: Option<Shown>,
+}
+
 pub enum Modal {
+    Unlock(Box<UnlockModal>),
+    Master(Box<MasterModal>),
+    Vault(Box<VaultView>),
     Form(Box<ServerForm>),
     Picker(Box<Picker>, Box<ServerForm>),
     Prompt(Prompt),
@@ -360,6 +468,9 @@ enum Drag {
 
 pub struct App {
     pub store: Store,
+    pub vault: Vault,
+    keyring_checked: bool,
+    clip_clear_at: Option<Instant>,
     pub rows: Vec<Row>,
     pub selected: usize,
     pub offset: usize,
@@ -380,9 +491,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Store, vault: Vault) -> Self {
         let mut app = App {
             store,
+            vault,
+            keyring_checked: false,
+            clip_clear_at: None,
             rows: vec![],
             selected: 0,
             offset: 0,
@@ -524,6 +638,20 @@ impl App {
         if self.flash.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(5)) {
             self.flash = None;
         }
+        self.vault.lock_if_idle(VAULT_IDLE);
+        if !self.vault.is_unlocked() && matches!(self.modal, Some(Modal::Vault(_)) | Some(Modal::Master(_))) {
+            self.modal = None;
+            self.set_flash("Vault locked after being idle");
+        }
+        if let Some(Modal::Vault(v)) = self.modal.as_mut() {
+            if v.shown.as_ref().is_some_and(|s| s.at.elapsed() > REVEAL_FOR) {
+                v.shown = None;
+            }
+        }
+        if self.clip_clear_at.is_some_and(|t| Instant::now() >= t) {
+            self.clip_clear_at = None;
+            osc52("");
+        }
     }
 
     fn request_quit(&mut self) {
@@ -541,29 +669,295 @@ impl App {
     // ------------------------------------------------------------ sessions and tabs
 
     pub fn open_server(&mut self, id: u64) {
-        let Some(server) = self.store.server(id).cloned() else { return };
-        let c = self.layout.content;
-        let (rows, cols) = if c.width > 0 && c.height > 0 { (c.height, c.width) } else { (24, 80) };
-        match Session::spawn(&ssh_argv(&self.store, &server), rows, cols, secret_for(&server)) {
-            Ok(session) => {
-                self.tabs.push(Tab { title: server.name.clone(), server_id: id, session });
-                self.active = self.tabs.len() - 1;
-                self.focus = Focus::Terminal;
+        self.modal = self.gate(Pending::Open(id));
+    }
+
+    fn reconnect(&mut self, idx: usize) {
+        self.modal = self.gate(Pending::Reconnect(idx));
+    }
+
+    /// Starts `ssh` for a server, in a new tab or replacing the session of tab `reuse`.
+    fn connect(&mut self, id: u64, reuse: Option<usize>, secret: Option<String>) {
+        let Some(server) = self.store.server(id).cloned() else {
+            return self.set_flash("This server no longer exists");
+        };
+        let reuse = reuse.filter(|&i| i < self.tabs.len());
+        let (rows, cols) = match reuse {
+            Some(i) => self.tabs[i].session.size(),
+            None => {
+                let c = self.layout.content;
+                if c.width > 0 && c.height > 0 { (c.height, c.width) } else { (24, 80) }
             }
+        };
+        let login_expected = server.auth == Auth::Password;
+        match Session::spawn(&ssh_argv(&self.store, &server), rows, cols, secret, login_expected) {
+            Ok(session) => match reuse {
+                Some(i) => self.tabs[i].session = session,
+                None => {
+                    self.tabs.push(Tab { title: server.name.clone(), server_id: id, session });
+                    self.active = self.tabs.len() - 1;
+                    self.focus = Focus::Terminal;
+                }
+            },
             Err(e) => self.set_flash(format!("Could not start ssh: {e:#}")),
         }
     }
 
-    fn reconnect(&mut self, idx: usize) {
-        let Some(server) = self.tabs.get(idx).and_then(|t| self.store.server(t.server_id)).cloned() else {
-            self.set_flash("This tab’s server no longer exists");
-            return;
-        };
-        let (rows, cols) = self.tabs[idx].session.size();
-        match Session::spawn(&ssh_argv(&self.store, &server), rows, cols, secret_for(&server)) {
-            Ok(session) => self.tabs[idx].session = session,
-            Err(e) => self.set_flash(format!("Could not reconnect: {e:#}")),
+    // ------------------------------------------------------------ vault
+
+    fn needs_vault(&self, p: &Pending) -> bool {
+        let wants_secret = |s: &Server| s.auth != Auth::Agent && s.has_secret;
+        match p {
+            Pending::Open(id) => self.store.server(*id).is_some_and(wants_secret),
+            Pending::Reconnect(i) => {
+                self.tabs.get(*i).and_then(|t| self.store.server(t.server_id)).is_some_and(wants_secret)
+            }
+            Pending::Purge(ids) => !ids.is_empty() && self.vault.exists(),
+            _ => true,
         }
+    }
+
+    /// Runs `p` now if the vault is not needed (or already unlocked); otherwise asks for the master password.
+    fn gate(&mut self, p: Pending) -> Option<Modal> {
+        if self.vault.is_unlocked() || !self.needs_vault(&p) {
+            return self.run_pending(p);
+        }
+        Some(Modal::Unlock(Box::new(UnlockModal {
+            input: Input::default(),
+            confirm: Input::default(),
+            creating: !self.vault.exists(),
+            focus: 0,
+            error: None,
+            pending: p,
+        })))
+    }
+
+    /// The login secret for a server: from the vault, or (legacy) from the old keyring entry.
+    fn login_secret(&mut self, id: u64) -> Option<String> {
+        let s = self.store.server(id)?;
+        if s.auth == Auth::Agent {
+            return None;
+        }
+        if s.has_secret {
+            self.vault.get(id, Kind::Login)
+        } else if !self.vault.exists() {
+            secrets::get(id)
+        } else {
+            None
+        }
+    }
+
+    fn run_pending(&mut self, p: Pending) -> Option<Modal> {
+        match p {
+            Pending::Open(id) => {
+                let secret = self.login_secret(id);
+                self.connect(id, None, secret);
+                None
+            }
+            Pending::Reconnect(idx) => {
+                let id = self.tabs.get(idx)?.server_id;
+                let secret = self.login_secret(id);
+                self.connect(id, Some(idx), secret);
+                None
+            }
+            Pending::FillSudo(idx) => {
+                let id = self.tabs.get(idx)?.server_id;
+                match self.vault.get(id, Kind::Sudo) {
+                    Some(mut pw) => {
+                        if let Some(t) = self.tabs.get(idx) {
+                            t.session.write(format!("{pw}\r").as_bytes());
+                        }
+                        pw.zeroize();
+                    }
+                    None => self.set_flash("No sudo password is saved for this server"),
+                }
+                None
+            }
+            Pending::SaveForm(f) => self.finish_save(f),
+            Pending::Purge(ids) => {
+                if self.vault.is_unlocked() {
+                    for id in ids {
+                        let _ = self.vault.remove_server(id);
+                    }
+                }
+                None
+            }
+            Pending::OpenVault => Some(Modal::Vault(Box::new(VaultView::new(&self.store)))),
+        }
+    }
+
+    /// The user dismissed the unlock prompt: carry on without the vault where that makes sense.
+    fn abort_pending(&mut self, p: Pending) -> Option<Modal> {
+        match p {
+            Pending::Open(id) => {
+                self.connect(id, None, None);
+                self.set_flash("Connecting without the saved password");
+                None
+            }
+            Pending::Reconnect(idx) => {
+                if let Some(id) = self.tabs.get(idx).map(|t| t.server_id) {
+                    self.connect(id, Some(idx), None);
+                }
+                None
+            }
+            Pending::SaveForm(f) => Some(Modal::Form(f)),
+            Pending::Purge(_) => {
+                self.set_flash("Saved passwords of the deleted servers remain in the vault");
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Moves passwords saved by older versions from the system keyring into the vault.
+    fn migrate_keyring(&mut self) {
+        if self.keyring_checked || !self.vault.is_unlocked() {
+            return;
+        }
+        self.keyring_checked = true;
+        let ids: Vec<u64> =
+            self.store.servers.iter().filter(|s| s.auth != Auth::Agent && !s.has_secret).map(|s| s.id).collect();
+        let mut moved = 0;
+        for id in ids {
+            let Some(mut pw) = secrets::get(id) else { continue };
+            if self.vault.set(id, Kind::Login, Some(&pw)).is_ok() {
+                if let Some(s) = self.store.servers.iter_mut().find(|s| s.id == id) {
+                    s.has_secret = true;
+                }
+                secrets::delete(id);
+                moved += 1;
+            }
+            pw.zeroize();
+        }
+        if moved > 0 {
+            self.persist();
+            self.set_flash(format!("Moved {moved} saved password(s) from the system keyring into the vault"));
+        }
+    }
+
+    fn unlock_key(&mut self, mut u: Box<UnlockModal>, key: KeyEvent) -> Option<Modal> {
+        match key.code {
+            KeyCode::Esc => return self.abort_pending(u.pending),
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down if u.creating => u.focus = 1 - u.focus,
+            KeyCode::Enter if u.creating && u.focus == 0 => u.focus = 1,
+            KeyCode::Enter if u.creating => {
+                if u.input.value.chars().count() < MIN_MASTER {
+                    u.error = Some(format!("Use at least {MIN_MASTER} characters"));
+                } else if u.input.value != u.confirm.value {
+                    u.error = Some("The two passwords do not match".into());
+                    u.confirm = Input::default();
+                } else {
+                    match self.vault.create(&u.input.value) {
+                        Ok(()) => {
+                            self.migrate_keyring();
+                            return self.run_pending(u.pending);
+                        }
+                        Err(e) => u.error = Some(format!("{e:#}")),
+                    }
+                }
+            }
+            KeyCode::Enter => match self.vault.unlock(&u.input.value) {
+                Ok(()) => {
+                    self.migrate_keyring();
+                    return self.run_pending(u.pending);
+                }
+                Err(UnlockError::WrongPassword) => {
+                    u.error = Some("Wrong master password".into());
+                    u.input = Input::default();
+                }
+                Err(UnlockError::Other(m)) => u.error = Some(m),
+            },
+            _ => {
+                let field = if u.focus == 0 { &mut u.input } else { &mut u.confirm };
+                field.handle(key);
+            }
+        }
+        Some(Modal::Unlock(u))
+    }
+
+    fn master_key(&mut self, mut m: Box<MasterModal>, key: KeyEvent) -> Option<Modal> {
+        match key.code {
+            KeyCode::Esc => return None,
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => m.focus = 1 - m.focus,
+            KeyCode::Enter if m.focus == 0 => m.focus = 1,
+            KeyCode::Enter => {
+                if m.input.value.chars().count() < MIN_MASTER {
+                    m.error = Some(format!("Use at least {MIN_MASTER} characters"));
+                } else if m.input.value != m.confirm.value {
+                    m.error = Some("The two passwords do not match".into());
+                    m.confirm = Input::default();
+                } else {
+                    match self.vault.change_master(&m.input.value) {
+                        Ok(()) => {
+                            self.set_flash("Master password changed");
+                            return None;
+                        }
+                        Err(e) => m.error = Some(format!("{e:#}")),
+                    }
+                }
+            }
+            _ => {
+                let field = if m.focus == 0 { &mut m.input } else { &mut m.confirm };
+                field.handle(key);
+            }
+        }
+        Some(Modal::Master(m))
+    }
+
+    fn vault_key(&mut self, mut v: Box<VaultView>, key: KeyEvent) -> Option<Modal> {
+        self.vault.touch();
+        let last = v.rows.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return None,
+            KeyCode::Up | KeyCode::Char('k') => v.selected = v.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => v.selected = (v.selected + 1).min(last),
+            KeyCode::Char('m') => {
+                return Some(Modal::Master(Box::new(MasterModal {
+                    input: Input::default(),
+                    confirm: Input::default(),
+                    focus: 0,
+                    error: None,
+                })));
+            }
+            KeyCode::Enter | KeyCode::Char('r') => {
+                let Some(id) = v.rows.get(v.selected).map(|r| r.id) else { return Some(Modal::Vault(v)) };
+                if v.shown.as_ref().is_some_and(|s| s.id == id) {
+                    v.shown = None;
+                } else {
+                    v.shown = Some(Shown {
+                        id,
+                        login: self.vault.get(id, Kind::Login),
+                        sudo: self.vault.get(id, Kind::Sudo),
+                        at: Instant::now(),
+                    });
+                }
+            }
+            KeyCode::Char('c') | KeyCode::Char('s') => {
+                let kind = if key.code == KeyCode::Char('c') { Kind::Login } else { Kind::Sudo };
+                if let Some(id) = v.rows.get(v.selected).map(|r| r.id) {
+                    match self.vault.get(id, kind) {
+                        Some(mut pw) => {
+                            osc52(&pw);
+                            pw.zeroize();
+                            self.clip_clear_at = Some(Instant::now() + CLIPBOARD_FOR);
+                            self.set_flash("Copied (the clipboard is cleared in 30 s)");
+                        }
+                        None => self.set_flash("Nothing saved there"),
+                    }
+                }
+            }
+            _ => {}
+        }
+        Some(Modal::Vault(v))
+    }
+
+    fn sudo_ready(&self) -> bool {
+        self.focus == Focus::Terminal
+            && self.tabs.get(self.active).is_some_and(|t| {
+                t.session.exit_code.is_none()
+                    && t.session.sudo_prompt()
+                    && self.store.server(t.server_id).is_some_and(|s| s.has_sudo)
+            })
     }
 
     fn close_tab(&mut self, idx: usize) {
@@ -614,6 +1008,10 @@ impl App {
                 return;
             }
             KeyCode::F(2) if n > 0 => return self.rename_tab_prompt(),
+            KeyCode::Char('p') if alt && self.sudo_ready() => {
+                self.modal = self.gate(Pending::FillSudo(self.active));
+                return;
+            }
             KeyCode::Left if alt && shift => return self.move_tab(self.active, self.active.saturating_sub(1)),
             KeyCode::Right if alt && shift && n > 0 => return self.move_tab(self.active, (self.active + 1).min(n - 1)),
             KeyCode::Left if alt && n > 0 => return self.active = (self.active + n - 1) % n,
@@ -679,6 +1077,7 @@ impl App {
             KeyCode::Char('v') | KeyCode::Tab => {
                 self.set_view(if self.view == View::Folders { View::Jump } else { View::Folders })
             }
+            KeyCode::Char('p') => self.modal = self.gate(Pending::OpenVault),
             KeyCode::Char('a') => self.new_server_form(),
             KeyCode::Char('f') => self.new_folder_prompt(),
             KeyCode::Char('e') | KeyCode::F(4) => self.edit_selected(),
@@ -789,6 +1188,9 @@ impl App {
     fn modal_key(&mut self, key: KeyEvent) {
         let Some(modal) = self.modal.take() else { return };
         self.modal = match modal {
+            Modal::Unlock(u) => self.unlock_key(u, key),
+            Modal::Master(m) => self.master_key(m, key),
+            Modal::Vault(v) => self.vault_key(v, key),
             Modal::Form(f) => self.form_key(f, key),
             Modal::Picker(p, f) => Self::picker_key(p, f, key),
             Modal::Prompt(p) => self.prompt_key(p, key),
@@ -908,38 +1310,37 @@ impl App {
 
     fn confirm_key(&mut self, c: Confirm, key: KeyEvent) -> Option<Modal> {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('s') | KeyCode::Enter => {
-                self.run_confirmed(c.action);
-                None
-            }
+            KeyCode::Char('y') | KeyCode::Char('s') | KeyCode::Enter => self.run_confirmed(c.action),
             KeyCode::Char('n') | KeyCode::Esc => None,
             _ => Some(Modal::Confirm(c)),
         }
     }
 
-    fn run_confirmed(&mut self, action: ConfirmAction) {
+    fn run_confirmed(&mut self, action: ConfirmAction) -> Option<Modal> {
         match action {
-            ConfirmAction::Quit => self.quit = true,
+            ConfirmAction::Quit => {
+                self.quit = true;
+                None
+            }
             ConfirmAction::Delete(node) => {
-                for id in self.store.delete(node) {
-                    secrets::delete(id);
-                }
+                let with_secrets: Vec<u64> =
+                    self.store.servers.iter().filter(|s| s.has_secret || s.has_sudo).map(|s| s.id).collect();
+                let gone: Vec<u64> =
+                    self.store.delete(node).into_iter().filter(|id| with_secrets.contains(id)).collect();
                 self.persist();
                 self.rebuild();
+                self.gate(Pending::Purge(gone))
             }
         }
     }
 
     fn save_form(&mut self, mut f: Box<ServerForm>) -> Option<Modal> {
         let host = f.host.value.trim().to_string();
-        let port: u16 = match f.port.value.trim().parse() {
-            Ok(p) if p > 0 => p,
-            _ => {
-                f.error = Some("Port must be a number between 1 and 65535".into());
-                f.focus = F_PORT;
-                return Some(Modal::Form(f));
-            }
-        };
+        if !f.port.value.trim().parse::<u16>().is_ok_and(|p| p > 0) {
+            f.error = Some("Port must be a number between 1 and 65535".into());
+            f.focus = F_PORT;
+            return Some(Modal::Form(f));
+        }
         if host.is_empty() {
             f.error = Some("Host is required".into());
             f.focus = F_HOST;
@@ -951,10 +1352,28 @@ impl App {
             f.focus = F_KEY;
             return Some(Modal::Form(f));
         }
+        let prev = f.editing.and_then(|id| self.store.server(id)).cloned();
+        let typed_secret = f.auth != Auth::Agent && !f.secret.value.is_empty();
+        let drops_secret = f.auth == Auth::Agent && prev.as_ref().is_some_and(|p| p.has_secret);
+        if typed_secret || !f.sudo.value.is_empty() || drops_secret {
+            return self.gate(Pending::SaveForm(f));
+        }
+        self.finish_save(f)
+    }
+
+    /// Writes the (already validated) form to the store, and its secrets to the vault.
+    fn finish_save(&mut self, f: Box<ServerForm>) -> Option<Modal> {
+        let host = f.host.value.trim().to_string();
+        let port: u16 = f.port.value.trim().parse().unwrap_or(22);
+        let key_path = f.key.value.trim().to_string();
         let name = match f.name.value.trim() {
             "" => host.clone(),
             n => n.to_string(),
         };
+        let prev = f.editing.and_then(|id| self.store.server(id)).cloned();
+        let typed_secret = f.auth != Auth::Agent && !f.secret.value.is_empty();
+        let typed_sudo = !f.sudo.value.is_empty();
+        let had_secret = prev.as_ref().is_some_and(|p| p.has_secret);
         let server = Server {
             id: f.editing.unwrap_or(0),
             name,
@@ -965,6 +1384,8 @@ impl App {
             key_path: if f.auth == Auth::Key { key_path } else { String::new() },
             parent: f.parent,
             jump: f.jump,
+            has_secret: f.auth != Auth::Agent && (typed_secret || had_secret),
+            has_sudo: typed_sudo || prev.as_ref().is_some_and(|p| p.has_sudo),
         };
         let id = match f.editing {
             Some(id) => {
@@ -973,12 +1394,17 @@ impl App {
             }
             None => self.store.add_server(server),
         };
-        if f.auth == Auth::Agent {
-            secrets::delete(id);
-        } else if !f.secret.value.is_empty() {
-            if let Err(e) = secrets::set(id, &f.secret.value) {
-                self.set_flash(format!("Could not save to the keyring: {e:#}"));
-            }
+        let mut result = Ok(());
+        if typed_secret {
+            result = result.and(self.vault.set(id, Kind::Login, Some(&f.secret.value)));
+        } else if f.auth == Auth::Agent && had_secret {
+            result = result.and(self.vault.set(id, Kind::Login, None));
+        }
+        if typed_sudo {
+            result = result.and(self.vault.set(id, Kind::Sudo, Some(&f.sudo.value)));
+        }
+        if let Err(e) = result {
+            self.set_flash(format!("Could not save to the vault: {e:#}"));
         }
         self.persist();
         self.rebuild();
@@ -994,6 +1420,14 @@ impl App {
                 }
             }
             Some(Modal::Prompt(p)) => p.input.insert_str(text),
+            Some(Modal::Unlock(u)) => {
+                let field = if u.focus == 0 { &mut u.input } else { &mut u.confirm };
+                field.insert_str(text);
+            }
+            Some(Modal::Master(m)) => {
+                let field = if m.focus == 0 { &mut m.input } else { &mut m.confirm };
+                field.insert_str(text);
+            }
             Some(_) => {}
             None => {
                 if self.focus == Focus::Terminal {
@@ -1196,10 +1630,7 @@ impl App {
                 Some(Modal::Picker(p, f))
             }
             Modal::Confirm(c) if down => match hit {
-                Some(Hit::Yes) => {
-                    self.run_confirmed(c.action);
-                    None
-                }
+                Some(Hit::Yes) => self.run_confirmed(c.action),
                 Some(Hit::No) => None,
                 _ => Some(Modal::Confirm(c)),
             },
@@ -1242,13 +1673,6 @@ pub fn expand_tilde(p: &str) -> String {
         }
     }
     p.to_string()
-}
-
-fn secret_for(s: &Server) -> Option<String> {
-    match s.auth {
-        Auth::Agent => None,
-        Auth::Key | Auth::Password => secrets::get(s.id),
-    }
 }
 
 fn target(s: &Server) -> String {
@@ -1323,6 +1747,8 @@ mod tests {
             key_path: key.into(),
             parent: None,
             jump: None,
+            has_secret: false,
+            has_sudo: false,
         }
     }
 
