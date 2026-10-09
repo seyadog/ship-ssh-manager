@@ -35,7 +35,7 @@ fn themed(pastel: Color, classic: Color) -> Color {
     if terminal_theme() { pastel } else { classic }
 }
 fn c_accent() -> Color {
-    themed(Color::Rgb(180, 190, 254), Color::Rgb(122, 162, 247)) // lavender
+    themed(Color::Rgb(160, 150, 255), Color::Rgb(122, 162, 247)) // periwinkle
 }
 fn c_fg() -> Color {
     themed(Color::Reset, Color::Rgb(192, 202, 245))
@@ -50,13 +50,13 @@ fn c_drop() -> Color {
     themed(Color::Rgb(49, 72, 60), Color::Rgb(58, 82, 60))
 }
 fn c_green() -> Color {
-    themed(Color::Rgb(166, 227, 161), Color::Rgb(158, 206, 106))
+    themed(Color::Rgb(130, 230, 130), Color::Rgb(158, 206, 106))
 }
 fn c_amber() -> Color {
-    themed(Color::Rgb(249, 226, 175), Color::Rgb(224, 175, 104))
+    themed(Color::Rgb(255, 215, 100), Color::Rgb(224, 175, 104))
 }
 fn c_red() -> Color {
-    themed(Color::Rgb(243, 139, 168), Color::Rgb(247, 118, 142))
+    themed(Color::Rgb(255, 110, 145), Color::Rgb(247, 118, 142))
 }
 /// Text on the accent colour (a button that stands out).
 fn badge_accent() -> Style {
@@ -78,21 +78,21 @@ const PASTELS: [(u8, u8, u8); 8] = [
 fn space_color(id: u64, live: bool) -> Color {
     let (r, g, b) = if terminal_theme() { MOCHA[(id as usize) % MOCHA.len()] } else { PASTELS[(id as usize) % PASTELS.len()] };
     // Idle spaces keep their hue but wash out towards grey (fading to black would turn yellows brown).
-    let k = if live { 1.0 } else { 0.55 };
+    let k = if live { 1.0 } else { 0.6 };
     let fade = |c: u8, grey: f32| (c as f32 * k + grey * (1.0 - k)) as u8;
     Color::Rgb(fade(r, 80.0), fade(g, 82.0), fade(b, 100.0))
 }
 
-/// The pastels of the default theme (Catppuccin Mocha): blue, red, green, peach, mauve, sky, yellow, teal.
+/// The colours of the default theme, soft but lively: blue, pink, green, orange, violet, cyan, yellow, teal.
 const MOCHA: [(u8, u8, u8); 8] = [
-    (137, 180, 250),
-    (243, 139, 168),
-    (166, 227, 161),
-    (250, 179, 135),
-    (203, 166, 247),
-    (137, 220, 235),
-    (249, 226, 175),
-    (148, 226, 213),
+    (110, 168, 255),
+    (255, 110, 145),
+    (130, 230, 130),
+    (255, 160, 90),
+    (190, 130, 255),
+    (90, 215, 245),
+    (255, 215, 100),
+    (80, 225, 185),
 ];
 
 
@@ -420,7 +420,7 @@ fn draw_rows(
             // The name turns green when the agent has finished; the spine keeps the space's own colour.
             let color = space_color(id, live);
             let (mut text, tone) = match app.branches.get(&id) {
-                Some(b) => (b.clone(), REMOTE_GREEN),
+                Some(b) => (b.clone(), themed(Color::Rgb(190, 140, 255), REMOTE_GREEN)),
                 None => (cwd, c_muted()),
             };
             // A filed project that is on top says which folder it belongs to.
