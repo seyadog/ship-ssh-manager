@@ -74,7 +74,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.layout.modal.clear();
 
     let [main, status] = RLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    let side_w = 32.min(area.width / 2);
+    let side_w = if app.panel_hidden { 2 } else { 32.min(area.width / 2) };
     let [side, right] = RLayout::horizontal([Constraint::Length(side_w), Constraint::Min(1)]).areas(main);
     let [tabbar, content] = RLayout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(right);
 
@@ -85,7 +85,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.layout.panes = [content, Rect::default()];
     app.layout.content = content;
 
-    draw_sidebar(f, app, side);
+    if app.panel_hidden {
+        // Only a thin strip is left, to bring the panel back (also Alt+B).
+        app.layout.sidebar = Rect::default();
+        app.layout.list = Rect::default();
+        app.layout.list_bottom = Rect::default();
+        let r = Rect::new(side.x, side.y, side.width, 3.min(side.height));
+        f.render_widget(Paragraph::new(vec![Line::raw(""), Line::from(Span::styled(" ▸", Style::new().fg(ACCENT)))]), r);
+        app.layout.toolbar.push((r, Hit::ShowPanel));
+    } else {
+        draw_sidebar(f, app, side);
+    }
     if app.is_split() {
         // Two groups of tabs, each with its bar and its terminal, with a line between them to drag.
         let left_w = ((right.width as u32 * app.split_pm as u32 / 1000) as u16).clamp(10, right.width.saturating_sub(11));
@@ -134,28 +144,42 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // With room, the blocks are tall and airy; in a short window they shrink back to one line.
     let in_spaces = app.view == View::Spaces;
 
-    // Buttons: one small line at the very bottom. Everything also has a key, shown in the status bar.
-    let buttons = [
-        (if in_spaces { " + Project " } else { " + Server " }, Hit::AddServer),
-        (if in_spaces { " + Terminal " } else { " + Folder " }, Hit::AddFolder),
-        (" Edit ", Hit::Edit),
+    // From the top: two rows of buttons, the tabs that are open ("running"), the views, the list, and at the
+    // bottom the quick open line. Everything also has a key, shown in the status bar.
+    let line = |f: &mut Frame, y: u16| {
+        f.render_widget(Paragraph::new("─".repeat(inner.width as usize)).style(Style::new().fg(MUTED)), Rect::new(inner.x, y, inner.width, 1));
+    };
+    let rows = [
+        vec![(" +Proj ", Hit::NewProject), (" +Serv ", Hit::NewServer), (" +Fold ", Hit::NewFolder)],
+        vec![(" Edit ", Hit::Edit), (" Term ", Hit::Term), (" Vault ", Hit::Vault), (" Hide ", Hit::Hide)],
     ];
-    let btn_y = inner.y + inner.height - 1;
-    let mut bx = inner.x;
-    for (label, hit) in buttons {
-        let w = (label.width() as u16).min(inner.width.saturating_sub(bx - inner.x));
-        let r = Rect::new(bx, btn_y, w, 1);
-        f.render_widget(Paragraph::new(label).style(Style::new().fg(FG).bg(SEL_BG)), r);
-        app.layout.toolbar.push((r, hit));
-        bx += w + 1;
+    for (n, row) in rows.into_iter().enumerate() {
+        let y = inner.y + n as u16;
+        let mut bx = inner.x;
+        for (label, hit) in row {
+            let w = (label.width() as u16).min(inner.width.saturating_sub(bx - inner.x));
+            let r = Rect::new(bx, y, w, 1);
+            f.render_widget(Paragraph::new(label).style(Style::new().fg(FG).bg(SEL_BG)), r);
+            app.layout.toolbar.push((r, hit));
+            bx += w + 1;
+        }
     }
+    line(f, inner.y + 2);
 
-    // Views, at the top.
-    let views_y = inner.y;
-    let views = [
-        (" Projects ", View::Spaces, Hit::ViewSpaces),
-        (" SSH ", View::Folders, Hit::ViewFolders),
-    ];
+    // What is open, always in view: the agent and its state next to each tab.
+    let fixed = 3 + 1 + 1 + 1; // the buttons and their line, the views, the search line
+    let spare = (inner.height as usize).saturating_sub(fixed + 4); // keep at least four rows for the list
+    let open = app.bar_tabs();
+    let shown_n = open.len().min(5).min(spare.saturating_sub(2));
+    let mut y = inner.y + 3;
+    let running_y = y;
+    if shown_n > 0 {
+        y += 1 + shown_n as u16 + 1;
+    }
+    let views_y = y;
+
+    // Views, under the running list.
+    let views = [(" Projects ", View::Spaces, Hit::ViewSpaces), (" Servers ", View::Folders, Hit::ViewFolders)];
     let mut vx = inner.x;
     let mut spans = vec![];
     for (label, v, hit) in views {
@@ -171,17 +195,66 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
     f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, views_y, inner.width, 1));
 
+    if shown_n > 0 {
+        let head = format!(" RUNNING ({})", open.len());
+        f.render_widget(Paragraph::new(head).style(Style::new().fg(MUTED)), Rect::new(inner.x, running_y, inner.width, 1));
+        // A window of the open tabs that keeps the active one in view.
+        let at = open.iter().position(|&i| i == app.active).unwrap_or(0);
+        let first = at.saturating_sub(shown_n - 1).min(open.len() - shown_n);
+        for (k, &i) in open[first..first + shown_n].iter().enumerate() {
+            let ry = running_y + 1 + k as u16;
+            let tab = &app.tabs[i];
+            let dead = tab.session.exit_code.is_some();
+            let active = i == app.active;
+            let bg = if active { SEL_BG } else { Color::Reset };
+            let tag = tab_tag(tab);
+            let tag_w = tag.as_ref().map_or(0, |(t, _)| t.width() + 1);
+            let name = fit(&app.tab_label(tab), (inner.width as usize).saturating_sub(5 + tag_w));
+            let used = 4 + name.width() + tag_w;
+            let mut spans = vec![
+                Span::styled("  ", Style::new().bg(bg)),
+                Span::styled(if dead { "◇ " } else { "◆ " }, Style::new().fg(if dead { RED } else if tab.attention { AMBER } else { GREEN }).bg(bg)),
+                Span::styled(name, Style::new().fg(if active { FG } else { MUTED }).bg(bg)),
+            ];
+            let pad = (inner.width as usize).saturating_sub(used);
+            if let Some((t, c)) = tag {
+                spans.push(Span::styled(" ".repeat(pad.max(1)), Style::new().bg(bg)));
+                spans.push(Span::styled(t, Style::new().fg(c).bg(bg)));
+            } else {
+                spans.push(Span::styled(" ".repeat(pad), Style::new().bg(bg)));
+            }
+            let r = Rect::new(inner.x, ry, inner.width, 1);
+            f.render_widget(Paragraph::new(Line::from(spans)), r);
+            app.layout.toolbar.push((r, Hit::GoTab(i)));
+        }
+        line(f, running_y + 1 + shown_n as u16);
+    }
+
+    // The quick open line at the bottom.
+    let search_y = inner.y + inner.height - 1;
+    let sr = Rect::new(inner.x, search_y, inner.width, 1);
+    let key = "Alt+K";
+    let gap = (inner.width as usize).saturating_sub(" / search".width() + key.width());
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" / search", Style::new().fg(FG)),
+            Span::styled(" ".repeat(gap) + key, Style::new().fg(MUTED)),
+        ])),
+        sr,
+    );
+    app.layout.toolbar.push((sr, Hit::Search));
+
     // Keyboard focus on the header: highlight the chosen item.
     if let (Some(i), true) = (app.header, focused && app.modal.is_none()) {
         if let Some(&(r, _)) = app.layout.toolbar.get(i) {
             f.buffer_mut().set_style(r, Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD));
         }
     }
-    // The line of buttons, and one line of air above it.
-    let bottom_h: u16 = if inner.height >= 6 { 2 } else { 1 };
+    // The search line, and one line of air above it when there is room.
+    let bottom_h: u16 = if inner.height >= 10 { 2 } else { 1 };
 
     // The list. Spaces are packed two-line blocks when there is room; servers stay dense.
-    let list_top = views_y + 2;
+    let list_top = views_y + 1;
     let list_h = (inner.y + inner.height).saturating_sub(list_top + bottom_h);
     let list = Rect::new(inner.x, list_top, inner.width, list_h);
     app.layout.list = list;
@@ -829,7 +902,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.header.is_some() {
         "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
     } else {
-        "↑↓ move · ↑ top: views · ↓ bottom: buttons · 1-9 go to tab · t terminal · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
+        "↑↓ move · ↑ top: views and buttons · / or Alt+K search · Alt+B hide panel · 1-9 go to tab · t terminal · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
             .to_string()
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);
@@ -874,6 +947,51 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
             f.render_widget(
                 Paragraph::new("Enter accept · Esc cancel").style(Style::new().fg(MUTED)),
                 Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1),
+            );
+        }
+        Modal::Search(q) => {
+            let shown = q.hits.len().min(8);
+            let r = centered(64, 4 + shown.max(1) as u16, area);
+            f.render_widget(Clear, r);
+            let block = modal_block("Open");
+            let inner = block.inner(r);
+            f.render_widget(block, r);
+            let field = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1);
+            f.render_widget(Paragraph::new(q.input.value.as_str()).style(Style::new().fg(FG).bg(SEL_BG)), field);
+            cursor = Some(Position::new(field.x + q.input.cursor as u16, field.y));
+            if q.hits.is_empty() {
+                f.render_widget(Paragraph::new("Nothing matches.").style(Style::new().fg(MUTED)), Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1));
+            }
+            // A window of the matches that keeps the selected one in view.
+            let first = q.selected.saturating_sub(shown.saturating_sub(1));
+            for (k, &i) in q.hits.iter().skip(first).take(shown).enumerate() {
+                let item = &q.items[i];
+                let sel = first + k == q.selected;
+                let bg = if sel { SEL_BG } else { Color::Reset };
+                let w = inner.width.saturating_sub(2) as usize;
+                let detail_w = item.detail.width().min(w / 2);
+                let name = fit(&item.label, w.saturating_sub(detail_w + 4));
+                let pad = w.saturating_sub(2 + name.width() + detail_w);
+                let mark = match item.target {
+                    SearchTarget::Space(_) => "▌ ",
+                    SearchTarget::Server(_) => "▤ ",
+                    SearchTarget::Local => "› ",
+                };
+                let row = Rect::new(inner.x + 1, inner.y + 1 + k as u16, w as u16, 1);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(mark, Style::new().fg(ACCENT).bg(bg)),
+                        Span::styled(name, Style::new().fg(FG).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
+                        Span::styled(" ".repeat(pad), Style::new().bg(bg)),
+                        Span::styled(fit(&item.detail, detail_w), Style::new().fg(MUTED).bg(bg)),
+                    ])),
+                    row,
+                );
+                hits.push((row, Hit::Field(first + k)));
+            }
+            f.render_widget(
+                Paragraph::new("↑↓ choose · Enter open · Esc cancel").style(Style::new().fg(MUTED)),
+                Rect::new(inner.x + 1, inner.y + inner.height - 1, inner.width.saturating_sub(2), 1),
             );
         }
         Modal::Confirm(c) => {

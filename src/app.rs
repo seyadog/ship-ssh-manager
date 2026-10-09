@@ -491,6 +491,58 @@ pub struct SecretEdit {
     pub col: usize,
 }
 
+/// What the quick open box can open.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SearchTarget {
+    Server(u64),
+    Space(u64),
+    Local,
+}
+
+pub struct SearchItem {
+    pub label: String,
+    pub detail: String,
+    pub target: SearchTarget,
+}
+
+/// The quick open box: type a few letters of a server or project and Enter opens it.
+pub struct SearchModal {
+    pub input: Input,
+    pub items: Vec<SearchItem>,
+    /// Indices into `items` of what matches the input, best first.
+    pub hits: Vec<usize>,
+    pub selected: usize,
+}
+
+impl SearchModal {
+    fn new(items: Vec<SearchItem>) -> Self {
+        let mut s = SearchModal { input: Input::new(""), items, hits: vec![], selected: 0 };
+        s.refilter();
+        s
+    }
+
+    /// Every word typed must appear in the name or the detail (any case); names that start with the first
+    /// word come first.
+    fn refilter(&mut self) {
+        let q = self.input.value.to_lowercase();
+        let words: Vec<&str> = q.split_whitespace().collect();
+        let mut hits: Vec<usize> = (0..self.items.len())
+            .filter(|&i| {
+                let text = format!("{} {}", self.items[i].label, self.items[i].detail).to_lowercase();
+                words.iter().all(|w| text.contains(w))
+            })
+            .collect();
+        let first = words.first().copied().unwrap_or("");
+        hits.sort_by_key(|&i| (!self.items[i].label.to_lowercase().starts_with(first), self.items[i].label.len()));
+        self.hits = hits;
+        self.selected = 0;
+    }
+
+    fn target(&self) -> Option<SearchTarget> {
+        self.hits.get(self.selected).map(|&i| self.items[i].target)
+    }
+}
+
 pub enum Modal {
     SecretEdit(Box<SecretEdit>),
     Unlock(Box<UnlockModal>),
@@ -500,6 +552,7 @@ pub enum Modal {
     Picker(Box<Picker>, Box<ServerForm>),
     Prompt(Prompt),
     Confirm(Confirm),
+    Search(Box<SearchModal>),
 }
 
 // ---------------------------------------------------------------- layout (lo rellena ui.rs al dibujar)
@@ -507,9 +560,19 @@ pub enum Modal {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hit {
     ViewFolders,
-    AddServer,
-    AddFolder,
+    NewProject,
+    NewServer,
+    NewFolder,
     Edit,
+    Term,
+    Vault,
+    /// Hides the sidebar (and `ShowPanel` brings it back).
+    Hide,
+    ShowPanel,
+    /// The quick open box (`Alt+K`).
+    Search,
+    /// A row of the "running" list: go to that tab (index into `App::tabs`).
+    GoTab(usize),
     ViewSpaces,
     NewTab,
     NewTabRight,
@@ -521,9 +584,21 @@ pub enum Hit {
     No,
 }
 
-/// Sidebar menu items in keyboard order: the three buttons in the line at the bottom (0..3), then the two
-/// views at the top (3..5).
-pub const HEADER: [Hit; 5] = [Hit::AddServer, Hit::AddFolder, Hit::Edit, Hit::ViewSpaces, Hit::ViewFolders];
+/// Sidebar menu items in keyboard order: the seven buttons of the two rows at the top (0..7), then the two
+/// views (7..9). The sidebar pushes its toolbar hits in this same order.
+pub const HEADER: [Hit; 9] = [
+    Hit::NewProject,
+    Hit::NewServer,
+    Hit::NewFolder,
+    Hit::Edit,
+    Hit::Term,
+    Hit::Vault,
+    Hit::Hide,
+    Hit::ViewSpaces,
+    Hit::ViewFolders,
+];
+/// How many of the `HEADER` items are buttons (the rest are the views).
+pub const HEADER_BUTTONS: usize = 7;
 
 /// `Tab::server_id` of the terminal of this computer (real servers start at 1).
 pub const LOCAL: u64 = 0;
@@ -621,6 +696,8 @@ pub struct App {
     /// Row under the pointer while dragging (highlighted as the drop target).
     pub drop_hover: Option<usize>,
     pub view: View,
+    /// The sidebar is folded away (`Alt+B`): the terminals take the whole width.
+    pub panel_hidden: bool,
     /// Keyboard focus on the sidebar header instead of the list: an index into `HEADER`.
     pub header: Option<usize>,
     /// The tab bar, as tab ids: every open tab, in the order it was opened.
@@ -674,6 +751,7 @@ impl App {
             ui_path: PathBuf::new(),
             header: None,
             bar: Vec::new(),
+            panel_hidden: false,
             split_pm: 500,
             shown: [None; 2],
             drag: None,
@@ -1822,6 +1900,8 @@ impl App {
                 return;
             }
             KeyCode::F(2) if n > 0 => return self.rename_tab_prompt(),
+            KeyCode::Char('b') if alt => return self.toggle_panel(),
+            KeyCode::Char('k') if alt => return self.open_search(),
             KeyCode::Char('p') if alt && self.sudo_ready() => {
                 self.modal = self.gate(Pending::FillSudo(self.active));
                 return;
@@ -1877,21 +1957,24 @@ impl App {
     /// The header item (index into `HEADER`) of the current view.
     fn view_index(&self) -> usize {
         match self.view {
-            View::Spaces => 3,
-            View::Folders => 4,
+            View::Spaces => HEADER_BUTTONS,
+            View::Folders => HEADER_BUTTONS + 1,
         }
     }
 
     /// Runs a sidebar header button (by mouse or keyboard).
     fn activate(&mut self, hit: Hit) {
-        let spaces = self.view == View::Spaces;
         match hit {
             Hit::ViewFolders => self.set_view(View::Folders),
             Hit::ViewSpaces => self.set_view(View::Spaces),
-            Hit::AddServer if spaces => self.new_space(),
-            Hit::AddServer => self.new_server_form(),
-            Hit::AddFolder if spaces => self.open_server(LOCAL),
-            Hit::AddFolder => self.new_folder_prompt(),
+            Hit::NewProject => self.new_space(),
+            Hit::NewServer => self.new_server_form(),
+            Hit::NewFolder => self.new_folder_prompt(),
+            Hit::Term => self.open_server(LOCAL),
+            Hit::Vault => self.modal = self.gate(Pending::OpenVault),
+            Hit::Hide | Hit::ShowPanel => self.toggle_panel(),
+            Hit::Search => self.open_search(),
+            Hit::GoTab(i) => self.focus_tab(i),
             Hit::Edit => self.edit_selected(),
             Hit::NewTab => self.new_tab_here(),
             Hit::NewTabRight => {
@@ -1915,15 +1998,16 @@ impl App {
     /// Keys while the menu has focus: the views above the list or the buttons below it. Returns true if the
     /// key was consumed.
     fn header_key(&mut self, i: usize, key: KeyEvent) -> bool {
-        let buttons = i < 3;
-        let (row_start, row_end) = if buttons { (0, 3) } else { (3, 5) };
+        let buttons = i < HEADER_BUTTONS;
+        let (row_start, row_end) = if buttons { (0, HEADER_BUTTONS) } else { (HEADER_BUTTONS, HEADER.len()) };
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => self.move_in_menu(i.saturating_sub(1).max(row_start), buttons),
             KeyCode::Right | KeyCode::Char('l') => self.move_in_menu((i + 1).min(row_end - 1), buttons),
-            // The buttons are below the list and the views above it: the arrow that leads back to the list.
-            KeyCode::Up | KeyCode::Char('k') if buttons => self.header = None,
-            KeyCode::Down | KeyCode::Char('j') if !buttons => self.header = None,
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {}
+            // Top to bottom: the buttons, then the views, then the list.
+            KeyCode::Down | KeyCode::Char('j') if buttons => self.header = Some(self.view_index()),
+            KeyCode::Up | KeyCode::Char('k') if !buttons => self.header = Some(0),
+            KeyCode::Down | KeyCode::Char('j') => self.header = None,
+            KeyCode::Up | KeyCode::Char('k') => {}
             KeyCode::Esc => self.header = None,
             KeyCode::Enter | KeyCode::Char(' ') => {
                 // A button opens a form or prompt; on a view, Enter is just a way to (re)open it.
@@ -1952,7 +2036,6 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
             KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => self.header = Some(self.view_index()),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') if self.selected >= last => self.header = Some(0),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
             KeyCode::End | KeyCode::Char('G') => self.selected = last,
@@ -1983,6 +2066,7 @@ impl App {
                     self.open_server(id);
                 }
             }
+            KeyCode::Char('/') => self.open_search(),
             KeyCode::Char('p') => self.modal = self.gate(Pending::OpenVault),
             KeyCode::Char('a') if self.view == View::Spaces => self.new_space(),
             KeyCode::Char('a') => self.new_server_form(),
@@ -2256,6 +2340,7 @@ impl App {
             Modal::Picker(p, f) => Self::picker_key(p, f, key),
             Modal::Prompt(p) => self.prompt_key(p, key),
             Modal::Confirm(c) => self.confirm_key(c, key),
+            Modal::Search(q) => self.search_key(q, key),
         };
     }
 
@@ -2330,6 +2415,57 @@ impl App {
             _ => {}
         }
         Some(Modal::Picker(p, f))
+    }
+
+    /// Folds the sidebar away or brings it back.
+    fn toggle_panel(&mut self) {
+        self.panel_hidden = !self.panel_hidden;
+        self.header = None;
+        if self.panel_hidden && !self.blank() {
+            self.focus = Focus::Terminal;
+        } else if !self.panel_hidden {
+            self.focus = Focus::Sidebar;
+        }
+    }
+
+    /// Opens the quick open box with every server and project.
+    fn open_search(&mut self) {
+        let mut items = vec![SearchItem { label: "Local terminal".into(), detail: "this computer".into(), target: SearchTarget::Local }];
+        for sp in &self.spaces.spaces {
+            items.push(SearchItem { label: sp.name.clone(), detail: self.tilde(&sp.cwd), target: SearchTarget::Space(sp.id) });
+        }
+        for sv in &self.store.servers {
+            let detail = if sv.user.is_empty() { sv.host.clone() } else { format!("{}@{}", sv.user, sv.host) };
+            items.push(SearchItem { label: sv.name.clone(), detail, target: SearchTarget::Server(sv.id) });
+        }
+        self.modal = Some(Modal::Search(Box::new(SearchModal::new(items))));
+    }
+
+    fn run_search(&mut self, target: SearchTarget) {
+        match target {
+            SearchTarget::Server(id) => self.open_or_focus_server(id),
+            SearchTarget::Space(id) => self.open_space(id),
+            SearchTarget::Local => self.open_server(LOCAL),
+        }
+    }
+
+    fn search_key(&mut self, mut q: Box<SearchModal>, key: KeyEvent) -> Option<Modal> {
+        match key.code {
+            KeyCode::Esc => return None,
+            KeyCode::Up => q.selected = q.selected.saturating_sub(1),
+            KeyCode::Down => q.selected = (q.selected + 1).min(q.hits.len().saturating_sub(1)),
+            KeyCode::Enter => {
+                let target = q.target()?;
+                // Opening may ask for something (a password): whatever it opens is what stays on screen.
+                self.run_search(target);
+                return self.modal.take();
+            }
+            _ => {
+                q.input.handle(key);
+                q.refilter();
+            }
+        }
+        Some(Modal::Search(q))
     }
 
     fn prompt_key(&mut self, mut p: Prompt, key: KeyEvent) -> Option<Modal> {
@@ -2958,6 +3094,19 @@ impl App {
                 },
                 _ => Some(Modal::Confirm(c)),
             },
+            Modal::Search(mut q) if down => match hit {
+                Some(Hit::Field(i)) if i < q.hits.len() => {
+                    q.selected = i;
+                    match q.target() {
+                        Some(t) => {
+                            self.run_search(t);
+                            self.modal.take()
+                        }
+                        None => Some(Modal::Search(q)),
+                    }
+                }
+                _ => Some(Modal::Search(q)),
+            },
             other => Some(other),
         };
     }
@@ -3178,15 +3327,19 @@ mod tests {
     }
 
     #[test]
-    fn up_from_the_first_row_reaches_the_views_and_down_returns() {
+    fn up_from_the_first_row_reaches_the_views_then_the_buttons_and_down_returns() {
         let mut app = app_with_servers(2);
         press(&mut app, KeyCode::Down);
         assert_eq!((app.selected, app.header), (1, None));
         press(&mut app, KeyCode::Up);
         press(&mut app, KeyCode::Up);
-        assert_eq!((app.header, app.view), (Some(4), View::Folders), "the views row (SSH) is the first stop");
+        assert_eq!((app.header, app.view), (Some(HEADER_BUTTONS + 1), View::Folders), "the views row is the first stop");
         press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(4), "nothing above the views");
+        assert_eq!(app.header, Some(0), "above the views are the buttons");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.header, Some(0), "nothing above the buttons");
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.header, Some(HEADER_BUTTONS + 1), "back on the views");
         press(&mut app, KeyCode::Down);
         assert_eq!(app.header, None, "back on the list");
     }
@@ -3195,45 +3348,70 @@ mod tests {
     #[test]
     fn arrows_on_the_views_switch_view_without_enter() {
         let mut app = app_with_servers(1);
+        let (projects, servers) = (HEADER_BUTTONS, HEADER_BUTTONS + 1);
         press(&mut app, KeyCode::Up);
-        assert_eq!((app.header, app.view), (Some(4), View::Folders));
+        assert_eq!((app.header, app.view), (Some(servers), View::Folders));
         press(&mut app, KeyCode::Left);
-        assert_eq!((app.header, app.view), (Some(3), View::Spaces), "Projects is to the left of SSH");
+        assert_eq!((app.header, app.view), (Some(projects), View::Spaces), "Projects is to the left of Servers");
         press(&mut app, KeyCode::Left);
-        assert_eq!((app.header, app.view), (Some(3), View::Spaces), "stops at the first");
+        assert_eq!((app.header, app.view), (Some(projects), View::Spaces), "stops at the first");
         press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Right);
-        assert_eq!((app.header, app.view), (Some(4), View::Folders), "SSH is the last view");
-        press(&mut app, KeyCode::Right);
-        assert_eq!((app.header, app.view), (Some(4), View::Folders));
+        assert_eq!((app.header, app.view), (Some(servers), View::Folders), "Servers is the last view");
         press(&mut app, KeyCode::Left);
         assert_eq!(app.view, View::Spaces, "and back");
     }
 
     #[test]
-    fn down_from_the_last_row_reaches_the_buttons_below_the_list() {
-        let mut app = app_with_servers(2);
-        press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Down);
-        assert_eq!(app.header, Some(0), "the first button: + Server");
-        press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Right);
-        assert_eq!(app.header, Some(2), "Edit is the last button");
-        press(&mut app, KeyCode::Down);
-        assert_eq!(app.header, Some(2), "nothing below the buttons");
+    fn the_buttons_are_a_row_of_stops_above_the_views() {
+        let mut app = app_with_servers(1);
         press(&mut app, KeyCode::Up);
-        assert_eq!((app.header, app.selected), (None, 1), "Up returns to the last row");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.header, Some(0), "the first button: + Project");
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Right);
+        }
+        assert_eq!(app.header, Some(HEADER_BUTTONS - 1), "Hide is the last button");
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.header, Some(HEADER_BUTTONS + 1), "Down goes to the views");
     }
 
     #[test]
     fn enter_on_a_button_acts_and_leaves_the_menu() {
         let mut app = app_with_servers(1);
-        press(&mut app, KeyCode::Down);
-        assert_eq!(app.header, Some(0));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(HEADER[app.header.unwrap()], Hit::NewServer);
         press(&mut app, KeyCode::Enter);
-        assert!(matches!(app.modal, Some(Modal::Form(_))), "+ Server opens the form");
+        assert!(matches!(app.modal, Some(Modal::Form(_))), "+ Serv opens the form");
         assert_eq!(app.header, None);
+    }
+
+    #[test]
+    fn the_panel_can_be_folded_and_brought_back() {
+        let mut app = app_with_servers(1);
+        assert!(!app.panel_hidden);
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert!(app.panel_hidden);
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert!(!app.panel_hidden);
+    }
+
+    #[test]
+    fn quick_open_finds_a_server_by_a_few_letters_and_opens_it() {
+        let mut app = app_with_servers(3);
+        let name = app.store.servers[1].name.clone();
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
+        let Some(Modal::Search(q)) = &app.modal else { panic!("the search box should be open") };
+        assert!(q.hits.len() >= 4, "the local terminal and the three servers");
+        for c in name.chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let Some(Modal::Search(q)) = &app.modal else { panic!("still open while typing") };
+        assert_eq!(q.target(), Some(SearchTarget::Server(app.store.servers[1].id)));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.modal.is_none());
     }
 
     #[test]
