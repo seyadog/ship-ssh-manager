@@ -1086,6 +1086,7 @@ impl App {
             }
         }
         self.reap_exited_projects();
+        self.reap_clean_ssh_exits();
         self.follow_directories();
         self.sync_meta();
         if !self.lost_warned && self.daemon.as_ref().is_some_and(|d| !d.alive()) {
@@ -1586,6 +1587,20 @@ impl App {
     /// The tabs of the bar (indices into `tabs`), one per slot.
     pub fn bar_tabs(&self) -> Vec<usize> {
         self.bar.iter().filter_map(|id| self.tabs.iter().position(|t| t.id == *id)).collect()
+    }
+
+    /// An SSH tab whose session ended cleanly (exit code 0) closes by itself, like a browser tab. One that failed
+    /// stays, showing the error, until it is reconnected (Enter) or closed.
+    fn reap_clean_ssh_exits(&mut self) {
+        if self.daemon.as_ref().is_some_and(|d| !d.alive()) {
+            return;
+        }
+        let done: Vec<usize> = (0..self.tabs.len())
+            .filter(|&i| self.tabs[i].scope == Scope::Ssh && self.tabs[i].session.exit_code == Some(0))
+            .collect();
+        for i in done.into_iter().rev() {
+            self.close_tab(i);
+        }
     }
 
     /// A project whose terminals have all exited (you typed `exit`) disappears from the list. Only the entry
