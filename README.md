@@ -36,6 +36,10 @@ cargo install --git https://github.com/seyadog/ship-ssh-manager --locked
 Data lives in `~/.config/ship/servers.json` (`~/Library/Application Support/ship` on macOS, or `$SHIP_CONFIG_DIR`).
 Passwords never go in that file: they live in the encrypted vault (`vault.json`, next to it).
 
+## Launcher on Linux
+
+`install.sh` also adds an app entry (and the ship icon) so ship opens from the desktop launcher or the dock like any other app. It is still a terminal window with ship inside: `ship-launch` opens it in `kitty`, `foot`, `alacritty`, Ptyxis or GNOME Terminal (the first one found), with its own window class where the terminal allows it, so the desktop groups it as its own app. From the source tree, copy `assets/ship.svg` to `~/.local/share/icons/hicolor/scalable/apps/`, `assets/ship-launch` somewhere in your `PATH`, and `assets/ship.desktop` to `~/.local/share/applications/` after replacing `@LAUNCH@` and `@SHIP@` with the full paths.
+
 ## Windows notes
 
 Windows support is **experimental**: it builds and passes the unit tests in CI, but has had little real-world testing.

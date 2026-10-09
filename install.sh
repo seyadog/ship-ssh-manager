@@ -19,6 +19,17 @@ curl -fsSL "https://github.com/$repo/releases/download/$tag/$pkg.tar.gz" -o "$tm
 tar xzf "$tmp/$pkg.tar.gz" -C "$tmp"
 mkdir -p "$dir"
 install -m 755 "$tmp/$pkg/ship" "$dir/ship"
+if [ "$(uname -s)" = Linux ]; then
+  # Launcher entry and icon, so ship shows up like any other app (best effort).
+  raw="https://raw.githubusercontent.com/$repo/$tag/assets"
+  apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+  mkdir -p "$apps" "$icons"
+  curl -fsSL "$raw/ship.svg" -o "$icons/ship.svg" &&
+    curl -fsSL "$raw/ship-launch" -o "$dir/ship-launch" && chmod 755 "$dir/ship-launch" &&
+    curl -fsSL "$raw/ship.desktop" | sed "s|@LAUNCH@|$dir/ship-launch|; s|@SHIP@|$dir/ship|" > "$apps/ship.desktop" ||
+    echo "Could not install the launcher entry (the app works without it)" >&2
+fi
 [ "$(uname -s)" = Darwin ] && xattr -d com.apple.quarantine "$dir/ship" 2>/dev/null || true
 echo "Installed ship $tag to $dir/ship"
 case ":$PATH:" in *":$dir:"*) ;; *) echo "Add $dir to your PATH" ;; esac
