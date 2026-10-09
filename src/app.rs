@@ -900,7 +900,7 @@ impl App {
         }
     }
 
-    /// What a tab is called in the tab bar, which shows every tab of every part of ship: a terminal of an
+    /// What a tab is called in the tab bar, which shows every tab of every part of oso: a terminal of an
     /// agent's project carries the project's name.
     pub fn tab_label(&self, t: &Tab) -> String {
         match t.scope {
@@ -1143,7 +1143,7 @@ impl App {
             self.quit = true;
         } else {
             self.modal = Some(Modal::Confirm(Confirm {
-                text: format!("{n} session(s) still open. Quit ship?"),
+                text: format!("{n} session(s) still open. Quit oso?"),
                 action: ConfirmAction::Quit,
             }));
         }
@@ -1566,7 +1566,7 @@ impl App {
         self.fix_active();
         let scope_left = self.tabs.iter().any(|t| t.scope == closed_scope);
         if was_active && closed_scope == self.scope && !scope_left {
-            // The last terminal of this part of ship: stay here and show the welcome screen.
+            // The last terminal of this part of oso: stay here and show the welcome screen.
             self.emptied.insert(closed_scope);
             self.focus = Focus::Sidebar;
         } else if was_active && !self.tabs.is_empty() {

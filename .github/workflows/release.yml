@@ -25,14 +25,14 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          pkg="ship-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          pkg="oso-${GITHUB_REF_NAME}-${{ matrix.name }}"
           mkdir "$pkg"
           if [ "${{ matrix.name }}" = windows-x86_64 ]; then
-            cp "target/${{ matrix.target }}/release/ship.exe" LICENSE README.md "$pkg/"
+            cp "target/${{ matrix.target }}/release/oso.exe" LICENSE README.md "$pkg/"
             7z a -tzip "$pkg.zip" "$pkg" >/dev/null
             ext=zip
           else
-            cp "target/${{ matrix.target }}/release/ship" LICENSE README.md "$pkg/"
+            cp "target/${{ matrix.target }}/release/oso" LICENSE README.md "$pkg/"
             tar czf "$pkg.tar.gz" "$pkg"
             ext=tar.gz
           fi

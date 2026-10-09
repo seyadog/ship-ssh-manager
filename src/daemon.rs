@@ -1,6 +1,6 @@
 //! The background server: it owns the PTYs, so sessions survive closing the interface.
 //!
-//! `ship daemon` listens on a private Unix socket. The interface connects, spawns sessions in it and
+//! `oso daemon` listens on a private Unix socket. The interface connects, spawns sessions in it and
 //! attaches to them: on attach it gets a snapshot of the screen, then the live output. Closing the
 //! interface only disconnects; the next one finds every session where it was left.
 //!
@@ -130,10 +130,10 @@ fn write_line<T: Serialize>(w: &mut impl Write, msg: &T) -> std::io::Result<()> 
 
 // ---------------------------------------------------------------- paths
 
-/// Where the server listens: inside the config dir if `SHIP_CONFIG_DIR` is set (separate profiles and
+/// Where the server listens: inside the config dir if `OSO_CONFIG_DIR` is set (separate profiles and
 /// tests do not share a server), otherwise in the user's private runtime directory.
 pub fn socket_path() -> PathBuf {
-    if let Some(d) = std::env::var_os("SHIP_CONFIG_DIR") {
+    if let Some(d) = std::env::var_os("OSO_CONFIG_DIR").or_else(|| std::env::var_os("SHIP_CONFIG_DIR")) {
         return PathBuf::from(d).join("daemon.sock");
     }
     let base = std::env::var_os("XDG_RUNTIME_DIR")
@@ -142,7 +142,10 @@ pub fn socket_path() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
-    base.join(format!("ship-{uid}")).join("daemon.sock")
+    let path = base.join(format!("oso-{uid}")).join("daemon.sock");
+    // A server started by the program under its old name (ship) keeps its sessions reachable.
+    let old = base.join(format!("ship-{uid}")).join("daemon.sock");
+    if !path.exists() && old.exists() { old } else { path }
 }
 
 fn prepare_dir(path: &Path) -> Result<()> {
@@ -781,7 +784,7 @@ pub fn connect_or_start() -> std::result::Result<Daemon, ConnectError> {
     }
 }
 
-/// Launches `ship daemon` detached from this terminal, so it outlives it.
+/// Launches `oso daemon` detached from this terminal, so it outlives it.
 fn start_server() -> Result<()> {
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
@@ -797,7 +800,7 @@ fn start_server() -> Result<()> {
     Ok(())
 }
 
-/// `ship kill-server`: stops the server and every session in it.
+/// `oso kill-server`: stops the server and every session in it.
 pub fn kill_server() -> Result<String> {
     match Daemon::connect_at(&socket_path()) {
         Ok(d) => {
@@ -817,7 +820,7 @@ mod tests {
     use crate::session::Session;
 
     fn start(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ship-daemon-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("oso-daemon-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("d.sock");
         let p = path.clone();

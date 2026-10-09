@@ -1,23 +1,23 @@
-# ship architecture
+# oso architecture
 
 A Rust TUI (ratatui + crossterm) for managing SSH connections. Mouse support; runs on Linux, macOS and Windows.
 
 ## Core idea
 
-Each tab runs the system `ssh` inside a PTY (`portable-pty`). Its output goes through a terminal emulator (`vt100`) and is drawn into a ratatui widget. `ship` therefore inherits for free:
+Each tab runs the system `ssh` inside a PTY (`portable-pty`). Its output goes through a terminal emulator (`vt100`) and is drawn into a ratatui widget. `oso` therefore inherits for free:
 
 - the SSH agent, keys, `~/.ssh/config`, ProxyJump
 - `known_hosts`: ssh asks about new or changed host keys **inside the tab** and records them itself
 - the real client error messages (unreachable host, permission denied, ...)
 
-`ship` adds the server tree, tabs, forms, jump-host routing and a clear summary when a session ends.
+`oso` adds the server tree, tabs, forms, jump-host routing and a clear summary when a session ends.
 
 ## Modules
 
 | Module | Responsibility |
 |---|---|
 | `main.rs` | Terminal setup (raw mode, mouse, paste), event loop |
-| `store.rs` | Model (folders, servers, jump chains) and JSON persistence in `~/.config/ship/servers.json` |
+| `store.rs` | Model (folders, servers, jump chains) and JSON persistence in `~/.config/oso/servers.json` |
 | `session.rs` | `PtySession`: a PTY + emulator (spawn, resize, input, scrollback, exit, per-prompt secret autofill, agent probe). `Session`: what the interface uses; it owns a `PtySession` or talks to one in the server |
 | `vault.rs` | Encrypted password vault (Argon2id + XChaCha20-Poly1305), master-password lock |
 | `spaces.rs` | Spaces (a name and the directory their terminal was left in, saved in `spaces.json`) and the git branch of a directory |
@@ -47,13 +47,13 @@ Every tab has a `Scope`: the SSH section, or one space. The tab bar shows every 
 
 ## The background server
 
-The PTYs and their `vt100` screens live in `ship daemon`, a process started on demand (`setsid`, detached from the terminal). The interface talks to it over a Unix socket with one JSON object per line (terminal bytes in base64).
+The PTYs and their `vt100` screens live in `oso daemon`, a process started on demand (`setsid`, detached from the terminal). The interface talks to it over a Unix socket with one JSON object per line (terminal bytes in base64).
 
 - Each session also keeps its last few MiB of raw output. `Attach` replays it into the client's emulator before the snapshot, which is what rebuilds the scroll-back; the snapshot (which starts by clearing the screen) then sets the exact screen and modes.
 - `Spawn` creates a session (with the client's environment, working directory and the secrets to autofill); `Attach` returns a **snapshot** of the screen (`state_formatted`) and then streams `Output`. Snapshot and subscription happen while the screen is locked, so no output is lost or repeated.
 - The server watches its sessions twice a second: exit codes, sudo prompts, and the agent in the foreground (and whether it is working or just finished). If an agent finishes with no interface attached, it plays the sound itself and remembers it for the next attach.
 - Each tab sends a small description of itself (`SetMeta`: title, space, order) whenever it changes; that is how the next interface rebuilds the tabs in the right scope.
-- A client that cannot keep up is disconnected rather than allowed to miss output, and reconnects to a fresh snapshot. The server exits after a few idle seconds with no sessions and no clients, or on `Shutdown` (`ship kill-server`).
+- A client that cannot keep up is disconnected rather than allowed to miss output, and reconnects to a fresh snapshot. The server exits after a few idle seconds with no sessions and no clients, or on `Shutdown` (`oso kill-server`).
 - Closing a tab sends `Kill`; just dropping the connection only detaches. On platforms without Unix sockets, `daemon_stub.rs` makes the interface keep sessions in its own process.
 
 ## Security
@@ -66,5 +66,5 @@ The PTYs and their `vt100` screens live in `ship daemon`, a process started on d
 ## Phases
 
 1. **MVP:** tree, form, tabs, resize, clear errors, drag & drop, jump hosts.
-2. **CLI and search:** `ship <alias>`, `ship list`, `ship add`, `~/.ssh/config` import, Ctrl+K, auto-reconnect.
+2. **CLI and search:** `oso <alias>`, `oso list`, `oso add`, `~/.ssh/config` import, Ctrl+K, auto-reconnect.
 3. **Extras:** SFTP, saved tunnels, snippets, themes.

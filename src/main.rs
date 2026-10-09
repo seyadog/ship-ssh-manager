@@ -34,7 +34,7 @@ fn main() -> Result<()> {
             let mut store = store::Store::load()?;
             let (folders, servers, skipped) = tabby::import(&mut store, &path)?;
             println!("Imported {servers} servers and {folders} folders ({skipped} already present).");
-            println!("Passwords are not imported (Tabby keeps them in its own vault): set them in ship's vault.");
+            println!("Passwords are not imported (Tabby keeps them in its own vault): set them in oso's vault.");
             return Ok(());
         }
         Some("daemon") => return daemon::run_server(),
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     ratatui::restore();
     if app.left_running > 0 {
         println!(
-            "ship: {} session(s) keep running in the background. Run `ship` to come back, `ship kill-server` to stop them.",
+            "oso: {} session(s) keep running in the background. Run `oso` to come back, `oso kill-server` to stop them.",
             app.left_running
         );
     }
@@ -79,7 +79,7 @@ fn main() -> Result<()> {
 
 /// Sessions live in a background server so they survive closing this window; reconnect to the sessions it holds.
 fn connect_background_server(app: &mut app::App) {
-    if std::env::var_os("SHIP_NO_DAEMON").is_some() {
+    if std::env::var_os("OSO_NO_DAEMON").or_else(|| std::env::var_os("SHIP_NO_DAEMON")).is_some() {
         return;
     }
     match daemon::connect_or_start() {
@@ -91,14 +91,14 @@ fn connect_background_server(app: &mut app::App) {
             app.restore_sessions(rows.saturating_sub(2).max(1), cols.saturating_sub(side).max(1));
             if server_version != env!("CARGO_PKG_VERSION") {
                 app.set_flash(format!(
-                    "The background server is v{server_version} (this is v{}): `ship kill-server` restarts it on the new version, ending its sessions",
+                    "The background server is v{server_version} (this is v{}): `oso kill-server` restarts it on the new version, ending its sessions",
                     env!("CARGO_PKG_VERSION")
                 ));
             }
         }
         Err(daemon::ConnectError::None) => {}
         Err(daemon::ConnectError::Incompatible(v)) => app.set_flash(format!(
-            "A background ship v{v} is running and cannot be used: run `ship kill-server` (ends its sessions). Sessions will not persist."
+            "A background oso v{v} is running and cannot be used: run `oso kill-server` (ends its sessions). Sessions will not persist."
         )),
         Err(daemon::ConnectError::Other(e)) => {
             app.set_flash(format!("No background server ({e:#}): sessions will end with this window"))

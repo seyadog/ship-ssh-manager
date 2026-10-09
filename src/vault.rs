@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Authenticated but not encrypted: binds the ciphertext to this file format.
+// Part of the encryption: it keeps the old name (the program was called ship) so that existing vaults still open.
 const AAD: &[u8] = b"ship-vault-v1";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

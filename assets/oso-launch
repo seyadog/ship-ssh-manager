@@ -1,0 +1,10 @@
+#!/bin/sh
+# Opens oso in its own terminal window (own window class, so the desktop shows it as an app of its own).
+oso="${1:-oso}"
+if command -v kitty >/dev/null 2>&1; then exec kitty --class oso --title oso "$oso"
+elif command -v foot >/dev/null 2>&1; then exec foot --app-id oso --title oso "$oso"
+elif command -v alacritty >/dev/null 2>&1; then exec alacritty --class oso --title oso -e "$oso"
+elif command -v ptyxis >/dev/null 2>&1; then exec ptyxis --new-window --title oso -x "$oso"
+elif command -v gnome-terminal >/dev/null 2>&1; then exec gnome-terminal --title oso -- "$oso"
+else exec x-terminal-emulator -e "$oso"
+fi

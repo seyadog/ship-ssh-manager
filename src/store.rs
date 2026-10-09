@@ -93,14 +93,23 @@ pub struct Store {
 }
 
 impl Store {
-    /// Config directory: `$SHIP_CONFIG_DIR` or the system default.
+    /// Config directory: `$OSO_CONFIG_DIR` (or the old `$SHIP_CONFIG_DIR`) or the system default.
+    /// The program used to be called ship: its directory is renamed the first time.
     pub fn config_dir() -> PathBuf {
-        if let Some(d) = std::env::var_os("SHIP_CONFIG_DIR") {
+        if let Some(d) = std::env::var_os("OSO_CONFIG_DIR").or_else(|| std::env::var_os("SHIP_CONFIG_DIR")) {
             return PathBuf::from(d);
         }
-        directories::ProjectDirs::from("", "", "ship")
-            .map(|d| d.config_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(".ship"))
+        let dir = |name: &str| directories::ProjectDirs::from("", "", name).map(|d| d.config_dir().to_path_buf());
+        match (dir("oso"), dir("ship")) {
+            (Some(new), Some(old)) => {
+                if !new.exists() && old.is_dir() {
+                    let _ = std::fs::rename(&old, &new);
+                }
+                if new.exists() { new } else { old }
+            }
+            (Some(new), None) => new,
+            _ => PathBuf::from(".oso"),
+        }
     }
 
     pub fn load() -> Result<Self> {

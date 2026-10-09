@@ -1,15 +1,15 @@
 [package]
-name = "ship-ssh-manager"
-version = "0.9.9"
+name = "oso"
+version = "0.10.0"
 edition = "2024"
 description = "A terminal SSH connection manager: folders, jump hosts, tabs, mouse support and an encrypted password vault"
 license = "MIT"
-repository = "https://github.com/seyadog/ship-ssh-manager"
+repository = "https://github.com/seyadog/oso"
 keywords = ["ssh", "tui", "terminal", "connection-manager"]
 categories = ["command-line-utilities"]
 
 [[bin]]
-name = "ship"
+name = "oso"
 path = "src/main.rs"
 
 [dependencies]

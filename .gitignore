@@ -50,3 +50,4 @@ CLAUDE.md
 # Personal notes: local only, never commit
 *.local.md
 NOTES.local.md
+.oso/

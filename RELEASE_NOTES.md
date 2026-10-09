@@ -1,4 +1,4 @@
-**Install:** see the [README](https://github.com/seyadog/ship-ssh-manager#install). Linux and macOS: `install.sh`. Windows: `install.ps1`, or unzip `ship-*-windows-x86_64.zip` and run `ship.exe` from Windows Terminal.
+**Install:** see the [README](https://github.com/seyadog/oso#install). Linux and macOS: `install.sh`. Windows: `install.ps1`, or unzip `oso-*-windows-x86_64.zip` and run `oso.exe` from Windows Terminal.
 
 > **Windows 11 support is experimental.** It builds and passes the unit tests in CI, but it has had far less real-world testing than Linux and macOS. Known limitations:
 >
@@ -11,6 +11,6 @@
 > - There is no background server on Windows yet: sessions end when the window closes.
 > - Windows on ARM runs the x86_64 build through emulation; there is no native ARM build yet.
 >
-> Please report problems at https://github.com/seyadog/ship-ssh-manager/issues.
+> Please report problems at https://github.com/seyadog/oso/issues.
 
 macOS binaries are not notarized (see the README for how to open them).

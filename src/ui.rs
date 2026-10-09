@@ -20,7 +20,7 @@ const GREEN: Color = Color::Rgb(158, 206, 106);
 const AMBER: Color = Color::Rgb(224, 175, 104);
 const REMOTE_GREEN: Color = Color::Rgb(187, 154, 247);
 const REMOTE_GREEN_BRIGHT: Color = Color::Rgb(208, 184, 255);
-/// One colour per project, taken from ship's own palette and as far apart from each other as possible.
+/// One colour per project, taken from oso's own palette and as far apart from each other as possible.
 const PASTELS: [(u8, u8, u8); 8] = [
     (122, 162, 247), // blue
     (247, 118, 142), // red
@@ -125,7 +125,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let block_frame = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(if focused { ACCENT } else { MUTED }))
-        .title(Span::styled(" ship ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(" oso ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)));
     let inner = block_frame.inner(area);
     f.render_widget(block_frame, area);
     if inner.height < 2 {
@@ -710,12 +710,54 @@ fn map_color(c: vt100::Color) -> Color {
     }
 }
 
+/// The bear, as a grid of pixels: `#` fur, `i` inside of the ears, `e` eyes, `s` snout, `n` nose.
+/// Two pixel rows make one terminal row (half blocks), so it is 22 columns by 7 lines.
+const BEAR: [&str; 14] = [
+    "    ####      ####    ",
+    "   ######    ######   ",
+    "   ##ii########ii##   ",
+    "  ##################  ",
+    "  ##################  ",
+    "  ####ee######ee####  ",
+    "  ####ee######ee####  ",
+    "  ##################  ",
+    "  ######ssssss######  ",
+    "  #####ssssssss#####  ",
+    "  #####ssnnnnss#####  ",
+    "   ####ssssssss####   ",
+    "    ##############    ",
+    "      ##########      ",
+];
+
+fn bear_lines() -> Vec<Line<'static>> {
+    let color = |c: char| match c {
+        '#' => Some(ACCENT),
+        'i' => Some(Color::Rgb(176, 196, 255)),
+        'e' => Some(Color::Rgb(26, 27, 38)),
+        's' => Some(Color::Rgb(214, 224, 255)),
+        'n' => Some(Color::Rgb(26, 27, 38)),
+        _ => None,
+    };
+    let at = |row: usize, col: usize| BEAR.get(row).and_then(|r| r.chars().nth(col)).and_then(color);
+    (0..BEAR.len() / 2)
+        .map(|line| {
+            let spans: Vec<Span<'static>> = (0..22)
+                .map(|col| match (at(line * 2, col), at(line * 2 + 1, col)) {
+                    (None, None) => Span::raw(" "),
+                    (Some(t), None) => Span::styled("▀", Style::new().fg(t)),
+                    (None, Some(b)) => Span::styled("▄", Style::new().fg(b)),
+                    (Some(t), Some(b)) => Span::styled("▀", Style::new().fg(t).bg(b)),
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
+}
+
 fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
-    let logo = ["┏━┓╻ ╻╻┏━┓", "┗━┓┣━┫┃┣━┛", "┗━┛╹ ╹╹╹  "];
-    let mut lines: Vec<Line> = logo
-        .iter()
-        .map(|l| Line::from(Span::styled(*l, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))))
-        .collect();
+    let logo = ["┏━┓┏━┓┏━┓", "┃ ┃┗━┓┃ ┃", "┗━┛┗━┛┗━┛"];
+    let mut lines: Vec<Line> = bear_lines();
+    lines.extend(logo.iter().map(|l| Line::from(Span::styled(*l, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)))));
     lines.push(Line::raw(""));
     let hints: Vec<String> = match app.scope {
         Scope::Ssh => vec![
