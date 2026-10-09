@@ -20,10 +20,24 @@ const GREEN: Color = Color::Rgb(158, 206, 106);
 const AMBER: Color = Color::Rgb(224, 175, 104);
 const REMOTE_GREEN: Color = Color::Rgb(187, 154, 247);
 const REMOTE_GREEN_BRIGHT: Color = Color::Rgb(208, 184, 255);
-/// A project's mark: the accent while something runs in it, grey while idle. The only colours of the
-/// interface are the blue accent, greys, and green / amber / red for states.
-fn space_color(live: bool) -> Color {
-    if live { ACCENT } else { MUTED }
+/// One colour per project, taken from oso's own palette and as far apart from each other as possible.
+const PASTELS: [(u8, u8, u8); 8] = [
+    (122, 162, 247), // blue
+    (247, 118, 142), // red
+    (158, 206, 106), // green
+    (224, 175, 104), // amber
+    (187, 154, 247), // lilac
+    (125, 207, 255), // cyan
+    (255, 150, 100), // orange
+    (115, 218, 180), // teal
+];
+
+fn space_color(id: u64, live: bool) -> Color {
+    let (r, g, b) = PASTELS[(id as usize) % PASTELS.len()];
+    // Idle spaces keep their hue but wash out towards grey (fading to black would turn yellows brown).
+    let k = if live { 1.0 } else { 0.55 };
+    let fade = |c: u8, grey: f32| (c as f32 * k + grey * (1.0 - k)) as u8;
+    Color::Rgb(fade(r, 80.0), fade(g, 82.0), fade(b, 100.0))
 }
 
 const RED: Color = Color::Rgb(247, 118, 142);
@@ -350,9 +364,9 @@ fn draw_rows(
             let attention = app.tabs.iter().filter(mine).any(|t| t.attention);
             // One line: a coloured spine for the state, the name, and the branch (or directory) on the right.
             // The name turns green when the agent has finished; the spine keeps the space's own colour.
-            let color = space_color(live);
+            let color = space_color(id, live);
             let (mut text, tone) = match app.branches.get(&id) {
-                Some(b) => (b.clone(), MUTED),
+                Some(b) => (b.clone(), REMOTE_GREEN),
                 None => (cwd, MUTED),
             };
             // A filed project that is on top says which folder it belongs to.
@@ -410,7 +424,7 @@ fn draw_rows(
                 Span::styled("▆", Style::new().fg(color).bg(bg)),
                 Span::styled(
                     format!(" {}", fit(&name, width.saturating_sub(3))),
-                    style.fg(if attention { GREEN } else { FG }).add_modifier(Modifier::BOLD),
+                    style.fg(if attention { GREEN } else { color }).add_modifier(Modifier::BOLD),
                 ),
             ];
             // The rest of the line, right-aligned: the agent (if any) first, then the branch if it still fits.
@@ -461,8 +475,8 @@ fn draw_rows(
                 };
                 let count = format!(" ({}){}", inside.len(), mark);
                 let label = fit(name, width.saturating_sub(indent.width() + 2 + count.width()));
-                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(MUTED)));
-                spans.push(Span::styled(label, Style::new().fg(FG).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(AMBER)));
+                spans.push(Span::styled(label, Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
                 spans.push(Span::styled(format!(" ({})", inside.len()), Style::new().fg(MUTED)));
                 if !mark.is_empty() {
                     spans.push(Span::styled(mark, Style::new().fg(mc).add_modifier(Modifier::BOLD)));
@@ -480,8 +494,8 @@ fn draw_rows(
                 let open = fo.is_some_and(|f| f.expanded);
                 let name = fo.map(|f| f.name.as_str()).unwrap_or("?");
                 let label = fit(name, width.saturating_sub(indent.width() + 3));
-                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(MUTED)));
-                spans.push(Span::styled(label, Style::new().fg(FG).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(AMBER)));
+                spans.push(Span::styled(label, Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
             }
             NodeId::Server(id) => {
                 let s = app.store.server(id);
@@ -490,7 +504,7 @@ fn draw_rows(
                 let label = fit(name, width.saturating_sub(indent.width() + 3));
                 if app.has_children(row) {
                     let arrow = if app.is_open(row) { "▾ " } else { "▸ " };
-                    spans.push(Span::styled(arrow, Style::new().fg(MUTED)));
+                    spans.push(Span::styled(arrow, Style::new().fg(ACCENT)));
                 } else {
                     spans.push(Span::styled(
                         if live { "◆ " } else { "◇ " },
