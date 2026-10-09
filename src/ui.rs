@@ -277,23 +277,51 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
                     text = format!("▸ {}  {}", fo.name, text);
                 }
             }
-            // The AI agent running in this project, if any: its name, coloured by what it is doing.
-            let agent = app
+            // The AI agents running in this project (one per tab), each named and coloured by what it is doing.
+            let mut agents: Vec<(bool, bool, String)> = app
                 .tabs
                 .iter()
                 .filter(mine)
                 .filter_map(|t| t.session.agent().map(|a| (t.attention, a.working, a.name.clone())))
-                .max_by_key(|&(att, working, _)| (att, working));
+                .collect();
+            agents.sort_by_key(|&(att, working, _)| std::cmp::Reverse((att, working)));
             let name_w = name.width().min(width.saturating_sub(3));
-            let tag = agent.map(|(att, working, aname)| {
-                if att {
-                    (format!("{aname} ✓"), GREEN)
-                } else if working {
-                    (format!("{aname} …"), AMBER)
-                } else {
-                    (aname, MUTED)
+            let tags: Vec<(String, Color)> = agents
+                .into_iter()
+                .map(|(att, working, aname)| {
+                    if att {
+                        (format!("{aname} ✓"), GREEN)
+                    } else if working {
+                        (format!("{aname} …"), AMBER)
+                    } else {
+                        (aname, MUTED)
+                    }
+                })
+                .collect();
+            // The tags that fit in `room` columns, separated by a space; the later ones are dropped first.
+            let fit_tags = |room: usize| -> Vec<(String, Color)> {
+                let (mut used, mut out) = (0, vec![]);
+                for (t, c) in &tags {
+                    let w = t.width() + usize::from(!out.is_empty());
+                    if used + w > room {
+                        break;
+                    }
+                    used += w;
+                    out.push((t.clone(), *c));
                 }
-            });
+                out
+            };
+            let tags_width = |v: &[(String, Color)]| v.iter().map(|(t, _)| t.width()).sum::<usize>() + v.len().saturating_sub(1);
+            let tag_spans = |v: Vec<(String, Color)>| -> Vec<Span<'static>> {
+                let mut out = vec![];
+                for (i, (t, c)) in v.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(Span::styled(" ", Style::new().bg(bg)));
+                    }
+                    out.push(Span::styled(t, Style::new().fg(c).bg(bg).add_modifier(Modifier::BOLD)));
+                }
+                out
+            };
             if row_h >= 2 {
                 // Two lines under a square bar: the name (and the agent on the right), then the branch.
                 let bar = || Span::styled("██", Style::new().fg(color).bg(bg));
@@ -304,12 +332,11 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
                         style.fg(if attention { GREEN } else { FG }).add_modifier(Modifier::BOLD),
                     ),
                 ];
-                if let Some((t, tc)) = tag {
-                    let room = width.saturating_sub(3 + name_w + 2);
-                    if t.width() <= room {
-                        first.push(Span::styled(" ".repeat(room - t.width() + 1), Style::new().bg(bg)));
-                        first.push(Span::styled(t, Style::new().fg(tc).bg(bg).add_modifier(Modifier::BOLD)));
-                    }
+                let shown = fit_tags(width.saturating_sub(3 + name_w + 2));
+                if !shown.is_empty() {
+                    let w = tags_width(&shown);
+                    first.push(Span::styled(" ".repeat(width.saturating_sub(3 + name_w + w)), Style::new().bg(bg)));
+                    first.extend(tag_spans(shown));
                 }
                 let second = vec![bar(), Span::styled(format!(" {}", fit(&text, width.saturating_sub(4))), Style::new().fg(tone).bg(bg))];
                 f.render_widget(
@@ -328,11 +355,10 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
             // The rest of the line, right-aligned: the agent (if any) first, then the branch if it still fits.
             let mut room = width.saturating_sub(2 + name_w + 3);
             let mut right: Vec<Span<'static>> = vec![];
-            if let Some((t, tc)) = tag {
-                if t.width() <= room {
-                    room -= t.width() + 2;
-                    right.push(Span::styled(t, Style::new().fg(tc).bg(bg).add_modifier(Modifier::BOLD)));
-                }
+            let shown = fit_tags(room);
+            if !shown.is_empty() {
+                room -= tags_width(&shown) + 2;
+                right.extend(tag_spans(shown));
             }
             if room >= 6 && !text.is_empty() {
                 let shown = fit(&text, room);
