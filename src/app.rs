@@ -609,6 +609,15 @@ pub struct App {
     pub view: View,
     /// Keyboard focus on the sidebar header instead of the list: an index into `HEADER`.
     pub header: Option<usize>,
+    /// Keyboard focus on an entry of the “running” panel (an index into `layout.agents`).
+    pub agent_sel: Option<usize>,
+    /// The slots of the tab bar, as tab ids. A slot is a window onto one session: clicking a project in the sidebar
+    /// changes what the current slot shows, and only `+` / Ctrl+N add a slot.
+    bar: Vec<u64>,
+    /// The tab that was active at the last `sync_bar`.
+    last_active: Option<u64>,
+    /// The next new tab gets a slot of its own instead of taking over the current one.
+    pin_next: bool,
     /// Servers whose hidden hosts are unfolded in the jump view.
     /// Bastions the user folded in the jump view (everything is unfolded by default).
     pub jump_open: HashSet<u64>,
@@ -652,6 +661,10 @@ impl App {
             jump_open: HashSet::new(),
             ui_path: PathBuf::new(),
             header: None,
+            agent_sel: None,
+            bar: Vec::new(),
+            last_active: None,
+            pin_next: false,
             drag: None,
             last_click: None,
         };
@@ -1023,6 +1036,7 @@ impl App {
 
     /// Called on every pass of the event loop.
     pub fn tick(&mut self) {
+        self.sync_bar();
         let mut finished = false;
         for t in &mut self.tabs {
             t.session.poll_exit();
@@ -1095,6 +1109,16 @@ impl App {
 
     pub fn open_server(&mut self, id: u64) {
         self.modal = self.gate(Pending::Open(id));
+    }
+
+    /// Enter / double click on a server: go to its tab if it already has a live one; a new tab only when there is
+    /// none (more of them are opened on purpose, with `n`).
+    fn open_or_focus_server(&mut self, id: u64) {
+        let live = self.tabs.iter().position(|t| t.server_id == id && t.scope == Scope::Ssh && t.session.exit_code.is_none());
+        match live {
+            Some(i) => self.focus_tab(i),
+            None => self.open_server(id),
+        }
     }
 
     fn reconnect(&mut self, idx: usize) {
@@ -1475,7 +1499,14 @@ impl App {
             return;
         }
         // The tab to land on: its neighbour in the bar.
-        let neighbour = if idx > 0 { Some(idx - 1) } else if self.tabs.len() > 1 { Some(1) } else { None };
+        let bar = self.bar_tabs();
+        let neighbour = match bar.iter().position(|&i| i == idx) {
+            Some(p) if p > 0 => Some(bar[p - 1]),
+            Some(p) if p + 1 < bar.len() => Some(bar[p + 1]),
+            _ if idx > 0 => Some(idx - 1),
+            _ if self.tabs.len() > 1 => Some(1),
+            _ => None,
+        };
         let was_active = idx == self.active;
         self.tabs.remove(idx).session.kill();
         if self.active > idx {
@@ -1515,9 +1546,64 @@ impl App {
     }
 
     /// Switches to tab `i` (0-based) and puts the keyboard on its terminal.
+    /// The tabs of the bar (indices into `tabs`), one per slot.
+    pub fn bar_tabs(&self) -> Vec<usize> {
+        self.bar.iter().filter_map(|id| self.tabs.iter().position(|t| t.id == *id)).collect()
+    }
+
+    /// Keeps the slots in step with what happened: closed tabs lose their slot, and going to a session that has
+    /// no slot (from the sidebar) makes the slot you were on show it, unless a new slot was asked for.
+    fn sync_bar(&mut self) {
+        let tabs = &self.tabs;
+        self.bar.retain(|id| tabs.iter().any(|t| t.id == *id));
+        let Some(cur) = self.tabs.get(self.active).map(|t| t.id) else {
+            self.last_active = None;
+            return;
+        };
+        if !self.bar.contains(&cur) {
+            let at = self.last_active.and_then(|p| self.bar.iter().position(|&b| b == p));
+            match at {
+                Some(p) if !self.pin_next => self.bar[p] = cur,
+                _ => self.bar.push(cur),
+            }
+            self.pin_next = false;
+        }
+        self.last_active = Some(cur);
+    }
+
+    /// Alt+←/→: the previous or next tab of the bar.
+    fn step_tab(&mut self, d: isize) {
+        let tabs = self.bar_tabs();
+        if tabs.is_empty() {
+            return;
+        }
+        let at = tabs.iter().position(|&i| i == self.active).unwrap_or(0) as isize;
+        let to = (at + d).rem_euclid(tabs.len() as isize) as usize;
+        self.select_tab(tabs[to]);
+    }
+
+    /// Ctrl+N and the + button: another tab beside the one you are on, both kept in the bar (same server, or a terminal in the same project).
+    fn new_tab_here(&mut self) {
+        self.pin_next = true;
+        let server = self
+            .tabs
+            .get(self.active)
+            .filter(|t| t.scope == self.scope && self.scope == Scope::Ssh)
+            .map(|t| t.server_id)
+            .or(self.selected_server_id());
+        self.open_server(server.unwrap_or(LOCAL));
+    }
+
+    fn selected_server_id(&self) -> Option<u64> {
+        match self.selected_node() {
+            Some(NodeId::Server(id)) if self.scope == Scope::Ssh => Some(id),
+            _ => None,
+        }
+    }
+
     fn goto_tab(&mut self, i: usize) {
-        if i < self.tabs.len() {
-            self.focus_tab(i);
+        if let Some(&t) = self.bar_tabs().get(i) {
+            self.focus_tab(t);
         } else {
             self.set_flash(format!("No tab {}", i + 1));
         }
@@ -1547,6 +1633,7 @@ impl App {
     pub fn on_key(&mut self, key: KeyEvent) {
         self.on_key_inner(key);
         self.sync_scope();
+        self.sync_bar();
     }
 
     fn on_key_inner(&mut self, key: KeyEvent) {
@@ -1557,6 +1644,7 @@ impl App {
             return;
         }
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let n = self.tabs.len();
         let pos = self.active.min(n.saturating_sub(1));
@@ -1572,8 +1660,9 @@ impl App {
             }
             KeyCode::Left if alt && shift && n > 0 => return self.move_tab(self.active, pos.saturating_sub(1)),
             KeyCode::Right if alt && shift && n > 0 => return self.move_tab(self.active, (pos + 1).min(n - 1)),
-            KeyCode::Left if alt && n > 0 => return self.select_tab((pos + n - 1) % n),
-            KeyCode::Right if alt && n > 0 => return self.select_tab((pos + 1) % n),
+            KeyCode::Left if alt && n > 0 => return self.step_tab(-1),
+            KeyCode::Right if alt && n > 0 => return self.step_tab(1),
+            KeyCode::Char('n') if ctrl => return self.new_tab_here(),
             KeyCode::Char('n') if alt => return self.next_agent(),
             KeyCode::Char('w') if alt && n > 0 => return self.close_tab(self.active),
             KeyCode::Char(c @ '1'..='9') if alt => return self.goto_tab(c as usize - '1' as usize),
@@ -1630,7 +1719,7 @@ impl App {
             Hit::AddFolder if spaces => self.open_server(LOCAL),
             Hit::AddFolder => self.new_folder_prompt(),
             Hit::Edit => self.edit_selected(),
-            Hit::NewTab => self.open_server(LOCAL),
+            Hit::NewTab => self.new_tab_here(),
             _ => {}
         }
     }
@@ -1652,7 +1741,10 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.move_in_menu(i.saturating_sub(1).max(row_start), buttons),
             KeyCode::Right | KeyCode::Char('l') => self.move_in_menu((i + 1).min(row_end - 1), buttons),
             // The buttons are below the list and the views above it: the arrow that leads back to the list.
-            KeyCode::Up | KeyCode::Char('k') if buttons => self.header = None,
+            KeyCode::Up | KeyCode::Char('k') if buttons => {
+                self.header = None;
+                self.agent_sel = self.layout.agents.len().checked_sub(1);
+            }
             KeyCode::Down | KeyCode::Char('j') if !buttons => self.header = None,
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {}
             KeyCode::Esc => self.header = None,
@@ -1668,7 +1760,35 @@ impl App {
         true
     }
 
+    /// Keys while an entry of the “running” panel is highlighted. Returns true if the key was consumed.
+    fn agent_panel_key(&mut self, k: usize, key: KeyEvent) -> bool {
+        let n = self.layout.agents.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.agent_sel = k.checked_sub(1),
+            KeyCode::Down | KeyCode::Char('j') if k + 1 < n => self.agent_sel = Some(k + 1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.agent_sel = None;
+                self.header = Some(0);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(&(_, ti)) = self.layout.agents.get(k) {
+                    self.agent_sel = None;
+                    self.focus_tab(ti);
+                }
+            }
+            KeyCode::Esc => self.agent_sel = None,
+            _ => return false,
+        }
+        true
+    }
+
     fn sidebar_key(&mut self, key: KeyEvent) {
+        if let Some(k) = self.agent_sel {
+            if self.agent_panel_key(k, key) {
+                return;
+            }
+            self.agent_sel = None;
+        }
         if let Some(i) = self.header {
             if self.header_key(i, key) {
                 return;
@@ -1683,6 +1803,9 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
             KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => self.header = Some(self.view_index()),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') if self.selected >= last && !self.layout.agents.is_empty() => {
+                self.agent_sel = Some(0)
+            }
             KeyCode::Down | KeyCode::Char('j') if self.selected >= last => self.header = Some(0),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
@@ -1696,7 +1819,7 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.step_out(),
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected_row() {
                 Some(Row { node: NodeId::Space(id), .. }) => self.open_space(id),
-                Some(Row { node: NodeId::Server(id), .. }) => self.open_server(id),
+                Some(Row { node: NodeId::Server(id), .. }) => self.open_or_focus_server(id),
                 Some(row @ Row { node: NodeId::Folder(_), .. }) => self.toggle(row),
                 Some(Row { node: NodeId::BastionsHeader, .. }) | None => {}
             },
@@ -1706,6 +1829,11 @@ impl App {
             }),
             KeyCode::Char(c @ '1'..='9') if !ctrl && !alt => self.goto_tab(c as usize - '1' as usize),
             KeyCode::Char('t') => self.open_server(LOCAL),
+            KeyCode::Char('n') => {
+                if let Some(NodeId::Server(id)) = self.selected_node() {
+                    self.open_server(id);
+                }
+            }
             KeyCode::Char('p') => self.modal = self.gate(Pending::OpenVault),
             KeyCode::Char('a') if self.view == View::Spaces => self.new_space(),
             KeyCode::Char('a') => self.new_server_form(),
@@ -2238,6 +2366,7 @@ impl App {
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         self.on_mouse_inner(ev);
         self.sync_scope();
+        self.sync_bar();
     }
 
     fn on_mouse_inner(&mut self, ev: MouseEvent) {
@@ -2279,6 +2408,7 @@ impl App {
         let double = self.is_double_click(x, y);
         self.drag = None;
         self.header = None;
+        self.agent_sel = None;
         self.selection = None;
         self.selecting = false;
         if let Some(&(_, hit)) = self.layout.toolbar.iter().find(|(r, _)| inside(*r, x, y)) {
@@ -2298,7 +2428,7 @@ impl App {
                     match row.node {
                         NodeId::Folder(_) => self.toggle(row),
                         NodeId::BastionsHeader => {}
-                        NodeId::Server(id) => self.open_server(id),
+                        NodeId::Server(id) => self.open_or_focus_server(id),
                         NodeId::Space(id) => self.open_space(id),
                     }
                 } else {
@@ -2824,7 +2954,9 @@ mod tests {
     fn number_keys_jump_to_tabs_from_the_sidebar() {
         let mut app = app_with_servers(1);
         app.open_server(LOCAL);
-        app.open_server(LOCAL);
+        app.sync_bar();
+        app.new_tab_here(); // + gives the bar a second slot
+        app.sync_bar();
         app.focus = Focus::Sidebar;
         press(&mut app, KeyCode::Char('1'));
         assert_eq!((app.active, app.focus), (0, Focus::Terminal));
@@ -2883,6 +3015,35 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn moving_between_projects_reuses_the_slot_and_plus_adds_one() {
+        let (d1, d2) = (temp_dir("s1"), temp_dir("s2"));
+        let mut app = app_with_servers(0);
+        let a = app.spaces.add("a".into(), d1.display().to_string());
+        let b = app.spaces.add("b".into(), d2.display().to_string());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        app.open_space(a);
+        app.sync_bar();
+        app.open_space(b);
+        app.sync_bar();
+        assert_eq!(app.tabs.len(), 2, "each project has its session");
+        assert_eq!(app.bar_tabs().len(), 1, "but the bar still has one slot, now showing b");
+        assert_eq!(app.tabs[app.bar_tabs()[0]].scope, Scope::Space(b));
+        // + adds a slot; moving to a project then changes only the slot you are on.
+        app.new_tab_here();
+        app.sync_bar();
+        assert_eq!(app.bar_tabs().len(), 2);
+        app.select_node(NodeId::Space(a));
+        app.sync_scope();
+        app.open_space(a);
+        app.sync_bar();
+        assert_eq!(app.bar_tabs().len(), 2, "still two slots");
+        std::fs::remove_dir_all(d1).ok();
+        std::fs::remove_dir_all(d2).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn each_space_remembers_its_own_active_tab() {
         let (d1, d2) = (temp_dir("a"), temp_dir("b"));
         let mut app = app_with_servers(0);
@@ -2891,7 +3052,9 @@ mod tests {
         app.rebuild();
         app.set_view(View::Spaces);
         app.open_space(a);
-        app.open_server(LOCAL); // second tab in a
+        app.sync_bar();
+        app.new_tab_here(); // second tab in a, in a slot of its own
+        app.sync_bar();
         app.goto_tab(0);
         assert_eq!(app.active, 0);
         app.open_space(b);
@@ -3076,8 +3239,8 @@ mod tests {
     fn a_click_anywhere_in_a_tall_block_hits_its_row() {
         let mut app = app_with_servers(3);
         app.layout.list = Rect::new(1, 10, 30, 30);
-        app.layout.row_h = 3; // spaces are three-line blocks (two lines and a gap)
-        for (y, row) in [(10, 0), (11, 0), (12, 0), (13, 1), (15, 1), (16, 2)] {
+        app.layout.row_h = 2; // spaces are two-line blocks
+        for (y, row) in [(10, 0), (11, 0), (12, 1), (13, 1), (14, 2), (15, 2)] {
             assert_eq!(app.row_at(5, y), Some(row), "line {y}");
         }
         app.offset = 2;
@@ -3198,14 +3361,19 @@ mod tests {
         assert_eq!(app.selected_node(), Some(NodeId::Space(id)));
         app.select_tab(1);
         assert_eq!((app.view, app.scope, app.active), (View::Folders, Scope::Ssh, 1), "and back to SSH");
-        // Alt+Right goes through every tab, and the sidebar follows.
+        // Alt+arrows and the digits stay inside what is selected: here each part has one tab.
         app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
-        assert_eq!((app.active, app.view), (0, View::Spaces));
-        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
         assert_eq!((app.active, app.view), (1, View::Folders));
-        // The digits are global too.
-        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('2'));
+        assert_eq!((app.active, app.view), (1, View::Folders), "there is no second tab here");
+        app.select_tab(0);
         assert_eq!((app.active, app.view), (0, View::Spaces));
+        // Ctrl+N adds a tab to the project you are on, and only that project shows it.
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(app.tabs.len(), 3);
+        assert_eq!(app.bar_tabs().len(), 2, "the SSH tab lost its slot to the project when it was selected");
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(app.active, app.bar_tabs()[0]);
         std::fs::remove_dir_all(dir).ok();
     }
 

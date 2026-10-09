@@ -20,6 +20,26 @@ const GREEN: Color = Color::Rgb(158, 206, 106);
 const AMBER: Color = Color::Rgb(224, 175, 104);
 const REMOTE_GREEN: Color = Color::Rgb(187, 154, 247);
 const REMOTE_GREEN_BRIGHT: Color = Color::Rgb(208, 184, 255);
+/// Soft colours, one per space: greens, yellows, pinks, purples and reds (no browns, no blue wall).
+const PASTELS: [(u8, u8, u8); 8] = [
+    (166, 227, 161), // green
+    (249, 226, 175), // yellow
+    (245, 194, 231), // pink
+    (203, 166, 247), // purple
+    (243, 139, 168), // red
+    (148, 226, 213), // mint
+    (255, 238, 140), // lemon
+    (190, 160, 255), // violet
+];
+
+fn space_color(id: u64, live: bool) -> Color {
+    let (r, g, b) = PASTELS[(id as usize) % PASTELS.len()];
+    // Idle spaces keep their hue but wash out towards grey (fading to black would turn yellows brown).
+    let k = if live { 1.0 } else { 0.45 };
+    let fade = |c: u8, grey: f32| (c as f32 * k + grey * (1.0 - k)) as u8;
+    Color::Rgb(fade(r, 80.0), fade(g, 82.0), fade(b, 100.0))
+}
+
 const RED: Color = Color::Rgb(247, 118, 142);
 
 /// Truncates `s` to `w` columns, adding “…” if it does not fit.
@@ -153,30 +173,34 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         for (k, &ti) in agents.iter().take(shown).enumerate() {
             let tab = &app.tabs[ti];
             let Some(info) = tab.session.agent() else { continue };
-            let (dot, color) = if tab.attention {
-                ("●", GREEN)
+            let color = if tab.attention {
+                GREEN
             } else if info.working {
-                ("●", AMBER)
+                AMBER
             } else {
-                ("○", MUTED)
+                MUTED
             };
-            let here = ti == app.active && tab.scope == app.scope && app.focus == Focus::Terminal;
+            let here = (ti == app.active && tab.scope == app.scope && app.focus == Focus::Terminal)
+                || (focused && app.agent_sel == Some(k));
             let bg = if here { SEL_BG } else { Color::Reset };
-            let place = fit(&app.tab_place(tab), (inner.width as usize).saturating_sub(4));
+            let place = fit(&app.tab_place(tab), (inner.width as usize).saturating_sub(3));
             let name_style = Style::new().fg(if tab.attention { GREEN } else { FG }).bg(bg);
             let r = Rect::new(inner.x, top + 1 + k as u16 * agent_h, inner.width, agent_h);
             let lines = if roomy {
                 vec![
                     Line::from(vec![
-                        Span::styled(format!(" {dot} "), Style::new().fg(color).bg(bg)),
-                        Span::styled(info.name.clone(), name_style.add_modifier(Modifier::BOLD)),
+                        Span::styled(" ", Style::new().bg(color)),
+                        Span::styled(format!(" {}", info.name), name_style.add_modifier(Modifier::BOLD)),
                     ]),
-                    Line::from(Span::styled(format!("   {place}"), Style::new().fg(MUTED).bg(bg))),
+                    Line::from(vec![
+                        Span::styled(" ", Style::new().bg(color)),
+                        Span::styled(format!(" {place}"), Style::new().fg(MUTED).bg(bg)),
+                    ]),
                 ]
             } else {
                 vec![Line::from(vec![
-                    Span::styled(format!("{dot} "), Style::new().fg(color).bg(bg)),
-                    Span::styled(info.name.clone(), name_style),
+                    Span::styled(" ", Style::new().bg(color)),
+                    Span::styled(format!(" {}", info.name), name_style),
                     Span::styled(format!("  {place}"), Style::new().fg(MUTED).bg(bg)),
                 ])]
             };
@@ -185,12 +209,12 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // The list. Spaces are two-line blocks with a gap when there is room; servers stay dense.
+    // The list. Spaces are packed two-line blocks when there is room; servers stay dense.
     let list_top = views_y + 2;
     let list_h = (inner.y + inner.height).saturating_sub(list_top + bottom_h + panel_h);
     let list = Rect::new(inner.x, list_top, inner.width, list_h);
     app.layout.list = list;
-    let row_h: u16 = if roomy && in_spaces { 3 } else { 1 };
+    let row_h: u16 = 1;
     app.layout.row_h = row_h;
     if list.height == 0 {
         return;
@@ -281,27 +305,29 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
             let mine = |t: &&Tab| t.scope == Scope::Space(id);
             let live = app.tabs.iter().filter(mine).any(|t| t.session.exit_code.is_none());
             let attention = app.tabs.iter().filter(mine).any(|t| t.attention);
-            let (dot, color) = if attention {
-                ("●", GREEN)
-            } else if live {
-                ("●", ACCENT)
-            } else {
-                ("○", MUTED)
+            // One line: a coloured spine for the state, the name, and the branch (or directory) on the right.
+            // The name turns green when the agent has finished; the spine keeps the space's own colour.
+            let color = space_color(id, live);
+            let (text, tone) = match app.branches.get(&id) {
+                Some(b) => (b.clone(), REMOTE_GREEN),
+                None => (cwd, MUTED),
             };
-            let first = Line::from(vec![
-                Span::styled(format!(" {dot} "), Style::new().fg(color).bg(bg)),
+            let name_w = name.width().min(width.saturating_sub(3));
+            // The name keeps its room; the rest goes to the branch, if there is enough to be useful.
+            let room = width.saturating_sub(2 + name_w + 3);
+            let mut spans = vec![
+                Span::styled("▆", Style::new().fg(color).bg(bg)),
                 Span::styled(
-                    fit(&name, width.saturating_sub(4)),
+                    format!(" {}", fit(&name, width.saturating_sub(3))),
                     style.fg(if attention { GREEN } else { FG }).add_modifier(Modifier::BOLD),
                 ),
-            ]);
-            let second = match app.branches.get(&id) {
-                Some(b) => Line::from(Span::styled(format!("   {}", fit(b, width.saturating_sub(4))), Style::new().fg(REMOTE_GREEN).bg(bg))),
-                None => Line::from(Span::styled(format!("   {}", fit(&cwd, width.saturating_sub(4))), Style::new().fg(MUTED).bg(bg))),
-            };
-            let block_h = if row_h >= 2 { 2 } else { 1 };
-            let lines = if block_h == 2 { vec![first, second] } else { vec![first] };
-            block(f, Rect::new(area.x, y, area.width, block_h), lines, bg);
+            ];
+            if room >= 6 {
+                let shown = fit(&text, room);
+                let pad = room.saturating_sub(shown.width());
+                spans.push(Span::styled(format!("{}{} ", " ".repeat(pad + 2), shown), Style::new().fg(tone).bg(bg)));
+            }
+            f.render_widget(Paragraph::new(Line::from(spans)).style(Style::new().bg(bg)), Rect::new(area.x, y, area.width, 1));
             continue;
         }
 
@@ -333,7 +359,7 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
                     spans.push(Span::styled(arrow, Style::new().fg(ACCENT)));
                 } else {
                     spans.push(Span::styled(
-                        if live { "● " } else { "○ " },
+                        if live { "◆ " } else { "◇ " },
                         Style::new().fg(if live { GREEN } else { MUTED }),
                     ));
                 }
@@ -359,8 +385,8 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
 
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let end = area.x + area.width;
-    // Every tab of every part of ship, like the tabs of a browser.
-    let scoped: Vec<usize> = (0..app.tabs.len()).collect();
+    // The tabs you kept (+ / Ctrl+N) and the one you are on: moving between projects never piles up tabs.
+    let scoped: Vec<usize> = app.bar_tabs();
     let n = scoped.len();
     let mut x = area.x + 1;
     let mut hits = vec![];
@@ -369,7 +395,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
         let avail = area.width.saturating_sub(4) as usize;
         let max_title = (avail / n).saturating_sub(9).clamp(6, 20);
         let cell = |p: usize| fit(&app.tab_label(&app.tabs[scoped[p]]), max_title).width() + 8 + 1;
-        let active = app.active.min(n - 1);
+        let active = scoped.iter().position(|&i| i == app.active).unwrap_or(0);
         let mut start = 0;
         while start < active && (start..=active).map(cell).sum::<usize>() > avail {
             start += 1;
@@ -400,7 +426,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
                 Paragraph::new(Line::from(vec![
                     Span::styled(" ", Style::new().bg(bg)),
                     Span::styled(num, Style::new().fg(MUTED).bg(bg)),
-                    Span::styled(if dead { "○ " } else { "● " }, Style::new().fg(dot).bg(bg)),
+                    Span::styled(if dead { "◇ " } else { "◆ " }, Style::new().fg(dot).bg(bg)),
                     Span::styled(
                         title,
                         Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
@@ -593,7 +619,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.modal.is_some() {
         "Esc cancel".to_string()
     } else if app.focus == Focus::Terminal {
-        "F6 panel · Alt+←/→ tabs · Alt+W close · F2 rename · drag: select+copy · Shift+PgUp/PgDn/Home/End history".to_string()
+        "F6 panel · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close · F2 rename · drag: select+copy · Shift+PgUp/PgDn/Home/End history".to_string()
     } else if app.header.is_some() {
         "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
     } else if app.view == View::Spaces && app.header.is_none() {
