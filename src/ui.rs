@@ -55,6 +55,10 @@ fn c_green() -> Color {
 fn c_amber() -> Color {
     themed(Color::Rgb(255, 215, 100), Color::Rgb(224, 175, 104))
 }
+/// Folders: a light, fresh green (the live green is stronger, so the two stay apart).
+fn c_folder() -> Color {
+    themed(Color::Rgb(178, 240, 170), Color::Rgb(169, 214, 138))
+}
 fn c_red() -> Color {
     themed(Color::Rgb(255, 110, 145), Color::Rgb(247, 118, 142))
 }
@@ -245,6 +249,25 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
         Style::new().fg(c_muted())
     };
     f.render_widget(Paragraph::new(format!("  {name}")).style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
+    // A dot per thing that is open in this column (a project with a live tab, a server with a live session),
+    // each in its own colour, at the right end of the title.
+    let mut open: Vec<u64> = vec![];
+    for t in app.tabs.iter().filter(|t| t.session.exit_code.is_none()) {
+        let id = match (i, t.scope) {
+            (0, Scope::Space(id)) => id,
+            (1, Scope::Ssh) => t.server_id,
+            _ => continue,
+        };
+        if !open.contains(&id) {
+            open.push(id);
+        }
+    }
+    let room = (area.width as usize).saturating_sub(name.width() + 7) / 2;
+    let dots: Vec<Span> = open.iter().take(room).flat_map(|&id| [Span::styled("●", Style::new().fg(space_color(id, true))), Span::raw(" ")]).collect();
+    let dw = (dots.len() as u16).min(area.width.saturating_sub(4));
+    if dw > 0 {
+        f.render_widget(Paragraph::new(Line::from(dots)), Rect::new(area.x + area.width - 2 - dw, area.y, dw, 1));
+    }
     // The list keeps two columns of margin on the left and a little on the right.
     let inner = Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(5), area.height.saturating_sub(3));
     // The actions of the column, as small padded buttons along the bottom.
@@ -531,8 +554,8 @@ fn draw_rows(
                 };
                 let count = format!(" ({}){}", inside.len(), mark);
                 let label = fit(name, width.saturating_sub(indent.width() + 4 + count.width()));
-                spans.push(Span::styled(if open { " ▾  " } else { " ▸  " }, Style::new().fg(c_amber())));
-                spans.push(Span::styled(label, Style::new().fg(c_amber()).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if open { " ▾  " } else { " ▸  " }, Style::new().fg(c_folder())));
+                spans.push(Span::styled(label, Style::new().fg(c_folder()).add_modifier(Modifier::BOLD)));
                 spans.push(Span::styled(format!(" ({})", inside.len()), Style::new().fg(c_muted())));
                 if !mark.is_empty() {
                     spans.push(Span::styled(mark, Style::new().fg(mc).add_modifier(Modifier::BOLD)));
@@ -550,8 +573,8 @@ fn draw_rows(
                 let open = fo.is_some_and(|f| f.expanded);
                 let name = fo.map(|f| f.name.as_str()).unwrap_or("?");
                 let label = fit(name, width.saturating_sub(indent.width() + 5));
-                spans.push(Span::styled(if open { " ▾  " } else { " ▸  " }, Style::new().fg(c_amber())));
-                spans.push(Span::styled(label, Style::new().fg(c_amber()).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if open { " ▾  " } else { " ▸  " }, Style::new().fg(c_folder())));
+                spans.push(Span::styled(label, Style::new().fg(c_folder()).add_modifier(Modifier::BOLD)));
             }
             NodeId::Server(id) => {
                 let s = app.store.server(id);
