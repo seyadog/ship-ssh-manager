@@ -1276,7 +1276,7 @@ mod tests {
             let (top, bottom) = (app.layout.list, app.layout.list_bottom);
             assert!(bottom.height > 0, "split at {height}");
             let header = app.split_index().unwrap();
-            assert_eq!(top.height as usize, header + 1, "the top part holds the servers and one blank line ({height})");
+            assert_eq!(top.height as usize, header * app.layout.row_h as usize + 1, "the top part holds the servers and one blank line ({height})");
             assert_eq!(bottom.y, top.y + top.height);
             assert!(lines[bottom.y as usize].contains("bastions"), "the title is the first line of the lower part ({height})");
             let title_rows = lines.iter().filter(|l| l.contains("bastions")).count();
