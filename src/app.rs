@@ -3539,7 +3539,10 @@ mod tests {
 
     #[cfg(unix)]
     fn temp_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ship-app-{name}-{}", std::process::id()));
+        // One directory per call: tests run in parallel and each removes its own when it ends.
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("oso-app-{name}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
@@ -3797,7 +3800,9 @@ mod tests {
     }
 
     fn temp_dir_any(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ship-app-{name}-{}", std::process::id()));
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("oso-app-{name}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
