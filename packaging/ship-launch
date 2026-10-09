@@ -1,0 +1,10 @@
+#!/bin/sh
+# Opens ship in its own terminal window (own window class, so the desktop shows it as an app of its own).
+ship="${1:-ship}"
+if command -v kitty >/dev/null 2>&1; then exec kitty --class ship --title ship "$ship"
+elif command -v foot >/dev/null 2>&1; then exec foot --app-id ship --title ship "$ship"
+elif command -v alacritty >/dev/null 2>&1; then exec alacritty --class ship --title ship -e "$ship"
+elif command -v ptyxis >/dev/null 2>&1; then exec ptyxis --standalone --title ship -x "$ship"
+elif command -v gnome-terminal >/dev/null 2>&1; then exec gnome-terminal --title ship -- "$ship"
+else exec x-terminal-emulator -e "$ship"
+fi

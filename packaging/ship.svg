@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect width="256" height="256" rx="56" fill="#1e1f29"/>
+  <rect x="8" y="8" width="240" height="240" rx="50" fill="none" stroke="#7b7fd4" stroke-opacity=".35" stroke-width="3"/>
+  <!-- mast -->
+  <rect x="124" y="46" width="8" height="112" rx="3" fill="#c9cbe8"/>
+  <!-- pennant -->
+  <path d="M132 46 L168 56 L132 66 Z" fill="#e5b567"/>
+  <!-- sails -->
+  <path d="M120 66 L120 144 L62 144 Z" fill="#a8d672"/>
+  <path d="M136 80 L136 144 L192 144 Z" fill="#c4a1f2"/>
+  <!-- hull -->
+  <path d="M44 156 L212 156 L190 196 Q186 202 178 202 L78 202 Q70 202 66 196 Z" fill="#e5b567"/>
+  <rect x="44" y="156" width="168" height="8" rx="4" fill="#c4944a"/>
+  <circle cx="96" cy="178" r="6" fill="#1e1f29"/>
+  <circle cx="128" cy="178" r="6" fill="#1e1f29"/>
+  <circle cx="160" cy="178" r="6" fill="#1e1f29"/>
+  <!-- waves -->
+  <path d="M30 220 q14 -12 28 0 t28 0 t28 0 t28 0 t28 0 t28 0 t28 0" fill="none" stroke="#7b7fd4" stroke-width="7" stroke-linecap="round"/>
+</svg>

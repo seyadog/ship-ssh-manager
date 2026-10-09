@@ -14,6 +14,18 @@ cargo test
 cargo install --path . --root ~/.local      # installs `ship` into ~/.local/bin
 ```
 
+### Launcher entry (optional)
+
+`packaging/` has what you need to start ship from the app menu in its own terminal window: `ship-launch` picks an installed terminal (kitty, foot, alacritty, ptyxis, gnome-terminal) and runs ship in it, plus a `.desktop` file and an icon.
+
+```sh
+install -Dm755 packaging/ship-launch ~/.local/bin/ship-launch
+install -Dm644 packaging/ship.desktop ~/.local/share/applications/ship.desktop
+install -Dm644 packaging/ship.svg ~/.local/share/icons/hicolor/scalable/apps/ship.svg
+```
+
+Ptyxis is started with `--standalone`; without it, a cold start opens its default window next to ship's.
+
 Data lives in `~/.config/ship/servers.json` (or `$SHIP_CONFIG_DIR`). Passwords never go in that file: they live in the encrypted vault (`vault.json`, next to it).
 
 ## Two views of the same servers

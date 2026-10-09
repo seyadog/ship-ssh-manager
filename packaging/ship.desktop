@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ship
+GenericName=SSH and project manager
+Comment=SSH connections, projects and AI agents in one terminal workspace
+Icon=ship
+Exec=ship-launch ship
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupWMClass=ship
+Keywords=ssh;terminal;agents;claude;opencode;
