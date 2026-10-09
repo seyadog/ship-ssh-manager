@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
   <!-- ears -->
-  <circle cx="68" cy="72" r="38" fill="#7aa2f7"/>
-  <circle cx="188" cy="72" r="38" fill="#7aa2f7"/>
-  <circle cx="68" cy="74" r="20" fill="#b0c4ff"/>
-  <circle cx="188" cy="74" r="20" fill="#b0c4ff"/>
+  <circle cx="68" cy="72" r="38" fill="#bb9af7"/>
+  <circle cx="188" cy="72" r="38" fill="#bb9af7"/>
+  <circle cx="68" cy="74" r="20" fill="#f0c6f0"/>
+  <circle cx="188" cy="74" r="20" fill="#f0c6f0"/>
   <!-- head -->
   <ellipse cx="128" cy="142" rx="94" ry="86" fill="#7aa2f7"/>
   <!-- eyes -->

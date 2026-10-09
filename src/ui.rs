@@ -710,32 +710,45 @@ fn map_color(c: vt100::Color) -> Color {
     }
 }
 
-/// The bear, as a grid of pixels: `#` fur, `i` inside of the ears, `e` eyes, `s` snout, `n` nose.
-/// Two pixel rows make one terminal row (half blocks), so it is 22 columns by 7 lines.
-const BEAR: [&str; 14] = [
-    "    ####      ####    ",
-    "   ######    ######   ",
-    "   ##ii########ii##   ",
+/// The bear, as a grid of pixels: `#` fur, `o` ears, `i` inside of the ears, `E` eyes (`w` their glint),
+/// `s` snout, `n` nose. Two pixel rows make one terminal row (half blocks), so it is 22 columns by 8 lines.
+const BEAR: [&str; 16] = [
+    "    oooo      oooo    ",
+    "   oooooo    oooooo   ",
+    "   ooiioo####ooiioo   ",
     "  ##################  ",
     "  ##################  ",
-    "  ####ee######ee####  ",
-    "  ####ee######ee####  ",
-    "  ##################  ",
+    "  ####wE######wE####  ",
+    "  ####EE######EE####  ",
+    "  ####EE######EE####  ",
     "  ######ssssss######  ",
     "  #####ssssssss#####  ",
     "  #####ssnnnnss#####  ",
+    "   ####sssnnsss####   ",
     "   ####ssssssss####   ",
     "    ##############    ",
-    "      ##########      ",
+    "     ############     ",
+    "       ########       ",
+];
+
+/// The name, with the s bigger than the two o's.
+const WORDMARK: [&str; 5] = [
+    "    ┏━━━━      ",
+    "    ┃          ",
+    "┏━┓ ┗━━━┓ ┏━┓",
+    "┃ ┃     ┃ ┃ ┃",
+    "┗━┛ ━━━━┛ ┗━┛",
 ];
 
 fn bear_lines() -> Vec<Line<'static>> {
     let color = |c: char| match c {
         '#' => Some(ACCENT),
-        'i' => Some(Color::Rgb(176, 196, 255)),
-        'e' => Some(Color::Rgb(26, 27, 38)),
+        'o' => Some(Color::Rgb(187, 154, 247)),
+        'i' => Some(Color::Rgb(240, 198, 240)),
+        'E' => Some(Color::Rgb(20, 21, 30)),
+        'w' => Some(Color::Rgb(255, 255, 255)),
         's' => Some(Color::Rgb(214, 224, 255)),
-        'n' => Some(Color::Rgb(26, 27, 38)),
+        'n' => Some(Color::Rgb(20, 21, 30)),
         _ => None,
     };
     let at = |row: usize, col: usize| BEAR.get(row).and_then(|r| r.chars().nth(col)).and_then(color);
@@ -755,9 +768,8 @@ fn bear_lines() -> Vec<Line<'static>> {
 }
 
 fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
-    let logo = ["┏━┓┏━┓┏━┓", "┃ ┃┗━┓┃ ┃", "┗━┛┗━┛┗━┛"];
     let mut lines: Vec<Line> = bear_lines();
-    lines.extend(logo.iter().map(|l| Line::from(Span::styled(*l, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)))));
+    lines.extend(WORDMARK.iter().map(|l| Line::from(Span::styled(*l, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)))));
     lines.push(Line::raw(""));
     let hints: Vec<String> = match app.scope {
         Scope::Ssh => vec![
