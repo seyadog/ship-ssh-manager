@@ -612,8 +612,6 @@ pub struct App {
     /// Servers whose hidden hosts are unfolded in the jump view.
     /// Bastions the user folded in the jump view (everything is unfolded by default).
     pub jump_open: HashSet<u64>,
-    /// The bastions section of the SSH view is open.
-    pub bastions_open: bool,
     /// Where the open/closed state of the sidebar is kept (empty: nowhere, as in tests).
     pub ui_path: PathBuf,
     drag: Option<Drag>,
@@ -652,7 +650,6 @@ impl App {
             drop_hover: None,
             view: View::Folders,
             jump_open: HashSet::new(),
-            bastions_open: false,
             ui_path: PathBuf::new(),
             header: None,
             drag: None,
@@ -717,9 +714,7 @@ impl App {
                     .any(|s| s.jump.is_none() && self.store.servers.iter().any(|x| x.jump == Some(s.id)));
                 if bastions {
                     self.rows.push(Row { node: NodeId::BastionsHeader, depth: 0, jump: false });
-                    if self.bastions_open {
-                        walk_jump(&self.store, None, 1, &self.jump_open, &mut self.rows);
-                    }
+                    walk_jump(&self.store, None, 1, &self.jump_open, &mut self.rows);
                 }
             }
             View::Spaces => self.rows.extend(
@@ -727,6 +722,10 @@ impl App {
             ),
         }
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+        // The title of the bastions section is a label, not something to stand on.
+        if self.rows.get(self.selected).is_some_and(|r| r.node == NodeId::BastionsHeader) {
+            self.selected = self.selected.saturating_sub(1);
+        }
     }
 
     pub fn has_children(&self, row: &Row) -> bool {
@@ -736,8 +735,7 @@ impl App {
                     || self.store.servers.iter().any(|s| s.parent == Some(id))
             }
             NodeId::Server(id) if row.jump => self.store.servers.iter().any(|s| s.jump == Some(id)),
-            NodeId::BastionsHeader => true,
-            NodeId::Server(_) | NodeId::Space(_) => false,
+            NodeId::BastionsHeader | NodeId::Server(_) | NodeId::Space(_) => false,
         }
     }
 
@@ -745,8 +743,7 @@ impl App {
         match row.node {
             NodeId::Folder(id) => self.store.folder(id).is_some_and(|f| f.expanded),
             NodeId::Server(id) => self.jump_open.contains(&id),
-            NodeId::BastionsHeader => self.bastions_open,
-            NodeId::Space(_) => false,
+            NodeId::BastionsHeader | NodeId::Space(_) => false,
         }
     }
 
@@ -766,11 +763,7 @@ impl App {
                 }
                 self.save_ui();
             }
-            NodeId::BastionsHeader => {
-                self.bastions_open = open;
-                self.save_ui();
-            }
-            NodeId::Space(_) => {}
+            NodeId::BastionsHeader | NodeId::Space(_) => {}
         }
         self.rebuild();
     }
@@ -957,7 +950,7 @@ impl App {
         }
         let mut open_nodes: Vec<u64> = self.jump_open.iter().copied().collect();
         open_nodes.sort_unstable();
-        let state = crate::uistate::UiState { bastions_open: self.bastions_open, open_nodes };
+        let state = crate::uistate::UiState { open_nodes };
         if let Err(e) = state.save_to(&self.ui_path) {
             self.set_flash(format!("Could not save the sidebar state: {e}"));
         }
@@ -1689,9 +1682,9 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') if alt => self.shift_selected(-1),
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
             KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => self.header = Some(self.view_index()),
-            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') if self.selected >= last => self.header = Some(0),
-            KeyCode::Down | KeyCode::Char('j') => self.selected += 1,
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
             KeyCode::End | KeyCode::Char('G') => self.selected = last,
             KeyCode::Right | KeyCode::Char('l') if matches!(self.selected_node(), Some(NodeId::Space(_))) => {
@@ -1704,8 +1697,8 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected_row() {
                 Some(Row { node: NodeId::Space(id), .. }) => self.open_space(id),
                 Some(Row { node: NodeId::Server(id), .. }) => self.open_server(id),
-                Some(row @ Row { node: NodeId::Folder(_) | NodeId::BastionsHeader, .. }) => self.toggle(row),
-                None => {}
+                Some(row @ Row { node: NodeId::Folder(_), .. }) => self.toggle(row),
+                Some(Row { node: NodeId::BastionsHeader, .. }) | None => {}
             },
             KeyCode::Char('v') | KeyCode::Tab => self.set_view(match self.view {
                 View::Spaces => View::Folders,
@@ -1723,6 +1716,18 @@ impl App {
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('c') if ctrl => self.request_quit(),
             _ => {}
+        }
+    }
+
+    /// One row up or down, stepping over the title of the bastions section.
+    fn move_selection(&mut self, delta: i32) {
+        let n = self.rows.len() as i32;
+        let mut i = self.selected as i32 + delta;
+        while i >= 0 && i < n && self.rows[i as usize].node == NodeId::BastionsHeader {
+            i += delta;
+        }
+        if i >= 0 && i < n {
+            self.selected = i as usize;
         }
     }
 
@@ -2286,12 +2291,13 @@ impl App {
         }
         if inside(self.layout.sidebar, x, y) {
             self.focus = Focus::Sidebar;
-            if let Some(i) = self.row_at(x, y).filter(|&i| i < self.rows.len()) {
+            if let Some(i) = self.row_at(x, y).filter(|&i| i < self.rows.len() && self.rows[i].node != NodeId::BastionsHeader) {
                 self.selected = i;
                 let row = self.rows[i];
                 if double {
                     match row.node {
-                        NodeId::Folder(_) | NodeId::BastionsHeader => self.toggle(row),
+                        NodeId::Folder(_) => self.toggle(row),
+                        NodeId::BastionsHeader => {}
                         NodeId::Server(id) => self.open_server(id),
                         NodeId::Space(id) => self.open_space(id),
                     }
@@ -3094,8 +3100,7 @@ mod tests {
         let mut app = app_with_servers(3);
         assert!(app.rows.iter().all(|r| !r.jump && r.node != NodeId::BastionsHeader), "no bastions yet: no section");
         let (b, inner, _) = bastion_setup(&mut app);
-        assert_eq!(app.rows.len(), 4, "closed by default: just the title below the servers");
-        app.bastions_open = true;
+        assert_eq!(app.rows.len(), 5, "the section is always there: its title and the bastion, itself closed");
         app.jump_open.insert(b);
         app.rebuild();
         let nodes: Vec<(NodeId, bool, usize)> = app.rows.iter().map(|r| (r.node, r.jump, r.depth)).collect();
@@ -3106,54 +3111,45 @@ mod tests {
         assert_eq!(nodes.len(), 6);
     }
 
+    /// The title is a label: only the bastions inside it fold.
     #[test]
-    fn the_bastions_section_starts_closed_and_opens_and_folds() {
+    fn the_bastions_fold_and_the_section_title_is_only_a_label() {
         let mut app = app_with_servers(3);
-        bastion_setup(&mut app);
-        app.selected = 3; // the title
-        assert_eq!(app.rows.len(), 4, "closed by default");
+        let (b, _, _) = bastion_setup(&mut app);
+        app.selected = 2; // the last server of the folder tree
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.rows[app.selected].node, NodeId::Server(b), "Down steps over the title onto the first bastion");
+        assert!(app.rows[app.selected].jump);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.selected, 2, "and Up steps back over it");
+        press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Right);
-        assert_eq!(app.rows.len(), 5, "open: the bastion, itself closed");
-        press(&mut app, KeyCode::Right); // into its first child: the bastion
-        press(&mut app, KeyCode::Right); // opens the bastion
-        assert_eq!(app.rows.len(), 6, "and what is behind it");
-        app.selected = 3;
+        assert_eq!(app.rows.len(), 6, "→ unfolds the bastion");
         press(&mut app, KeyCode::Left);
-        assert_eq!(app.rows.len(), 4, "folded again");
+        assert_eq!(app.rows.len(), 5, "← folds it");
+        app.selected = 3;
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.rows.len(), 6, "Enter toggles it too, and the bastion inside kept its state");
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.rows.len(), 5, "nothing happens on the title");
     }
 
     #[test]
-    fn what_is_open_is_remembered_between_runs() {
+    fn which_bastions_are_open_is_remembered_between_runs() {
         let dir = temp_dir_any("uistate");
         let mut app = app_with_servers(3);
         let (b, _, _) = bastion_setup(&mut app);
         app.ui_path = dir.join("state.json");
-        app.selected = 3;
-        press(&mut app, KeyCode::Right); // section
+        app.selected = app.rows.iter().position(|r| r.node == NodeId::Server(b) && r.jump).unwrap();
         press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Right); // the bastion
         let saved: crate::uistate::UiState = serde_json::from_str(&std::fs::read_to_string(&app.ui_path).unwrap()).unwrap();
-        assert!(saved.bastions_open);
         assert_eq!(saved.open_nodes, vec![b]);
         std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn new_folders_start_closed() {
-        let mut st = Store::default();
-        let f = st.add_folder("new".into(), None);
-        assert!(!st.folder(f).unwrap().expanded);
-        let old: Store = serde_json::from_str(r#"{"next_id":1,"folders":[{"id":1,"name":"x"}],"servers":[]}"#).unwrap();
-        assert!(!old.folder(1).unwrap().expanded, "a folder saved without the flag is closed");
     }
 
     #[test]
     fn dropping_a_server_on_a_bastion_routes_it_through_that_bastion() {
         let mut app = app_with_servers(3);
         let (b, _, plain) = bastion_setup(&mut app);
-        app.bastions_open = true;
         app.rebuild();
         app.layout.sidebar = Rect::new(0, 0, 32, 40);
         app.layout.list = Rect::new(1, 5, 30, 30);
@@ -3171,7 +3167,6 @@ mod tests {
     fn a_new_server_from_a_bastion_row_starts_behind_it() {
         let mut app = app_with_servers(3);
         let (b, _, _) = bastion_setup(&mut app);
-        app.bastions_open = true;
         app.rebuild();
         app.selected = app.rows.iter().position(|r| r.node == NodeId::Server(b) && r.jump).unwrap();
         press(&mut app, KeyCode::Char('a'));

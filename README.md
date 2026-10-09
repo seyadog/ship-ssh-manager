@@ -87,9 +87,9 @@ Terminals live in a small background server (`ship daemon`) that starts by itsel
 The sidebar has two views, left to right: **Agents** and **SSH**. Press `v` (or click the header) to switch; or press `↑` on the first row and use `←` `→`: the view changes as you move, no `Enter` needed.
 
 - **Agents** — your project workspaces (see above).
-- **SSH** — your servers, organized in folders, in the upper half. The lower half, always starting at the middle of the sidebar, is the **bastions** section (it shows up once a server is reached through another; each half scrolls on its own): the bastions are its roots, and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. Fold it with `←` on its title. To start one, edit a server and set “Jump via”, or drag a server onto a bastion. Opening a server runs `ssh` through every hop.
+- **SSH** — your servers, organized in folders, in the upper half. The lower half, always starting at the middle of the sidebar, is the **bastions** section (it shows up once a server is reached through another; each half scrolls on its own): the bastions are its roots, and what sits behind each one is nested under it, so chains like `bastion → web → db` become a tree. The title is just a label, always there; what folds are the bastions in it (`→` / `←`). To start one, edit a server and set “Jump via”, or drag a server onto a bastion. Opening a server runs `ssh` through every hop.
 
-Everything starts **closed**: folders, the bastions section and each bastion. What you open stays open, also after you close ship (folders are remembered in `servers.json`, the rest in `state.json`).
+Everything starts **closed**: folders and each bastion. What you open stays open, also after you close ship (folders are remembered in `servers.json`, the bastions in `state.json`).
 
 The **tab bar** at the top is like a browser's: it shows every tab, SSH sessions and agent terminals alike (an agent's terminal carries its project's name). Pick one (click, `Alt+←/→`, `Alt+1..9`) and the sidebar jumps to its place.
 

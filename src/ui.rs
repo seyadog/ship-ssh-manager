@@ -310,10 +310,9 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
         match row.node {
             NodeId::Space(_) => {}
             NodeId::BastionsHeader => {
-                let arrow = if app.is_open(row) { "▾ " } else { "▸ " };
-                spans.push(Span::styled(arrow, Style::new().fg(MUTED)));
+                // A fixed label with a rule after it: only the bastions below it fold.
                 spans.push(Span::styled("bastions", Style::new().fg(MUTED).add_modifier(Modifier::BOLD)));
-                let rest = width.saturating_sub(indent.width() + 2 + "bastions".len() + 1);
+                let rest = width.saturating_sub(indent.width() + "bastions".len() + 1);
                 spans.push(Span::styled(format!(" {}", "─".repeat(rest)), Style::new().fg(MUTED)));
             }
             NodeId::Folder(id) => {
@@ -865,7 +864,7 @@ mod tests {
     }
 
     /// Draws an SSH view with `n` servers at the root plus one bastion with a server behind it.
-    fn drawn(n: usize, height: u16, open: bool) -> (App, Vec<String>) {
+    fn drawn(n: usize, height: u16) -> (App, Vec<String>) {
         use crate::store::{Server, Store};
         let mut st = Store::default();
         for i in 0..n {
@@ -889,7 +888,6 @@ mod tests {
         }
         let vault = crate::vault::Vault::new(std::env::temp_dir().join(format!("ship-ui-vault-{}", std::process::id())));
         let mut app = App::new(st, vault);
-        app.bastions_open = open;
         app.rebuild();
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -901,7 +899,7 @@ mod tests {
     #[test]
     fn the_bastions_start_at_the_middle_of_the_list() {
         for height in [20u16, 30, 41] {
-            let (app, lines) = drawn(3, height, true);
+            let (app, lines) = drawn(3, height);
             let (top, bottom) = (app.layout.list, app.layout.list_bottom);
             assert!(bottom.height > 0, "split at {height}");
             assert_eq!(top.height, (top.height + bottom.height).div_ceil(2), "the upper half is half the list ({height})");
@@ -914,7 +912,7 @@ mod tests {
 
     #[test]
     fn the_lower_half_scrolls_on_its_own_and_follows_the_selection() {
-        let (mut app, _) = drawn(12, 26, true);
+        let (mut app, _) = drawn(12, 26);
         // Open the bastion so the lower half has more rows than it can show, then go to its last row.
         app.jump_open.insert(app.store.servers[0].id);
         app.rebuild();
@@ -928,7 +926,7 @@ mod tests {
 
     #[test]
     fn without_bastions_the_list_is_not_split() {
-        let (app, lines) = drawn(1, 30, true);
+        let (app, lines) = drawn(1, 30);
         assert_eq!(app.layout.list_bottom.height, 0);
         assert!(!lines.iter().any(|l| l.contains("bastions")));
     }
