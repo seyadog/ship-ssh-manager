@@ -20,24 +20,10 @@ const GREEN: Color = Color::Rgb(158, 206, 106);
 const AMBER: Color = Color::Rgb(224, 175, 104);
 const REMOTE_GREEN: Color = Color::Rgb(187, 154, 247);
 const REMOTE_GREEN_BRIGHT: Color = Color::Rgb(208, 184, 255);
-/// One colour per project, taken from oso's own palette and as far apart from each other as possible.
-const PASTELS: [(u8, u8, u8); 8] = [
-    (122, 162, 247), // blue
-    (247, 118, 142), // red
-    (158, 206, 106), // green
-    (224, 175, 104), // amber
-    (187, 154, 247), // lilac
-    (125, 207, 255), // cyan
-    (255, 150, 100), // orange
-    (115, 218, 180), // teal
-];
-
-fn space_color(id: u64, live: bool) -> Color {
-    let (r, g, b) = PASTELS[(id as usize) % PASTELS.len()];
-    // Idle spaces keep their hue but wash out towards grey (fading to black would turn yellows brown).
-    let k = if live { 1.0 } else { 0.45 };
-    let fade = |c: u8, grey: f32| (c as f32 * k + grey * (1.0 - k)) as u8;
-    Color::Rgb(fade(r, 80.0), fade(g, 82.0), fade(b, 100.0))
+/// A project's mark: the accent while something runs in it, grey while idle. The only colours of the
+/// interface are the blue accent, greys, and green / amber / red for states.
+fn space_color(live: bool) -> Color {
+    if live { ACCENT } else { MUTED }
 }
 
 const RED: Color = Color::Rgb(247, 118, 142);
@@ -80,6 +66,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let side_w = (folded * 3 + (2 - folded) * col_w).min(area.width / 2);
     let [side, right] = RLayout::horizontal([Constraint::Length(side_w), Constraint::Min(1)]).areas(main);
     let [tabbar, content] = RLayout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(right);
+    // One blank column between the sidebar (or the line between two groups) and the terminal.
+    let content = Rect::new(content.x + 1, content.y, content.width.saturating_sub(1), content.height);
 
     app.layout.sidebar = side;
     app.layout.tabbar = tabbar;
@@ -97,6 +85,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let rrect = Rect::new(drect.x + 1, right.y, right.width.saturating_sub(left_w + 1), right.height);
         let [lbar, lcont] = RLayout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(lrect);
         let [rbar, rcont] = RLayout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(rrect);
+        let pad = |r: Rect| Rect::new(r.x + 1, r.y, r.width.saturating_sub(1), r.height);
+        let (lcont, rcont) = (pad(lcont), pad(rcont));
         app.layout.divider = drect;
         app.layout.panes = [lcont, rcont];
         let focus_right = app.tabs.get(app.active).is_some_and(|t| t.right);
@@ -146,7 +136,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let title = if app.fold[i] {
             Rect::default()
         } else {
-            Rect::new(rects[i].x + 1, rects[i].y, (names[i].width() as u16 + 2).min(rects[i].width.saturating_sub(2)), 1)
+            Rect::new(rects[i].x, rects[i].y, (names[i].width() as u16 + 2).min(rects[i].width.saturating_sub(1)), 1)
         };
         app.layout.toolbar.push((title, HEADER[i]));
     }
@@ -175,36 +165,45 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
         return;
     }
     app.layout.cols[i] = area;
-    let border = if active && focused { ACCENT } else if active { Color::Rgb(96, 112, 170) } else { MUTED };
-    let title = Span::styled(format!(" {name} "), Style::new().fg(if active { ACCENT } else { MUTED }).add_modifier(Modifier::BOLD));
-    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(border)).title(title);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.height < 4 {
+    if area.height < 5 || area.width < 8 {
         return;
     }
-    // At the bottom, a row of buttons (the last one folds the column), and one row of air above it.
-    let by = inner.y + inner.height - 1;
-    let buttons: [(&str, Hit); 3] = if i == 0 {
-        [("+Proj", Hit::NewProject), ("Edit", Hit::Edit), ("Term", Hit::Term)]
+    // No frames: the title, the list, a row of actions at the bottom, and a faint line on the right edge.
+    let edge = Style::new().fg(Color::Rgb(44, 50, 74));
+    for y in area.y..area.y + area.height {
+        f.render_widget(Paragraph::new("│").style(edge), Rect::new(area.x + area.width - 1, y, 1, 1));
+    }
+    let title_style = if active && focused {
+        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else if active {
+        Style::new().fg(FG).add_modifier(Modifier::BOLD)
     } else {
-        [("+Serv", Hit::NewServer), ("Edit", Hit::Edit), ("Vault", Hit::Vault)]
+        Style::new().fg(MUTED)
     };
-    let mut bx = inner.x;
-    for (label, hit) in buttons {
+    f.render_widget(Paragraph::new(format!(" {name}")).style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
+    let inner = Rect::new(area.x + 1, area.y + 2, area.width - 3, area.height - 3);
+    // The actions of the column, as plain words; the last one folds the column.
+    let by = area.y + area.height - 1;
+    let actions: [(&str, Hit); 3] = if i == 0 {
+        [("+ new", Hit::NewProject), ("edit", Hit::Edit), ("term", Hit::Term)]
+    } else {
+        [("+ new", Hit::NewServer), ("edit", Hit::Edit), ("vault", Hit::Vault)]
+    };
+    let mut bx = area.x + 1;
+    for (n, (label, hit)) in actions.into_iter().enumerate() {
         let w = label.width() as u16;
-        if bx + w + 2 > inner.x + inner.width {
+        if bx + w + 4 > area.x + area.width - 1 {
             break;
         }
         let r = Rect::new(bx, by, w, 1);
-        f.render_widget(Paragraph::new(label).style(Style::new().fg(FG).bg(SEL_BG)), r);
+        f.render_widget(Paragraph::new(label).style(Style::new().fg(if n == 0 { ACCENT } else { MUTED })), r);
         app.layout.toolbar.push((r, hit));
-        bx += w + 1;
+        bx += w + 2;
     }
-    let fold = Rect::new(inner.x + inner.width - 2, by, 2, 1);
-    f.render_widget(Paragraph::new(" ‹").style(Style::new().fg(MUTED)), fold);
+    let fold = Rect::new(area.x + area.width - 4, by, 3, 1);
+    f.render_widget(Paragraph::new(" ‹ ").style(Style::new().fg(MUTED)), fold);
     app.layout.toolbar.push((fold, Hit::Fold(i)));
-    let list = Rect::new(inner.x, inner.y, inner.width, inner.height - 2);
+    let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
     if active {
         draw_active_list(f, app, list, focused);
     } else {
@@ -215,38 +214,20 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
 /// Where the parts of a list go in its column: projects as two-line blocks (tighter when there are many),
 /// with the folders below (up to half the list); the servers' bastions below, from the middle.
 fn list_geom(rows: &[Row], view: View, list: Rect) -> ListGeom {
-    let in_spaces = view == View::Spaces;
+    let _ = view;
     let header = rows.iter().position(|r| r.node == NodeId::BastionsHeader);
-    let bottom_lines = if in_spaces { header.map(|h| ((rows.len() - h) as u16).min(list.height / 2)).unwrap_or(0) } else { 0 };
-    let row_h: u16 = if in_spaces {
-        let n = header.unwrap_or(rows.len()) as u16;
-        let h = list.height.saturating_sub(bottom_lines);
-        if n * 3 <= h + 1 {
-            3
-        } else if n * 2 <= h {
-            2
-        } else {
-            1
-        }
-    } else {
-        1
-    };
     let split = if list.height >= 6 { header } else { None };
     let (top, bottom) = match split {
-        Some(_) => {
-            let top_h = if in_spaces { list.height - bottom_lines } else { list.height.div_ceil(2) };
+        // The part below (folders, bastions) starts right after the top one, with a blank line between, and
+        // takes at most half of the column.
+        Some(h) => {
+            let bottom_lines = ((rows.len() - h) as u16).min(list.height / 2);
+            let top_h = (h as u16 + 1).min(list.height - bottom_lines);
             (Rect::new(list.x, list.y, list.width, top_h), Rect::new(list.x, list.y + top_h, list.width, list.height - top_h))
         }
         None => (list, Rect::default()),
     };
-    ListGeom {
-        top,
-        bottom,
-        split,
-        row_h,
-        bottom_row_h: if in_spaces { 1 } else { row_h },
-        top_count: split.unwrap_or(rows.len()),
-    }
+    ListGeom { top, bottom, split, row_h: 1, bottom_row_h: 1, top_count: split.unwrap_or(rows.len()) }
 }
 
 /// The list of the column that is not the active view. It is laid out exactly like the active one, from
@@ -369,9 +350,9 @@ fn draw_rows(
             let attention = app.tabs.iter().filter(mine).any(|t| t.attention);
             // One line: a coloured spine for the state, the name, and the branch (or directory) on the right.
             // The name turns green when the agent has finished; the spine keeps the space's own colour.
-            let color = space_color(id, live);
+            let color = space_color(live);
             let (mut text, tone) = match app.branches.get(&id) {
-                Some(b) => (b.clone(), REMOTE_GREEN),
+                Some(b) => (b.clone(), MUTED),
                 None => (cwd, MUTED),
             };
             // A filed project that is on top says which folder it belongs to.
@@ -425,29 +406,6 @@ fn draw_rows(
                 }
                 out
             };
-            if row_h >= 2 {
-                // Two lines under a square bar: the name (and the agent on the right), then the branch.
-                let bar = || Span::styled("██", Style::new().fg(color).bg(bg));
-                let mut first = vec![
-                    bar(),
-                    Span::styled(
-                        format!(" {}", fit(&name, width.saturating_sub(4))),
-                        style.fg(if attention { GREEN } else { FG }).add_modifier(Modifier::BOLD),
-                    ),
-                ];
-                let shown = fit_tags(width.saturating_sub(3 + name_w + 2));
-                if !shown.is_empty() {
-                    let w = tags_width(&shown);
-                    first.push(Span::styled(" ".repeat(width.saturating_sub(3 + name_w + w)), Style::new().bg(bg)));
-                    first.extend(tag_spans(shown));
-                }
-                let second = vec![bar(), Span::styled(format!(" {}", fit(&text, width.saturating_sub(4))), Style::new().fg(tone).bg(bg))];
-                f.render_widget(
-                    Paragraph::new(vec![Line::from(first), Line::from(second)]).style(Style::new().bg(bg)),
-                    Rect::new(area.x, y, area.width, 2),
-                );
-                continue;
-            }
             let mut spans = vec![
                 Span::styled("▆", Style::new().fg(color).bg(bg)),
                 Span::styled(
@@ -503,8 +461,8 @@ fn draw_rows(
                 };
                 let count = format!(" ({}){}", inside.len(), mark);
                 let label = fit(name, width.saturating_sub(indent.width() + 2 + count.width()));
-                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(AMBER)));
-                spans.push(Span::styled(label, Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(MUTED)));
+                spans.push(Span::styled(label, Style::new().fg(FG).add_modifier(Modifier::BOLD)));
                 spans.push(Span::styled(format!(" ({})", inside.len()), Style::new().fg(MUTED)));
                 if !mark.is_empty() {
                     spans.push(Span::styled(mark, Style::new().fg(mc).add_modifier(Modifier::BOLD)));
@@ -522,8 +480,8 @@ fn draw_rows(
                 let open = fo.is_some_and(|f| f.expanded);
                 let name = fo.map(|f| f.name.as_str()).unwrap_or("?");
                 let label = fit(name, width.saturating_sub(indent.width() + 3));
-                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(AMBER)));
-                spans.push(Span::styled(label, Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(MUTED)));
+                spans.push(Span::styled(label, Style::new().fg(FG).add_modifier(Modifier::BOLD)));
             }
             NodeId::Server(id) => {
                 let s = app.store.server(id);
@@ -532,7 +490,7 @@ fn draw_rows(
                 let label = fit(name, width.saturating_sub(indent.width() + 3));
                 if app.has_children(row) {
                     let arrow = if app.is_open(row) { "▾ " } else { "▸ " };
-                    spans.push(Span::styled(arrow, Style::new().fg(ACCENT)));
+                    spans.push(Span::styled(arrow, Style::new().fg(MUTED)));
                 } else {
                     spans.push(Span::styled(
                         if live { "◆ " } else { "◇ " },
@@ -894,18 +852,15 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let text = if let Some((msg, _)) = &app.flash {
         return f.render_widget(Paragraph::new(format!(" {msg}")).style(Style::new().fg(AMBER)), area);
     } else if app.modal.is_some() {
-        "Esc cancel".to_string()
+        "Esc cancel"
     } else if app.focus == Focus::Terminal {
-        "Alt+Q panel · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close · F2 rename · drag: select+copy · Shift+PgUp/PgDn/Home/End history".to_string()
+        "Alt+Q panel · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close · Alt+B fold panel"
     } else if app.header.is_some() {
-        "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
-    } else if app.view == View::Spaces && app.header.is_none() {
-        "↑↓ choose · Enter open · a new project · f folder · m move to folder · e rename · d delete · t terminal · Alt+n next agent · q quit".to_string()
-    } else if app.header.is_some() {
-        "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
+        "←→ choose column · Esc back to the list"
+    } else if app.view == View::Spaces {
+        "↑↓ move · Enter open · a add · e rename · d delete · Tab servers · / search · q quit"
     } else {
-        "↑↓ move · ↑ top: column titles · Tab other column · / or Alt+K search · Alt+B fold columns · 1-9 go to tab · t terminal · → in · ← out · Enter open · v view · a server · f folder · e edit · d delete · c close tab · p passwords · q quit"
-            .to_string()
+        "↑↓ move · Enter open · a add · e edit · d delete · Tab projects · / search · q quit"
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);
 }
@@ -1245,14 +1200,15 @@ mod tests {
     }
 
     #[test]
-    fn the_bastions_start_at_the_middle_of_the_list() {
+    fn the_bastions_start_right_after_the_servers() {
         for height in [20u16, 30, 41] {
             let (app, lines) = drawn(3, height);
             let (top, bottom) = (app.layout.list, app.layout.list_bottom);
             assert!(bottom.height > 0, "split at {height}");
-            assert_eq!(top.height, (top.height + bottom.height).div_ceil(2), "the upper half is half the list ({height})");
+            let header = app.split_index().unwrap();
+            assert_eq!(top.height as usize, header + 1, "the top part holds the servers and one blank line ({height})");
             assert_eq!(bottom.y, top.y + top.height);
-            assert!(lines[bottom.y as usize].contains("bastions"), "the title is the first line of the lower half ({height})");
+            assert!(lines[bottom.y as usize].contains("bastions"), "the title is the first line of the lower part ({height})");
             let title_rows = lines.iter().filter(|l| l.contains("bastions")).count();
             assert_eq!(title_rows, 1);
         }
