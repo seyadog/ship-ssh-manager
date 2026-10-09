@@ -731,30 +731,26 @@ const BEAR: [&str; 16] = [
     "       ########       ",
 ];
 
-/// The name, with the s bigger than the two o's.
-const WORDMARK: [&str; 5] = [
-    "    ┏━━━━      ",
-    "    ┃          ",
-    "┏━┓ ┗━━━┓ ┏━┓",
-    "┃ ┃     ┃ ┃ ┃",
-    "┗━┛ ━━━━┛ ┗━┛",
+/// The name in the same pixels, with the s bigger than the two o's: o (4 wide), s (6 wide), o.
+const WORDMARK: [&str; 8] = [
+    "     .####     ",
+    "     #....     ",
+    "     #....     ",
+    "     .###.     ",
+    ".##. ....# .##.",
+    "#..# ....# #..#",
+    "#..# ....# #..#",
+    ".##. ####. .##.",
 ];
 
-fn bear_lines() -> Vec<Line<'static>> {
-    let color = |c: char| match c {
-        '#' => Some(ACCENT),
-        'o' => Some(Color::Rgb(187, 154, 247)),
-        'i' => Some(Color::Rgb(240, 198, 240)),
-        'E' => Some(Color::Rgb(20, 21, 30)),
-        'w' => Some(Color::Rgb(255, 255, 255)),
-        's' => Some(Color::Rgb(214, 224, 255)),
-        'n' => Some(Color::Rgb(20, 21, 30)),
-        _ => None,
-    };
-    let at = |row: usize, col: usize| BEAR.get(row).and_then(|r| r.chars().nth(col)).and_then(color);
-    (0..BEAR.len() / 2)
+/// Two pixel rows make one terminal row (half blocks). `color` says what a pixel's character is painted with
+/// (`None`: nothing).
+fn pixel_lines(grid: &[&str], color: impl Fn(char) -> Option<Color>) -> Vec<Line<'static>> {
+    let width = grid.iter().map(|r| r.chars().count()).max().unwrap_or(0);
+    let at = |row: usize, col: usize| grid.get(row).and_then(|r| r.chars().nth(col)).and_then(&color);
+    (0..grid.len().div_ceil(2))
         .map(|line| {
-            let spans: Vec<Span<'static>> = (0..22)
+            let spans: Vec<Span<'static>> = (0..width)
                 .map(|col| match (at(line * 2, col), at(line * 2 + 1, col)) {
                     (None, None) => Span::raw(" "),
                     (Some(t), None) => Span::styled("▀", Style::new().fg(t)),
@@ -767,9 +763,26 @@ fn bear_lines() -> Vec<Line<'static>> {
         .collect()
 }
 
+fn bear_lines() -> Vec<Line<'static>> {
+    pixel_lines(&BEAR, |c| match c {
+        '#' => Some(ACCENT),
+        'o' => Some(Color::Rgb(187, 154, 247)),
+        'i' => Some(Color::Rgb(240, 198, 240)),
+        'E' | 'n' => Some(Color::Rgb(20, 21, 30)),
+        'w' => Some(Color::Rgb(255, 255, 255)),
+        's' => Some(Color::Rgb(214, 224, 255)),
+        _ => None,
+    })
+}
+
+fn wordmark_lines() -> Vec<Line<'static>> {
+    pixel_lines(&WORDMARK, |c| (c == '#').then_some(ACCENT))
+}
+
 fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = bear_lines();
-    lines.extend(WORDMARK.iter().map(|l| Line::from(Span::styled(*l, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)))));
+    lines.push(Line::raw(""));
+    lines.extend(wordmark_lines());
     lines.push(Line::raw(""));
     let hints: Vec<String> = match app.scope {
         Scope::Ssh => vec![
