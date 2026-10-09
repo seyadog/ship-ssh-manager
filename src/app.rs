@@ -1907,7 +1907,8 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let n = self.tabs.len();
         match key.code {
-            KeyCode::F(6) | KeyCode::Char('q') if alt || key.code == KeyCode::F(6) => {
+            KeyCode::F(6) => return self.cycle_focus(if shift { -1 } else { 1 }),
+            KeyCode::Char('q') if alt => {
                 self.focus = if self.focus == Focus::Terminal || self.blank() { Focus::Sidebar } else { Focus::Terminal };
                 return;
             }
@@ -2413,6 +2414,47 @@ impl App {
             _ => {}
         }
         Some(Modal::Picker(p, f))
+    }
+
+    /// F6 / Shift+F6: the keyboard goes to the next (or previous) area on screen: the Projects column, the
+    /// Servers column and the terminal (both terminals when the screen is split). Folded columns are skipped.
+    fn cycle_focus(&mut self, d: isize) {
+        #[derive(PartialEq, Clone, Copy)]
+        enum Zone {
+            Column(View),
+            Terminal(bool),
+        }
+        let mut zones = vec![];
+        for (i, view) in [(0, View::Spaces), (1, View::Folders)] {
+            if !self.fold[i] {
+                zones.push(Zone::Column(view));
+            }
+        }
+        if self.is_split() {
+            zones.extend([Zone::Terminal(false), Zone::Terminal(true)]);
+        } else if !self.tabs.is_empty() {
+            zones.push(Zone::Terminal(false));
+        }
+        let here = if self.focus == Focus::Terminal {
+            Zone::Terminal(self.tabs.get(self.active).is_some_and(|t| t.right))
+        } else {
+            Zone::Column(self.view)
+        };
+        let at = zones.iter().position(|&z| z == here).unwrap_or(0) as isize;
+        let Some(&to) = zones.get((at + d).rem_euclid(zones.len().max(1) as isize) as usize) else { return };
+        self.header = None;
+        match to {
+            Zone::Column(view) => {
+                self.set_view(view);
+                self.focus = Focus::Sidebar;
+            }
+            Zone::Terminal(right) => {
+                if let Some(i) = self.pane_tab(right) {
+                    self.active = i;
+                    self.focus = Focus::Terminal;
+                }
+            }
+        }
     }
 
     /// Alt+B: folds both columns of the sidebar away, or brings them back.
@@ -3413,6 +3455,31 @@ mod tests {
         // Folding the active column hands the keyboard to the other one.
         app.fold_column(1);
         assert_eq!((app.fold, app.view), ([false, true], View::Spaces));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn f6_goes_round_projects_servers_and_the_terminal() {
+        let (mut app, _, dir) = app_with_two_tabs();
+        app.focus = Focus::Sidebar;
+        app.set_view(View::Spaces);
+        let f6 = |app: &mut App, shift: bool| {
+            app.on_key(KeyEvent::new(KeyCode::F(6), if shift { KeyModifiers::SHIFT } else { KeyModifiers::NONE }))
+        };
+        f6(&mut app, false);
+        assert_eq!((app.view, app.focus), (View::Folders, Focus::Sidebar), "Projects -> Servers");
+        f6(&mut app, false);
+        assert_eq!(app.focus, Focus::Terminal, "Servers -> the terminal");
+        f6(&mut app, false);
+        assert_eq!((app.view, app.focus), (View::Spaces, Focus::Sidebar), "and round to Projects");
+        f6(&mut app, true);
+        assert_eq!(app.focus, Focus::Terminal, "Shift+F6 goes back");
+        // A folded column is skipped.
+        app.fold_column(0);
+        app.focus = Focus::Sidebar;
+        f6(&mut app, false);
+        assert_eq!(app.focus, Focus::Terminal, "only Servers and the terminal are left");
         std::fs::remove_dir_all(dir).ok();
     }
 

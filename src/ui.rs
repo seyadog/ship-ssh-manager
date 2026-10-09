@@ -868,13 +868,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.modal.is_some() {
         "Esc cancel"
     } else if app.focus == Focus::Terminal {
-        "Alt+Q panel · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close · Alt+B fold panel"
+        "F6 next area · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close · Alt+B fold panel"
     } else if app.header.is_some() {
         "←→ choose column · Esc back to the list"
     } else if app.view == View::Spaces {
-        "↑↓ move · Enter open · a add · e rename · d delete · Tab servers · / search · q quit"
+        "↑↓ move · Enter open · a add · e rename · d delete · Tab servers · F6 next area · / search · q quit"
     } else {
-        "↑↓ move · Enter open · a add · e edit · d delete · Tab projects · / search · q quit"
+        "↑↓ move · Enter open · a add · e edit · d delete · Tab projects · F6 next area · / search · q quit"
     };
     f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);
 }
