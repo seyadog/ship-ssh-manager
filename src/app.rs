@@ -3757,7 +3757,7 @@ mod tests {
         app.open_space(id);
         app.set_view(View::Folders);
         app.open_server(LOCAL);
-        assert_eq!((app.tabs.len(), app.active, app.view), (2, 1, View::Folders));
+        assert_eq!((app.tabs.len(), app.active, app.view), (2, 1, View::Folders), "tabs: {:?}", app.tabs.iter().map(|t| (t.scope, t.session.exit_code)).collect::<Vec<_>>());
         (app, id, dir)
     }
 
