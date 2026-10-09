@@ -2033,6 +2033,15 @@ impl App {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if alt => self.shift_selected(-1),
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
+            // Past the first row of Servers: the last row of Projects (and the other way round past the last one).
+            KeyCode::Up | KeyCode::Char('k') if self.selected == 0 && self.view == View::Folders => {
+                self.set_view(View::Spaces);
+                self.selected = self.rows.len().saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.selected >= last && self.view == View::Spaces => {
+                self.set_view(View::Folders);
+                self.selected = 0;
+            }
             KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => self.header = Some(self.view_index()),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
@@ -3411,34 +3420,26 @@ mod tests {
     }
 
     #[test]
-    fn up_from_the_first_row_reaches_the_column_titles_and_down_returns() {
+    fn arrows_cross_between_servers_and_projects_and_reach_the_titles() {
         let mut app = app_with_servers(2);
+        let dir = temp_dir("cross");
+        app.spaces.add("proj".into(), dir.display().to_string());
+        app.rebuild();
+        press(&mut app, KeyCode::Up);
+        assert_eq!((app.view, app.selected), (View::Spaces, 0), "Up from the first server: the last project");
         press(&mut app, KeyCode::Down);
-        assert_eq!((app.selected, app.header), (1, None));
+        assert_eq!((app.view, app.selected), (View::Folders, 0), "Down from the last project: the first server");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.view, View::Spaces, "Tab switches too");
         press(&mut app, KeyCode::Up);
-        press(&mut app, KeyCode::Up);
-        assert_eq!((app.header, app.view), (Some(1), View::Folders), "the title of the active column is the first stop");
-        press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(1), "nothing above the titles");
+        assert_eq!((app.header, app.view), (Some(0), View::Spaces), "Up from the first project: the title");
+        press(&mut app, KeyCode::Right);
+        assert_eq!((app.header, app.view), (Some(1), View::Folders), "Right on the titles: Servers");
+        press(&mut app, KeyCode::Left);
+        assert_eq!((app.header, app.view), (Some(0), View::Spaces), "and back to Projects");
         press(&mut app, KeyCode::Down);
-        assert_eq!(app.header, None, "back on the list");
-    }
-
-    /// The arrows alone switch column: no Enter needed.
-    #[test]
-    fn arrows_on_the_titles_switch_column_without_enter() {
-        let mut app = app_with_servers(1);
-        press(&mut app, KeyCode::Up);
-        assert_eq!((app.header, app.view), (Some(1), View::Folders));
-        press(&mut app, KeyCode::Left);
-        assert_eq!((app.header, app.view), (Some(0), View::Spaces), "Projects is to the left of Servers");
-        press(&mut app, KeyCode::Left);
-        assert_eq!((app.header, app.view), (Some(0), View::Spaces), "stops at the first");
-        press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Right);
-        assert_eq!((app.header, app.view), (Some(1), View::Folders), "Servers is the last column");
-        press(&mut app, KeyCode::Left);
-        assert_eq!(app.view, View::Spaces, "and back");
+        assert_eq!(app.header, None, "Down returns to the list");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
