@@ -560,13 +560,9 @@ pub enum Modal {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hit {
     ViewFolders,
-    NewProject,
     NewServer,
     Edit,
-    Term,
     Vault,
-    /// Folds a column of the sidebar away (0: Projects, 1: Servers) or brings it back.
-    Fold(usize),
     ViewSpaces,
     NewTab,
     NewTabRight,
@@ -1913,7 +1909,6 @@ impl App {
                 return;
             }
             KeyCode::F(2) if n > 0 => return self.rename_tab_prompt(),
-            KeyCode::Char('b') if alt => return self.toggle_panel(),
             KeyCode::F(8) => return self.toggle_theme(),
             KeyCode::Char('k') if alt => return self.open_search(),
             KeyCode::Char('p') if alt && self.sudo_ready() => {
@@ -1968,24 +1963,12 @@ impl App {
         }
     }
 
-    /// The header item (index into `HEADER`) of the current view.
-    fn view_index(&self) -> usize {
-        match self.view {
-            View::Spaces => 0,
-            View::Folders => 1,
-        }
-    }
-
     /// Runs a sidebar header button (by mouse or keyboard).
     fn activate(&mut self, hit: Hit) {
         match hit {
             Hit::ViewFolders => self.set_view(View::Folders),
-            Hit::ViewSpaces => self.set_view(View::Spaces),
-            Hit::NewProject => self.new_space(),
             Hit::NewServer => self.new_server_form(),
-            Hit::Term => self.open_server(LOCAL),
             Hit::Vault => self.modal = self.gate(Pending::OpenVault),
-            Hit::Fold(i) => self.fold_column(i),
             Hit::Edit => self.edit_selected(),
             Hit::NewTab => self.new_tab_here(),
             Hit::NewTabRight => {
@@ -1998,43 +1981,13 @@ impl App {
         }
     }
 
-    /// Moves the menu highlight. On the views it also opens the view, so the arrows are enough to switch.
-    fn move_in_menu(&mut self, to: usize, buttons: bool) {
-        self.header = Some(to);
-        if !buttons {
-            self.activate(HEADER[to]);
-        }
-    }
-
-    /// Keys while the menu has focus: the views above the list or the buttons below it. Returns true if the
-    /// key was consumed.
-    fn header_key(&mut self, i: usize, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Left | KeyCode::Char('h') => self.move_in_menu(i.saturating_sub(1), false),
-            KeyCode::Right | KeyCode::Char('l') => self.move_in_menu((i + 1).min(HEADER.len() - 1), false),
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Esc => self.header = None,
-            KeyCode::Up | KeyCode::Char('k') => {}
-            // On a column title Enter is just a way to (re)open it.
-            KeyCode::Enter | KeyCode::Char(' ') => self.activate(HEADER[i]),
-            _ => return false,
-        }
-        true
-    }
-
     fn sidebar_key(&mut self, key: KeyEvent) {
-        if let Some(i) = self.header {
-            if self.header_key(i, key) {
-                return;
-            }
-            self.header = None;
-        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let last = self.rows.len().saturating_sub(1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if alt => self.shift_selected(-1),
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
-            KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => self.header = Some(self.view_index()),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
@@ -2055,10 +2008,6 @@ impl App {
                 Some(row @ Row { node: NodeId::Folder(_) | NodeId::SpaceFolder(_), .. }) => self.toggle(row),
                 Some(Row { node: NodeId::BastionsHeader, .. }) | None => {}
             },
-            KeyCode::Char('v') | KeyCode::Tab => self.set_view(match self.view {
-                View::Spaces => View::Folders,
-                View::Folders => View::Spaces,
-            }),
             KeyCode::Char(c @ '1'..='9') if !ctrl && !alt => self.goto_tab(c as usize - '1' as usize),
             KeyCode::Char('t') => self.open_server(LOCAL),
             KeyCode::Char('n') => {
@@ -2426,11 +2375,7 @@ impl App {
             Terminal(bool),
         }
         let mut zones = vec![];
-        for (i, view) in [(0, View::Spaces), (1, View::Folders)] {
-            if !self.fold[i] {
-                zones.push(Zone::Column(view));
-            }
-        }
+        zones.push(Zone::Column(View::Folders));
         if self.is_split() {
             zones.extend([Zone::Terminal(false), Zone::Terminal(true)]);
         } else if !self.tabs.is_empty() {
@@ -2464,36 +2409,6 @@ impl App {
         crate::ui::set_theme(terminal);
         crate::settings::save_theme(if terminal { "terminal" } else { "classic" });
         self.set_flash(if terminal { "Theme: pastel colours on your terminal's background" } else { "Theme: classic colours" });
-    }
-
-    /// Alt+B: folds both columns of the sidebar away, or brings them back.
-    fn toggle_panel(&mut self) {
-        let all = !self.fold.iter().all(|&f| f);
-        self.fold = [all; 2];
-        self.header = None;
-        if all && !self.blank() {
-            self.focus = Focus::Terminal;
-        } else if !all {
-            self.focus = Focus::Sidebar;
-        }
-    }
-
-    /// Folds one column away (0: Projects, 1: Servers) or brings it back. The one left stays the active view.
-    fn fold_column(&mut self, i: usize) {
-        let view = if i == 0 { View::Spaces } else { View::Folders };
-        self.fold[i] = !self.fold[i];
-        self.header = None;
-        if self.fold[i] {
-            if self.view == view && !self.fold[1 - i] {
-                self.set_view(if i == 0 { View::Folders } else { View::Spaces });
-            }
-            if self.fold.iter().all(|&f| f) && !self.blank() {
-                self.focus = Focus::Terminal;
-            }
-        } else {
-            self.set_view(view);
-            self.focus = Focus::Sidebar;
-        }
     }
 
     /// The column of the sidebar under (x, y), as the view it shows.
@@ -3424,77 +3339,32 @@ mod tests {
     }
 
     #[test]
-    fn up_from_the_first_row_reaches_the_column_titles_and_down_returns() {
+    fn there_is_one_column_that_cannot_be_folded_or_switched() {
         let mut app = app_with_servers(2);
         press(&mut app, KeyCode::Down);
-        assert_eq!((app.selected, app.header), (1, None));
         press(&mut app, KeyCode::Up);
         press(&mut app, KeyCode::Up);
-        assert_eq!((app.header, app.view), (Some(1), View::Folders), "the title of the active column is the first stop");
-        press(&mut app, KeyCode::Up);
-        assert_eq!(app.header, Some(1), "nothing above the titles");
-        press(&mut app, KeyCode::Down);
-        assert_eq!(app.header, None, "back on the list");
-    }
-
-    /// The arrows alone switch column: no Enter needed.
-    #[test]
-    fn arrows_on_the_titles_switch_column_without_enter() {
-        let mut app = app_with_servers(1);
-        press(&mut app, KeyCode::Up);
-        assert_eq!((app.header, app.view), (Some(1), View::Folders));
-        press(&mut app, KeyCode::Left);
-        assert_eq!((app.header, app.view), (Some(0), View::Spaces), "Projects is to the left of Servers");
-        press(&mut app, KeyCode::Left);
-        assert_eq!((app.header, app.view), (Some(0), View::Spaces), "stops at the first");
-        press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Right);
-        assert_eq!((app.header, app.view), (Some(1), View::Folders), "Servers is the last column");
-        press(&mut app, KeyCode::Left);
-        assert_eq!(app.view, View::Spaces, "and back");
-    }
-
-    #[test]
-    fn both_lists_are_built_and_a_column_can_be_folded() {
-        let mut app = app_with_servers(2);
-        assert!(!app.rows.is_empty(), "the active view (Servers) has its rows");
-        assert!(app.other_rows.is_empty(), "no projects yet");
-        let dir = temp_dir("cols");
-        app.spaces.add("proj".into(), dir.display().to_string());
-        app.rebuild();
-        assert_eq!(app.other_rows.len(), 1, "the other column has its own rows");
+        assert_eq!((app.selected, app.header), (0, None), "Up stops at the first row");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.view, View::Folders, "Tab does not switch to another list");
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(app.fold, [true, true]);
-        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(app.fold, [false, false]);
-        // Folding the active column hands the keyboard to the other one.
-        app.fold_column(1);
-        assert_eq!((app.fold, app.view), ([false, true], View::Spaces));
-        std::fs::remove_dir_all(dir).ok();
+        assert_eq!(app.fold, [false, false], "Alt+B does not fold the column");
     }
 
     #[test]
     #[cfg(unix)]
-    fn f6_goes_round_projects_servers_and_the_terminal() {
+    fn f6_goes_round_servers_and_the_terminal() {
         let (mut app, _, dir) = app_with_two_tabs();
         app.focus = Focus::Sidebar;
-        app.set_view(View::Spaces);
         let f6 = |app: &mut App, shift: bool| {
             app.on_key(KeyEvent::new(KeyCode::F(6), if shift { KeyModifiers::SHIFT } else { KeyModifiers::NONE }))
         };
         f6(&mut app, false);
-        assert_eq!((app.view, app.focus), (View::Folders, Focus::Sidebar), "Projects -> Servers");
-        f6(&mut app, false);
         assert_eq!(app.focus, Focus::Terminal, "Servers -> the terminal");
         f6(&mut app, false);
-        assert_eq!((app.view, app.focus), (View::Spaces, Focus::Sidebar), "and round to Projects");
+        assert_eq!((app.view, app.focus), (View::Folders, Focus::Sidebar), "and round to Servers");
         f6(&mut app, true);
         assert_eq!(app.focus, Focus::Terminal, "Shift+F6 goes back");
-        // A folded column is skipped.
-        app.fold_column(0);
-        app.focus = Focus::Sidebar;
-        f6(&mut app, false);
-        assert_eq!(app.focus, Focus::Terminal, "only Servers and the terminal are left");
         std::fs::remove_dir_all(dir).ok();
     }
 
