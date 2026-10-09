@@ -95,7 +95,9 @@ The sidebar has two views, left to right: **Projects** and **SSH**. Press `v` (o
 
 Everything starts **closed**: folders and each bastion. What you open stays open, also after you close ship (folders are remembered in `servers.json`, the bastions in `state.json`).
 
-The **tab bar** at the top is like a browser's: it shows every tab, SSH sessions and agent terminals alike (an agent's terminal carries its project's name). Pick one (click, `Alt+←/→`, `Alt+1..9`) and the sidebar jumps to its place.
+The **tab bar** at the top is like a browser's: it shows every tab, SSH sessions and agent terminals alike (an agent's terminal carries its project's name). Pick one (click, `Alt+←/→`, `Alt+1..9`, `Alt+0`) and the sidebar jumps to its place.
+
+**Two groups side by side:** `Alt+Shift+→` sends the active tab to a right group (the screen splits in half, each group with its own bar), `Alt+Shift+←` sends it back. Drag the line between them to resize; drag a tab onto the other group to move it. A group that loses its last tab disappears. The numbers run through the left group and on into the right one.
 
 ## Keyboard (sidebar)
 
@@ -117,7 +119,7 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or a bastion, `
 | `p` | open the password vault |
 | `q` | quit |
 
-**Global:** `Alt+n` jump to the agent that wants attention (or the next one) · `Alt+Q` (or `F6`) panel ⇄ terminal · `Alt+←/→` switch tab · `Alt+Shift+←/→` move tab · `Alt+1..9` jump to tab (from the sidebar, plain `1`..`9` also work; some terminals, e.g. Ptyxis, keep `Alt+N` for their own tabs) · `Alt+W` close · `F2` rename · `Shift+PgUp/PgDn` scrollback.
+**Global:** `Alt+n` jump to the agent that wants attention (or the next one) · `Alt+Q` (or `F6`) panel ⇄ terminal · `Alt+←/→` switch tab · `Alt+Shift+←/→` send tab to the left/right group · `Alt+1..9` jump to tab (from the sidebar, plain `1`..`9` also work; some terminals, e.g. Ptyxis, keep `Alt+N` for their own tabs) · `Alt+W` close · `F2` rename · `Shift+PgUp/PgDn` scrollback.
 
 **Mouse:** double-click opens a server or toggles a folder · drag to move (onto a folder: inside it; onto a server: right before it; onto a bastion: it is reached through it from then on; from the bastions section onto its title or empty space: directly again) · drag tabs to reorder · ✕ closes a tab · double-click a tab renames it · wheel scrolls the history.
 

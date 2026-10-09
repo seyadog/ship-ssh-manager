@@ -80,11 +80,39 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     app.layout.sidebar = side;
     app.layout.tabbar = tabbar;
+    app.layout.split_area = right;
+    app.layout.divider = Rect::default();
+    app.layout.panes = [content, Rect::default()];
     app.layout.content = content;
 
     draw_sidebar(f, app, side);
-    draw_tabs(f, app, tabbar);
-    draw_content(f, app, content);
+    if app.is_split() {
+        // Two groups of tabs, each with its bar and its terminal, with a line between them to drag.
+        let left_w = ((right.width as u32 * app.split_pm as u32 / 1000) as u16).clamp(10, right.width.saturating_sub(11));
+        let lrect = Rect::new(right.x, right.y, left_w, right.height);
+        let drect = Rect::new(right.x + left_w, right.y, 1, right.height);
+        let rrect = Rect::new(drect.x + 1, right.y, right.width.saturating_sub(left_w + 1), right.height);
+        let [lbar, lcont] = RLayout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(lrect);
+        let [rbar, rcont] = RLayout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(rrect);
+        app.layout.divider = drect;
+        app.layout.panes = [lcont, rcont];
+        let focus_right = app.tabs.get(app.active).is_some_and(|t| t.right);
+        app.layout.content = if focus_right { rcont } else { lcont };
+        draw_tabs(f, app, lbar, false);
+        draw_tabs(f, app, rbar, true);
+        let line = Style::new().fg(MUTED);
+        for y in drect.y..drect.y + drect.height {
+            f.render_widget(Paragraph::new("│").style(line), Rect::new(drect.x, y, 1, 1));
+        }
+        for right_side in [false, true] {
+            let Some(idx) = app.pane_tab(right_side) else { continue };
+            let area = if right_side { rcont } else { lcont };
+            draw_terminal(f, app, idx, area, right_side == focus_right);
+        }
+    } else {
+        draw_tabs(f, app, tabbar, false);
+        draw_content(f, app, content);
+    }
     draw_status(f, app, status);
     draw_modal(f, app, area);
 }
@@ -456,10 +484,12 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
 
 // ---------------------------------------------------------------- tabs
 
-fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
     let end = area.x + area.width;
-    // The tabs you kept (+ / Ctrl+N) and the one you are on: moving between projects never piles up tabs.
-    let scoped: Vec<usize> = app.bar_tabs();
+    // Every open tab of this group; the numbers (Alt+1..9, 0) run through the left group and on into the right one.
+    let scoped: Vec<usize> = app.bar_side(right);
+    let shown = app.pane_tab(right);
+    let first_number = if right { app.bar_side(false).len() } else { 0 };
     let n = scoped.len();
     let mut x = area.x + 1;
     let mut hits = vec![];
@@ -468,7 +498,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
         let avail = area.width.saturating_sub(4) as usize;
         let max_title = (avail / n).saturating_sub(9).clamp(6, 20);
         let cell = |p: usize| fit(&app.tab_label(&app.tabs[scoped[p]]), max_title).width() + 8 + 1;
-        let active = scoped.iter().position(|&i| i == app.active).unwrap_or(0);
+        let active = scoped.iter().position(|&i| Some(i) == shown).unwrap_or(0);
         let mut start = 0;
         while start < active && (start..=active).map(cell).sum::<usize>() > avail {
             start += 1;
@@ -478,13 +508,17 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
             let tab = &app.tabs[i];
             let dead = tab.session.exit_code.is_some();
             let title = fit(&app.tab_label(tab), max_title);
-            let num = if pos < 9 { format!("{} ", pos + 1) } else { "  ".to_string() };
+            let num = match first_number + pos {
+                n @ 0..=8 => format!("{} ", n + 1),
+                9 => "0 ".to_string(),
+                _ => "  ".to_string(),
+            };
             let text = format!(" {num}{} {} ✕ ", if dead { "○" } else { "●" }, title);
             let w = text.width() as u16;
             if x + w > end {
                 break;
             }
-            let is_active = i == app.active;
+            let is_active = Some(i) == shown;
             let dot = if dead {
                 RED
             } else if tab.attention {
@@ -516,9 +550,13 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     if app.scope != Scope::Space(0) && x + 3 <= end {
         let r = Rect::new(x, area.y, 3, 1);
         f.render_widget(Paragraph::new(" + ").style(Style::new().fg(ACCENT)), r);
-        app.layout.toolbar.push((r, Hit::NewTab));
+        app.layout.toolbar.push((r, if right { Hit::NewTabRight } else { Hit::NewTab }));
     }
-    app.layout.tabs = hits;
+    if right {
+        app.layout.tabs.extend(hits);
+    } else {
+        app.layout.tabs = hits;
+    }
 }
 
 // ---------------------------------------------------------------- contenido
@@ -527,8 +565,13 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     if app.blank() {
         return draw_welcome(f, app, area);
     }
-    let focused = app.focus == Focus::Terminal && app.modal.is_none();
     let idx = app.active.min(app.tabs.len() - 1);
+    draw_terminal(f, app, idx, area, true);
+}
+
+/// The terminal of tab `idx` in `area`. Only the group that has the focus shows the cursor and the selection.
+fn draw_terminal(f: &mut Frame, app: &mut App, idx: usize, area: Rect, in_focus: bool) {
+    let focused = in_focus && app.focus == Focus::Terminal && app.modal.is_none();
     let tab = &mut app.tabs[idx];
     tab.session.resize(area.height, area.width);
 
@@ -570,7 +613,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
         }
     });
     // Selected text, highlighted.
-    if let Some(sel) = app.selection {
+    if let Some(sel) = app.selection.filter(|_| in_focus) {
         let ((r1, c1), (r2, c2)) = sel.ordered();
         let last_row = area.height.saturating_sub(1);
         let last_col = area.width.saturating_sub(1);

@@ -168,6 +168,8 @@ pub struct Tab {
     pub title: String,
     pub server_id: u64,
     pub scope: Scope,
+    /// Shown in the right group of tabs (see `App::is_split`).
+    pub right: bool,
     pub session: Session,
     /// An agent finished here and the user has not looked yet.
     pub attention: bool,
@@ -510,6 +512,7 @@ pub enum Hit {
     Edit,
     ViewSpaces,
     NewTab,
+    NewTabRight,
     Field(usize),
     Browse,
     Save,
@@ -543,7 +546,13 @@ pub struct Layout {
     /// Height in screen lines of one row of the list (spaces are taller blocks).
     pub row_h: u16,
     pub tabbar: Rect,
+    /// The terminal area of the focused group.
     pub content: Rect,
+    /// The terminal areas of the left and right groups (the right one is empty when there is no split).
+    pub panes: [Rect; 2],
+    /// The draggable line between the groups, and the whole area they share.
+    pub divider: Rect,
+    pub split_area: Rect,
     pub tabs: Vec<TabHit>,
     pub toolbar: Vec<(Rect, Hit)>,
     pub modal: Vec<(Rect, Hit)>,
@@ -566,6 +575,8 @@ enum Drag {
     /// A row of the list and whether it was in the bastions section.
     Node(NodeId, bool),
     Tab(usize),
+    /// The line between the two groups of tabs.
+    Divider,
 }
 
 // ---------------------------------------------------------------- app
@@ -614,6 +625,10 @@ pub struct App {
     pub header: Option<usize>,
     /// The tab bar, as tab ids: every open tab, in the order it was opened.
     bar: Vec<u64>,
+    /// Where the line between the two groups is, in thousandths of the width (500 = half and half).
+    pub split_pm: u16,
+    /// The tab each group last showed (by id), for the group that does not have the focus.
+    shown: [Option<u64>; 2],
     /// Servers whose hidden hosts are unfolded in the jump view.
     /// Bastions the user folded in the jump view (everything is unfolded by default).
     pub jump_open: HashSet<u64>,
@@ -659,6 +674,8 @@ impl App {
             ui_path: PathBuf::new(),
             header: None,
             bar: Vec::new(),
+            split_pm: 500,
+            shown: [None; 2],
             drag: None,
             last_click: None,
         };
@@ -864,8 +881,9 @@ impl App {
     /// True when the content area has no terminal to show: no tabs at all, or the current scope's last tab
     /// was closed (the welcome screen is shown, rather than jumping to a tab of another scope).
     pub fn blank(&self) -> bool {
-        self.tabs.is_empty()
-            || (self.emptied.contains(&self.scope) && self.tabs.get(self.active).is_none_or(|t| t.scope != self.scope))
+        !self.is_split()
+            && (self.tabs.is_empty()
+            || (self.emptied.contains(&self.scope) && self.tabs.get(self.active).is_none_or(|t| t.scope != self.scope)))
     }
 
     /// Indices in `tabs` of the tabs of the current scope, in order.
@@ -1042,6 +1060,7 @@ impl App {
                 title,
                 server_id,
                 scope,
+                right: false,
                 session: Session::from_remote(d.attach(info.sid, rows, cols)),
                 attention: meta.get("attention").and_then(|v| v.as_bool()).unwrap_or(false),
                 meta_sent: String::new(),
@@ -1201,6 +1220,7 @@ impl App {
                         title,
                         server_id: id,
                         scope,
+                        right: self.is_split() && self.tabs.get(self.active).is_some_and(|t| t.right),
                         session,
                         attention: false,
                         meta_sent: String::new(),
@@ -1524,7 +1544,7 @@ impl App {
             return;
         }
         // The tab to land on: its neighbour in the bar.
-        let bar = self.bar_tabs();
+        let bar = self.bar_side(self.tabs[idx].right);
         let neighbour = match bar.iter().position(|&i| i == idx) {
             Some(p) if p > 0 => Some(bar[p - 1]),
             Some(p) if p + 1 < bar.len() => Some(bar[p + 1]),
@@ -1578,8 +1598,48 @@ impl App {
 
     /// Switches to tab `i` (0-based) and puts the keyboard on its terminal.
     /// The tabs of the bar (indices into `tabs`), one per slot.
+    /// The left group first, then the right one: the numbers of the tabs run through both.
     pub fn bar_tabs(&self) -> Vec<usize> {
-        self.bar.iter().filter_map(|id| self.tabs.iter().position(|t| t.id == *id)).collect()
+        let mut all = self.bar_side(false);
+        all.extend(self.bar_side(true));
+        all
+    }
+
+    /// The tabs of one group (indices into `tabs`), in the order they were opened.
+    pub fn bar_side(&self, right: bool) -> Vec<usize> {
+        self.bar
+            .iter()
+            .filter_map(|id| self.tabs.iter().position(|t| t.id == *id))
+            .filter(|&i| self.tabs[i].right == right)
+            .collect()
+    }
+
+    /// Two groups of tabs side by side: both have tabs. A group that loses its last tab disappears.
+    pub fn is_split(&self) -> bool {
+        self.tabs.iter().any(|t| t.right) && self.tabs.iter().any(|t| !t.right)
+    }
+
+    /// The tab a group shows: the active one in the group that has the focus, else the one it showed last.
+    pub fn pane_tab(&self, right: bool) -> Option<usize> {
+        if self.tabs.get(self.active).is_some_and(|t| t.right == right) {
+            return Some(self.active);
+        }
+        let side = self.bar_side(right);
+        self.shown[right as usize]
+            .and_then(|id| side.iter().copied().find(|&i| self.tabs[i].id == id))
+            .or_else(|| side.last().copied())
+    }
+
+    /// Sends the active tab to the left or right group (Alt+Shift+←/→). The first tab sent right makes the split.
+    fn send_tab(&mut self, right: bool) {
+        let Some(t) = self.tabs.get(self.active) else { return };
+        if t.right == right {
+            return;
+        }
+        if right && self.tabs.iter().filter(|t| !t.right).count() < 2 {
+            return self.set_flash("Open another tab first: the left group needs one");
+        }
+        self.tabs[self.active].right = right;
     }
 
     /// An SSH tab whose session ended cleanly (exit code 0) closes by itself, like a browser tab. One that failed
@@ -1660,11 +1720,20 @@ impl App {
                 self.bar.push(t.id);
             }
         }
+        if !self.tabs.iter().any(|t| !t.right) {
+            for t in &mut self.tabs {
+                t.right = false; // nothing is left of the line: the right group becomes the only one
+            }
+        }
+        if let Some(t) = self.tabs.get(self.active) {
+            self.shown[t.right as usize] = Some(t.id);
+        }
     }
 
     /// Alt+←/→: the previous or next tab of the bar.
     fn step_tab(&mut self, d: isize) {
-        let tabs = self.bar_tabs();
+        let right = self.tabs.get(self.active).is_some_and(|t| t.right);
+        let tabs = self.bar_side(right);
         if tabs.is_empty() {
             return;
         }
@@ -1699,13 +1768,23 @@ impl App {
         }
     }
 
+    /// Drag and drop in the bar: tab `from` takes the place of tab `to`, in that tab's group.
     fn move_tab(&mut self, from: usize, to: usize) {
         if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
             return;
         }
-        let t = self.tabs.remove(from);
-        self.tabs.insert(to, t);
-        self.active = to;
+        let (fid, tid, right) = (self.tabs[from].id, self.tabs[to].id, self.tabs[to].right);
+        if self.tabs[from].right != right {
+            self.active = from;
+            self.send_tab(right);
+            if self.tabs[from].right != right {
+                return;
+            }
+        }
+        self.bar.retain(|&b| b != fid);
+        let at = self.bar.iter().position(|&b| b == tid).unwrap_or(self.bar.len());
+        self.bar.insert(at, fid);
+        self.active = from;
     }
 
     fn rename_tab_prompt(&mut self) {
@@ -1737,7 +1816,6 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let n = self.tabs.len();
-        let pos = self.active.min(n.saturating_sub(1));
         match key.code {
             KeyCode::F(6) | KeyCode::Char('q') if alt || key.code == KeyCode::F(6) => {
                 self.focus = if self.focus == Focus::Terminal || self.blank() { Focus::Sidebar } else { Focus::Terminal };
@@ -1748,14 +1826,15 @@ impl App {
                 self.modal = self.gate(Pending::FillSudo(self.active));
                 return;
             }
-            KeyCode::Left if alt && shift && n > 0 => return self.move_tab(self.active, pos.saturating_sub(1)),
-            KeyCode::Right if alt && shift && n > 0 => return self.move_tab(self.active, (pos + 1).min(n - 1)),
+            KeyCode::Left if alt && shift && n > 0 => return self.send_tab(false),
+            KeyCode::Right if alt && shift && n > 0 => return self.send_tab(true),
             KeyCode::Left if alt && n > 0 => return self.step_tab(-1),
             KeyCode::Right if alt && n > 0 => return self.step_tab(1),
             KeyCode::Char('n') if ctrl => return self.new_tab_here(),
             KeyCode::Char('n') if alt => return self.next_agent(),
             KeyCode::Char('w') if alt && n > 0 => return self.close_tab(self.active),
             KeyCode::Char(c @ '1'..='9') if alt => return self.goto_tab(c as usize - '1' as usize),
+            KeyCode::Char('0') if alt => return self.goto_tab(9),
             _ => {}
         }
         if self.focus == Focus::Terminal && n > 0 {
@@ -1815,6 +1894,12 @@ impl App {
             Hit::AddFolder => self.new_folder_prompt(),
             Hit::Edit => self.edit_selected(),
             Hit::NewTab => self.new_tab_here(),
+            Hit::NewTabRight => {
+                if let Some(i) = self.pane_tab(true) {
+                    self.active = i;
+                }
+                self.new_tab_here()
+            }
             _ => {}
         }
     }
@@ -2521,6 +2606,13 @@ impl App {
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => self.mouse_down(x, y),
             MouseEventKind::Drag(MouseButton::Left) if self.selecting => self.drag_select(x, y),
+            MouseEventKind::Drag(MouseButton::Left) if matches!(self.drag, Some(Drag::Divider)) => {
+                let a = self.layout.split_area;
+                if a.width > 0 {
+                    let pm = (x.saturating_sub(a.x) as u32 * 1000 / a.width as u32) as u16;
+                    self.split_pm = pm.clamp(150, 850);
+                }
+            }
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.drop_hover = match self.drag {
                     Some(Drag::Node(..)) => self.row_at(x, y).filter(|&i| i < self.rows.len()),
@@ -2537,7 +2629,7 @@ impl App {
                 } else if inside(self.layout.list, x, y) {
                     let max = self.split_index().unwrap_or(self.rows.len()).saturating_sub(1);
                     self.offset = if up { self.offset.saturating_sub(3) } else { (self.offset + 3).min(max) };
-                } else if inside(self.layout.content, x, y) {
+                } else if self.pane_at(x, y).is_some() {
                     self.selection = None; // the text moves under it
                     if let Some(t) = self.tabs.get(self.active) {
                         t.session.scroll(if up { 3 } else { -3 });
@@ -2557,6 +2649,10 @@ impl App {
         if let Some(&(_, hit)) = self.layout.toolbar.iter().find(|(r, _)| inside(*r, x, y)) {
             self.header = None;
             self.activate(hit);
+            return;
+        }
+        if self.is_split() && inside(self.layout.divider, x, y) {
+            self.drag = Some(Drag::Divider);
             return;
         }
         if inside(self.layout.sidebar, x, y) {
@@ -2589,7 +2685,7 @@ impl App {
                     self.drag = Some(Drag::Tab(i));
                 }
             }
-        } else if inside(self.layout.content, x, y) && !self.scoped().is_empty() {
+        } else if self.pane_at(x, y).is_some() && (self.is_split() || !self.scoped().is_empty()) {
             self.focus = Focus::Terminal;
             let cell = self.content_cell(x, y);
             if double {
@@ -2599,6 +2695,24 @@ impl App {
                 self.selecting = true;
             }
         }
+    }
+
+    /// The group whose terminal is under (x, y): it takes the focus, and its area becomes `layout.content`.
+    fn pane_at(&mut self, x: u16, y: u16) -> Option<bool> {
+        let right = if self.is_split() && inside(self.layout.panes[1], x, y) {
+            true
+        } else if inside(self.layout.panes[0], x, y) || (!self.is_split() && inside(self.layout.content, x, y)) {
+            false
+        } else {
+            return None;
+        };
+        if self.is_split() {
+            if let Some(i) = self.pane_tab(right) {
+                self.active = i;
+            }
+            self.layout.content = self.layout.panes[right as usize];
+        }
+        Some(right)
     }
 
     /// The cell of the terminal area under (x, y), clamped to the area.
@@ -2685,9 +2799,23 @@ impl App {
             return;
         }
         match self.drag.take() {
+            Some(Drag::Divider) => {}
             Some(Drag::Tab(from)) => {
                 if let Some(to) = self.layout.tabs.iter().find(|t| inside(t.rect, x, y)).map(|t| t.idx) {
                     self.move_tab(from, to);
+                } else if from < self.tabs.len() {
+                    // dropped on a terminal: the tab goes to that group
+                    let right = if inside(self.layout.panes[1], x, y) {
+                        Some(true)
+                    } else if inside(self.layout.panes[0], x, y) || inside(self.layout.content, x, y) {
+                        Some(false)
+                    } else {
+                        None
+                    };
+                    if let Some(right) = right {
+                        self.active = from;
+                        self.send_tab(right);
+                    }
                 }
             }
             Some(Drag::Node(node, jump)) => self.drop_node(node, jump, x, y),
@@ -3416,6 +3544,7 @@ mod tests {
             title: "t".into(),
             server_id: LOCAL,
             scope: Scope::Ssh,
+            right: false,
             session,
             attention: false,
             meta_sent: String::new(),
@@ -3681,6 +3810,31 @@ mod tests {
         app.sync_scope();
         assert!(app.blank(), "SSH was emptied earlier and still shows the welcome");
         let _ = id;
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tabs_can_be_sent_to_a_right_group_and_the_split_goes_away_when_it_empties() {
+        let (mut app, _, dir) = app_with_two_tabs();
+        assert!(!app.is_split());
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT | KeyModifiers::SHIFT));
+        assert!(app.is_split(), "the second tab went to the right group");
+        assert_eq!((app.bar_side(false), app.bar_side(true)), (vec![0], vec![1]));
+        assert!(!app.blank());
+        // The only tab of the left group cannot go right: that would leave nothing on the left.
+        app.select_tab(0);
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT | KeyModifiers::SHIFT));
+        assert_eq!(app.bar_side(false), vec![0]);
+        // Back to the left: one group again.
+        app.select_tab(1);
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT));
+        assert!(!app.is_split());
+        // Closing the last tab of a group ends the split too.
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT | KeyModifiers::SHIFT));
+        assert!(app.is_split());
+        app.close_tab(1);
+        assert!(!app.is_split());
         std::fs::remove_dir_all(dir).ok();
     }
 
