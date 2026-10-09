@@ -7,7 +7,7 @@ pub struct Settings {
     /// Play a sound when an AI agent finishes.
     #[serde(default = "yes")]
     pub sound: bool,
-    /// `"terminal"` (the colours of your terminal's theme) or `"classic"` (fixed colours).
+    /// `"terminal"` (pastels on your terminal's own background, the default) or `"classic"` (fixed colours).
     #[serde(default = "terminal")]
     pub theme: String,
 }

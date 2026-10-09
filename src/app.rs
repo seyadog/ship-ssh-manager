@@ -2458,12 +2458,12 @@ impl App {
         }
     }
 
-    /// F8: switches between the colours of the terminal and the classic fixed ones, and remembers it.
+    /// F8: switches between the pastel theme (on your terminal's background) and the classic fixed colours, and remembers it.
     fn toggle_theme(&mut self) {
         let terminal = !crate::ui::terminal_theme();
         crate::ui::set_theme(terminal);
         crate::settings::save_theme(if terminal { "terminal" } else { "classic" });
-        self.set_flash(if terminal { "Theme: your terminal's colours" } else { "Theme: classic colours" });
+        self.set_flash(if terminal { "Theme: pastel colours on your terminal's background" } else { "Theme: classic colours" });
     }
 
     /// Alt+B: folds both columns of the sidebar away, or brings them back.

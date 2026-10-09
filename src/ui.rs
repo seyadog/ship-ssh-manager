@@ -15,8 +15,9 @@ const REMOTE_GREEN: Color = Color::Rgb(187, 154, 247);
 const REMOTE_GREEN_BRIGHT: Color = Color::Rgb(208, 184, 255);
 // ---------------------------------------------------------------- theme
 
-/// "Your terminal": the colours of the interface come from the terminal's own palette (default foreground,
-/// ANSI colours), so oso looks like the rest of the desktop. The other theme, "classic", has fixed colours.
+/// Two themes. "terminal" (the default) keeps your terminal's background and text colour and paints the rest
+/// with soft pastels (Catppuccin Mocha); "classic" has fixed colours of its own. The terminal's ANSI palette
+/// is not used for the interface: in many themes those colours are dull.
 static TERMINAL_THEME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 pub fn set_theme(terminal: bool) {
@@ -30,37 +31,36 @@ pub fn terminal_theme() -> bool {
 /// The blue of the bear: the logo does not follow the theme.
 const LOGO_BLUE: Color = Color::Rgb(122, 162, 247);
 
-fn themed(terminal: Color, classic: Color) -> Color {
-    if terminal_theme() { terminal } else { classic }
+fn themed(pastel: Color, classic: Color) -> Color {
+    if terminal_theme() { pastel } else { classic }
 }
 fn c_accent() -> Color {
-    themed(Color::Reset, Color::Rgb(122, 162, 247))
+    themed(Color::Rgb(180, 190, 254), Color::Rgb(122, 162, 247)) // lavender
 }
 fn c_fg() -> Color {
     themed(Color::Reset, Color::Rgb(192, 202, 245))
 }
 fn c_muted() -> Color {
-    themed(Color::Indexed(8), Color::Rgb(86, 95, 137))
+    themed(Color::Rgb(108, 112, 134), Color::Rgb(86, 95, 137))
 }
-/// Background of the selected thing outside the lists (the list rows are drawn in reverse video instead).
 fn c_sel() -> Color {
-    themed(Color::Indexed(8), Color::Rgb(40, 52, 87))
+    themed(Color::Rgb(49, 50, 68), Color::Rgb(40, 52, 87))
 }
 fn c_drop() -> Color {
-    themed(Color::Indexed(2), Color::Rgb(58, 82, 60))
+    themed(Color::Rgb(49, 72, 60), Color::Rgb(58, 82, 60))
 }
 fn c_green() -> Color {
-    themed(Color::Indexed(2), Color::Rgb(158, 206, 106))
+    themed(Color::Rgb(166, 227, 161), Color::Rgb(158, 206, 106))
 }
 fn c_amber() -> Color {
-    themed(Color::Indexed(3), Color::Rgb(224, 175, 104))
+    themed(Color::Rgb(249, 226, 175), Color::Rgb(224, 175, 104))
 }
 fn c_red() -> Color {
-    themed(Color::Indexed(1), Color::Rgb(247, 118, 142))
+    themed(Color::Rgb(243, 139, 168), Color::Rgb(247, 118, 142))
 }
 /// Text on the accent colour (a button that stands out).
 fn badge_accent() -> Style {
-    if terminal_theme() { Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { Style::new().fg(Color::Black).bg(c_accent()) }
+    Style::new().fg(Color::Black).bg(c_accent())
 }
 
 /// One colour per project, taken from oso's own palette and as far apart from each other as possible.
@@ -76,21 +76,24 @@ const PASTELS: [(u8, u8, u8); 8] = [
 ];
 
 fn space_color(id: u64, live: bool) -> Color {
-    if terminal_theme() {
-        // The terminal's own colours: blue, red, green, yellow, magenta, cyan and two bright ones.
-        return Color::Indexed([4, 1, 2, 3, 5, 6, 12, 9][(id as usize) % 8]);
-    }
-    let (r, g, b) = PASTELS[(id as usize) % PASTELS.len()];
+    let (r, g, b) = if terminal_theme() { MOCHA[(id as usize) % MOCHA.len()] } else { PASTELS[(id as usize) % PASTELS.len()] };
     // Idle spaces keep their hue but wash out towards grey (fading to black would turn yellows brown).
     let k = if live { 1.0 } else { 0.55 };
     let fade = |c: u8, grey: f32| (c as f32 * k + grey * (1.0 - k)) as u8;
     Color::Rgb(fade(r, 80.0), fade(g, 82.0), fade(b, 100.0))
 }
 
-/// An idle project's mark is dimmed (in the classic theme its colour is washed out instead).
-fn space_dim(live: bool) -> Modifier {
-    if terminal_theme() && !live { Modifier::DIM } else { Modifier::empty() }
-}
+/// The pastels of the default theme (Catppuccin Mocha): blue, red, green, peach, mauve, sky, yellow, teal.
+const MOCHA: [(u8, u8, u8); 8] = [
+    (137, 180, 250),
+    (243, 139, 168),
+    (166, 227, 161),
+    (250, 179, 135),
+    (203, 166, 247),
+    (137, 220, 235),
+    (249, 226, 175),
+    (148, 226, 213),
+];
 
 
 /// Truncates `s` to `w` columns, adding “…” if it does not fit.
@@ -234,7 +237,7 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
         return;
     }
     // No frames: the title, the list, a row of actions at the bottom, and a faint line on the right edge.
-    let edge = Style::new().fg(themed(Color::Indexed(8), Color::Rgb(44, 50, 74)));
+    let edge = Style::new().fg(themed(Color::Rgb(49, 50, 68), Color::Rgb(44, 50, 74)));
     for y in area.y..area.y + area.height {
         f.render_widget(Paragraph::new("│").style(edge), Rect::new(area.x + area.width - 1, y, 1, 1));
     }
@@ -398,12 +401,7 @@ fn draw_rows(
         if is_drop {
             bg = c_drop();
         } else if is_sel {
-            if terminal_theme() {
-                // Whatever the terminal's colours are, reverse video marks the selected row.
-                style = style.add_modifier(Modifier::REVERSED);
-            } else {
-                bg = c_sel();
-            }
+            bg = c_sel();
             if focused {
                 style = style.add_modifier(Modifier::BOLD);
             }
@@ -421,7 +419,6 @@ fn draw_rows(
             // One line: a coloured spine for the state, the name, and the branch (or directory) on the right.
             // The name turns green when the agent has finished; the spine keeps the space's own colour.
             let color = space_color(id, live);
-            let dim = space_dim(live);
             let (mut text, tone) = match app.branches.get(&id) {
                 Some(b) => (b.clone(), REMOTE_GREEN),
                 None => (cwd, c_muted()),
@@ -478,10 +475,10 @@ fn draw_rows(
                 out
             };
             let mut spans = vec![
-                Span::styled("▆", Style::new().fg(color).bg(bg).add_modifier(dim)),
+                Span::styled("▆", Style::new().fg(color).bg(bg)),
                 Span::styled(
                     format!(" {}", fit(&name, width.saturating_sub(3))),
-                    style.fg(if attention { c_green() } else { color }).add_modifier(Modifier::BOLD | dim),
+                    style.fg(if attention { c_green() } else { color }).add_modifier(Modifier::BOLD),
                 ),
             ];
             // The rest of the line, right-aligned: the agent (if any) first, then the branch if it still fits.
