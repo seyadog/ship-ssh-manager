@@ -37,7 +37,7 @@ Everything runs in one process; there is no IPC and no separate renderer.
 A server has two independent attributes: `parent` (its folder, for organizing) and `jump` (the server it is reached through, for routing). The SSH view shows both over the same data, so nothing is duplicated:
 
 - **Folder tree** — roots are top-level folders; servers reached through a bastion show a dim `↪ bastion` hint.
-- **Bastions section** (below the folders, with its own foldable title row, only when there are bastions) — roots are bastions only (servers with no `jump` that other servers are reached through); children are the servers behind them, to any depth. Its rows are flagged `jump` so that fold, reorder, drag and "new server" act on the right tree.
+- **Bastions section** (the lower half of the list, starting at the middle: the upper half is the folder tree, each half scrolls on its own; with its own foldable title row, only when there are bastions) — roots are bastions only (servers with no `jump` that other servers are reached through); children are the servers behind them, to any depth. Its rows are flagged `jump` so that fold, reorder, drag and "new server" act on the right tree.
 
 `ssh_argv` resolves the chain. If every hop uses the agent/default keys it emits `-J a,b`. If a hop has its own key it builds a nested `ProxyCommand`, because `-J` cannot give each hop an identity. Loops are rejected (`Store::would_cycle`), and deleting a bastion detaches the servers behind it.
 

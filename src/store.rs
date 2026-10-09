@@ -65,12 +65,9 @@ pub struct Folder {
     pub name: String,
     #[serde(default)]
     pub parent: Option<u64>,
-    #[serde(default = "yes")]
+    /// Folders start closed, and stay as the user leaves them.
+    #[serde(default)]
     pub expanded: bool,
-}
-
-fn yes() -> bool {
-    true
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -180,7 +177,7 @@ impl Store {
 
     pub fn add_folder(&mut self, name: String, parent: Option<u64>) -> u64 {
         let id = self.new_id();
-        self.folders.push(Folder { id, name, parent, expanded: true });
+        self.folders.push(Folder { id, name, parent, expanded: false });
         id
     }
 

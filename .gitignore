@@ -8,6 +8,7 @@ vault.json.*
 spaces.json
 spaces.json.*
 settings.json
+state.json
 *.sock
 daemon.log
 .ship/

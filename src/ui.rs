@@ -196,14 +196,6 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let h = ((list.height / row_h) as usize).max(1);
-    if app.selected < app.offset {
-        app.offset = app.selected;
-    } else if app.selected >= app.offset + h {
-        app.offset = app.selected + 1 - h;
-    }
-    app.offset = app.offset.min(app.rows.len().saturating_sub(1));
-
     if app.rows.is_empty() {
         let lines: Vec<&str> = if app.view == View::Spaces {
             vec!["No agents yet.", "Press a: a terminal opens;", "run claude, opencode… in it.", "It stays where you leave it (cd)."]
@@ -215,9 +207,58 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let width = list.width as usize;
-    for (n, row) in app.rows.iter().enumerate().skip(app.offset).take(h) {
-        let y = list.y + (n - app.offset) as u16 * row_h;
+    // The SSH view is split in two halves, folders above and the bastions below, starting at the middle.
+    let split = if app.view == View::Folders && list.height >= 6 { app.split_index() } else { None };
+    let (top, bottom) = match split {
+        Some(_) => {
+            let top_h = list.height.div_ceil(2);
+            (Rect::new(list.x, list.y, list.width, top_h), Rect::new(list.x, list.y + top_h, list.width, list.height - top_h))
+        }
+        None => (list, Rect::default()),
+    };
+    app.layout.list = top;
+    app.layout.list_bottom = bottom;
+
+    // Keep the selected row in view in whichever half it is.
+    let top_count = split.unwrap_or(app.rows.len());
+    let h_top = ((top.height / row_h) as usize).max(1);
+    if app.selected < top_count {
+        if app.selected < app.offset {
+            app.offset = app.selected;
+        } else if app.selected >= app.offset + h_top {
+            app.offset = app.selected + 1 - h_top;
+        }
+    }
+    app.offset = app.offset.min(top_count.saturating_sub(h_top));
+    if let Some(header) = split {
+        let h_bottom = ((bottom.height / row_h) as usize).max(1);
+        if app.selected >= header {
+            let rel = app.selected - header;
+            if rel < app.offset_bottom {
+                app.offset_bottom = rel;
+            } else if rel >= app.offset_bottom + h_bottom {
+                app.offset_bottom = rel + 1 - h_bottom;
+            }
+        }
+        app.offset_bottom = app.offset_bottom.min((app.rows.len() - header).saturating_sub(h_bottom));
+    }
+
+    let (offset, offset_bottom, rows_len) = (app.offset, app.offset_bottom, app.rows.len());
+    draw_rows(f, app, top, 0, top_count, offset, row_h, focused);
+    if let Some(header) = split {
+        draw_rows(f, app, bottom, header, rows_len, offset_bottom, row_h, focused);
+    }
+}
+
+/// Draws rows `from..to` of the list in `area`, the first one shown being `from + offset`.
+#[allow(clippy::too_many_arguments)]
+fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offset: usize, row_h: u16, focused: bool) {
+    let width = area.width as usize;
+    let h = ((area.height / row_h) as usize).max(1);
+    let start = from + offset;
+    for n in start..to.min(start + h) {
+        let row = &app.rows[n];
+        let y = area.y + (n - start) as u16 * row_h;
         let is_sel = n == app.selected;
         let is_drop = app.drop_hover == Some(n);
         let mut style = Style::new();
@@ -260,7 +301,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             };
             let block_h = if row_h >= 2 { 2 } else { 1 };
             let lines = if block_h == 2 { vec![first, second] } else { vec![first] };
-            block(f, Rect::new(list.x, y, list.width, block_h), lines, bg);
+            block(f, Rect::new(area.x, y, area.width, block_h), lines, bg);
             continue;
         }
 
@@ -272,6 +313,8 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 let arrow = if app.is_open(row) { "▾ " } else { "▸ " };
                 spans.push(Span::styled(arrow, Style::new().fg(MUTED)));
                 spans.push(Span::styled("bastions", Style::new().fg(MUTED).add_modifier(Modifier::BOLD)));
+                let rest = width.saturating_sub(indent.width() + 2 + "bastions".len() + 1);
+                spans.push(Span::styled(format!(" {}", "─".repeat(rest)), Style::new().fg(MUTED)));
             }
             NodeId::Folder(id) => {
                 let fo = app.store.folder(id);
@@ -309,7 +352,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         let line = Line::from(spans).style(style);
-        f.render_widget(Paragraph::new(line).style(style), Rect::new(list.x, y, list.width, 1));
+        f.render_widget(Paragraph::new(line).style(style), Rect::new(area.x, y, area.width, 1));
     }
 }
 
@@ -819,6 +862,75 @@ mod tests {
         assert_eq!(map_color(vt100::Color::Idx(10)), REMOTE_GREEN_BRIGHT);
         assert_eq!(map_color(vt100::Color::Idx(1)), Color::Indexed(1));
         assert_eq!(map_color(vt100::Color::Default), Color::Reset);
+    }
+
+    /// Draws an SSH view with `n` servers at the root plus one bastion with a server behind it.
+    fn drawn(n: usize, height: u16, open: bool) -> (App, Vec<String>) {
+        use crate::store::{Server, Store};
+        let mut st = Store::default();
+        for i in 0..n {
+            st.add_server(Server {
+                id: 0,
+                name: format!("srv{i}"),
+                host: format!("h{i}.example"),
+                port: 22,
+                user: String::new(),
+                auth: Auth::Agent,
+                key_path: String::new(),
+                parent: None,
+                jump: None,
+                has_secret: false,
+                has_sudo: false,
+            });
+        }
+        let ids: Vec<u64> = st.servers.iter().map(|s| s.id).collect();
+        if ids.len() > 1 {
+            st.move_via(ids[1], Some(ids[0]));
+        }
+        let vault = crate::vault::Vault::new(std::env::temp_dir().join(format!("ship-ui-vault-{}", std::process::id())));
+        let mut app = App::new(st, vault);
+        app.bastions_open = open;
+        app.rebuild();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let lines = (0..height).map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect();
+        (app, lines)
+    }
+
+    #[test]
+    fn the_bastions_start_at_the_middle_of_the_list() {
+        for height in [20u16, 30, 41] {
+            let (app, lines) = drawn(3, height, true);
+            let (top, bottom) = (app.layout.list, app.layout.list_bottom);
+            assert!(bottom.height > 0, "split at {height}");
+            assert_eq!(top.height, (top.height + bottom.height).div_ceil(2), "the upper half is half the list ({height})");
+            assert_eq!(bottom.y, top.y + top.height);
+            assert!(lines[bottom.y as usize].contains("bastions"), "the title is the first line of the lower half ({height})");
+            let title_rows = lines.iter().filter(|l| l.contains("bastions")).count();
+            assert_eq!(title_rows, 1);
+        }
+    }
+
+    #[test]
+    fn the_lower_half_scrolls_on_its_own_and_follows_the_selection() {
+        let (mut app, _) = drawn(12, 26, true);
+        // Open the bastion so the lower half has more rows than it can show, then go to its last row.
+        app.jump_open.insert(app.store.servers[0].id);
+        app.rebuild();
+        app.selected = app.rows.len() - 1;
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 26)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.offset, 0, "the upper half did not move");
+        let split = app.split_index().unwrap();
+        assert!(app.rows.len() > split + 1);
+    }
+
+    #[test]
+    fn without_bastions_the_list_is_not_split() {
+        let (app, lines) = drawn(1, 30, true);
+        assert_eq!(app.layout.list_bottom.height, 0);
+        assert!(!lines.iter().any(|l| l.contains("bastions")));
     }
 }
 

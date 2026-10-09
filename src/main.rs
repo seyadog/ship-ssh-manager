@@ -13,6 +13,7 @@ mod settings;
 mod spaces;
 mod store;
 mod tabby;
+mod uistate;
 mod ui;
 mod vault;
 
@@ -48,6 +49,10 @@ fn main() -> Result<()> {
     let mut app = app::App::new(store, vault);
     app.spaces = spaces::Spaces::load()?;
     app.sound = settings::Settings::load().sound;
+    let ui = uistate::UiState::load();
+    app.bastions_open = ui.bastions_open;
+    app.jump_open = ui.open_nodes.into_iter().collect();
+    app.ui_path = uistate::UiState::path();
     app.rebuild();
 
     let mut terminal = ratatui::init();
