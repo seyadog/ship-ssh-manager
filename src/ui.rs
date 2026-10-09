@@ -128,7 +128,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar && app.modal.is_none();
     app.layout.sidebar = area;
     app.layout.cols = [Rect::default(); 2];
-    app.layout.col_lists = [Rect::default(); 2];
+    app.layout.col_geom = [ListGeom::default(); 2];
     app.layout.list = Rect::default();
     app.layout.list_bottom = Rect::default();
     let strips = app.fold.iter().filter(|&&f| f).count() as u16;
@@ -212,13 +212,18 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
     }
 }
 
-/// The list of the column that is not the active view: no selection and no scrolling; a click activates it.
-fn draw_passive_list(f: &mut Frame, app: &mut App, col: usize, view: View, list: Rect) {
-    let n = app.other_rows.len() as u16;
-    let row_h: u16 = if view == View::Spaces {
-        if n * 3 <= list.height + 1 {
+/// Where the parts of a list go in its column: projects as two-line blocks (tighter when there are many),
+/// with the folders below (up to half the list); the servers' bastions below, from the middle.
+fn list_geom(rows: &[Row], view: View, list: Rect) -> ListGeom {
+    let in_spaces = view == View::Spaces;
+    let header = rows.iter().position(|r| r.node == NodeId::BastionsHeader);
+    let bottom_lines = if in_spaces { header.map(|h| ((rows.len() - h) as u16).min(list.height / 2)).unwrap_or(0) } else { 0 };
+    let row_h: u16 = if in_spaces {
+        let n = header.unwrap_or(rows.len()) as u16;
+        let h = list.height.saturating_sub(bottom_lines);
+        if n * 3 <= h + 1 {
             3
-        } else if n * 2 <= list.height {
+        } else if n * 2 <= h {
             2
         } else {
             1
@@ -226,44 +231,48 @@ fn draw_passive_list(f: &mut Frame, app: &mut App, col: usize, view: View, list:
     } else {
         1
     };
-    app.layout.col_lists[col] = list;
-    app.layout.passive_row_h = row_h;
+    let split = if list.height >= 6 { header } else { None };
+    let (top, bottom) = match split {
+        Some(_) => {
+            let top_h = if in_spaces { list.height - bottom_lines } else { list.height.div_ceil(2) };
+            (Rect::new(list.x, list.y, list.width, top_h), Rect::new(list.x, list.y + top_h, list.width, list.height - top_h))
+        }
+        None => (list, Rect::default()),
+    };
+    ListGeom {
+        top,
+        bottom,
+        split,
+        row_h,
+        bottom_row_h: if in_spaces { 1 } else { row_h },
+        top_count: split.unwrap_or(rows.len()),
+    }
+}
+
+/// The list of the column that is not the active view. It is laid out exactly like the active one, from
+/// the top and without a selection, so that switching column does not rearrange anything; a click activates it.
+fn draw_passive_list(f: &mut Frame, app: &mut App, col: usize, view: View, list: Rect) {
+    let g = list_geom(&app.other_rows, view, list);
+    app.layout.col_geom[col] = g;
     if app.other_rows.is_empty() {
         let text = if view == View::Spaces { "No projects yet." } else { "No servers yet." };
         f.render_widget(Paragraph::new(text).style(Style::new().fg(MUTED)), list);
         return;
     }
     let app: &App = app;
-    draw_rows(f, app, list, 0, app.other_rows.len(), 0, row_h, false, &app.other_rows, None, view);
+    let rows = &app.other_rows;
+    draw_rows(f, app, g.top, 0, g.top_count, 0, g.row_h, false, rows, None, view);
+    if let Some(header) = g.split {
+        draw_rows(f, app, g.bottom, header, rows.len(), 0, g.bottom_row_h, false, rows, None, view);
+    }
 }
 
-/// The list of the active view, with its selection, scrolling and (below) the bastions or the folders.
+/// The list of the active view, with its selection and scrolling.
 fn draw_active_list(f: &mut Frame, app: &mut App, list: Rect, focused: bool) {
-    let in_spaces = app.view == View::Spaces;
-    let list_h = list.height;
     app.layout.list = list;
-    // Projects are two-line blocks with a blank line between them; with many projects they pack tighter.
-    // Folders (if any) take as many lines as they need, up to half of the list; the projects get the rest.
-    let split_at = if in_spaces { app.split_index() } else { None };
-    let bottom_lines = split_at.map(|h| ((app.rows.len() - h) as u16).min(list_h / 2)).unwrap_or(0);
-    let row_h: u16 = if in_spaces {
-        let n = split_at.unwrap_or(app.rows.len()) as u16;
-        let list_h = list_h - bottom_lines;
-        if n * 3 <= list_h + 1 {
-            3
-        } else if n * 2 <= list_h {
-            2
-        } else {
-            1
-        }
-    } else {
-        1
-    };
-    app.layout.row_h = row_h;
     if list.height == 0 {
         return;
     }
-
     if app.rows.is_empty() {
         let lines: Vec<&str> = if app.view == View::Spaces {
             vec!["No projects yet.", "Press a: a terminal opens;", "run claude, opencode… in it.", "It stays where you leave it (cd)."]
@@ -274,21 +283,14 @@ fn draw_active_list(f: &mut Frame, app: &mut App, list: Rect, focused: bool) {
         f.render_widget(hint, list);
         return;
     }
-
-    // The SSH view is split in two halves, folders above and the bastions below, starting at the middle.
-    let split = if (app.view == View::Folders || in_spaces) && list.height >= 6 { app.split_index() } else { None };
-    let (top, bottom) = match split {
-        Some(_) => {
-            let top_h = if in_spaces { list.height - bottom_lines } else { list.height.div_ceil(2) };
-            (Rect::new(list.x, list.y, list.width, top_h), Rect::new(list.x, list.y + top_h, list.width, list.height - top_h))
-        }
-        None => (list, Rect::default()),
-    };
+    let g = list_geom(&app.rows, app.view, list);
+    let (top, bottom, split, row_h) = (g.top, g.bottom, g.split, g.row_h);
+    app.layout.row_h = row_h;
     app.layout.list = top;
     app.layout.list_bottom = bottom;
 
     // Keep the selected row in view in whichever half it is.
-    let top_count = split.unwrap_or(app.rows.len());
+    let top_count = g.top_count;
     let h_top = ((top.height / row_h) as usize).max(1);
     if app.selected < top_count {
         if app.selected < app.offset {
@@ -299,7 +301,7 @@ fn draw_active_list(f: &mut Frame, app: &mut App, list: Rect, focused: bool) {
     }
     app.offset = app.offset.min(top_count.saturating_sub(h_top));
     if let Some(header) = split {
-        let h_bottom = ((bottom.height / if in_spaces { 1 } else { row_h }) as usize).max(1);
+        let h_bottom = ((bottom.height / g.bottom_row_h) as usize).max(1);
         if app.selected >= header {
             let rel = app.selected - header;
             if rel < app.offset_bottom {
@@ -317,7 +319,7 @@ fn draw_active_list(f: &mut Frame, app: &mut App, list: Rect, focused: bool) {
     let rows = std::mem::take(&mut app.rows);
     draw_rows(f, app, top, 0, top_count, offset, row_h, focused, &rows, selected, view);
     if let Some(header) = split {
-        draw_rows(f, app, bottom, header, rows_len, offset_bottom, if in_spaces { 1 } else { row_h }, focused, &rows, selected, view);
+        draw_rows(f, app, bottom, header, rows_len, offset_bottom, g.bottom_row_h, focused, &rows, selected, view);
     }
     app.rows = rows;
 }

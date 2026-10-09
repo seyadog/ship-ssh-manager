@@ -593,6 +593,19 @@ pub struct TabHit {
     pub close: Rect,
 }
 
+/// How a list is laid out in its column: the top part, the part below it (the folders or the bastions) and
+/// the height in screen lines of a row of each.
+#[derive(Clone, Copy, Default)]
+pub struct ListGeom {
+    pub top: Rect,
+    pub bottom: Rect,
+    /// Index in the rows where the bottom part starts.
+    pub split: Option<usize>,
+    pub row_h: u16,
+    pub bottom_row_h: u16,
+    pub top_count: usize,
+}
+
 #[derive(Default)]
 pub struct Layout {
     pub sidebar: Rect,
@@ -612,9 +625,8 @@ pub struct Layout {
     pub split_area: Rect,
     /// The two columns of the sidebar (0: Projects, 1: Servers), whole boxes.
     pub cols: [Rect; 2],
-    /// The list of each column, and the row height of the one that is not the active view.
-    pub col_lists: [Rect; 2],
-    pub passive_row_h: u16,
+    /// How the list of each column is laid out (where the one that is not the active view was drawn).
+    pub col_geom: [ListGeom; 2],
     pub tabs: Vec<TabHit>,
     pub toolbar: Vec<(Rect, Hit)>,
     pub modal: Vec<(Rect, Hit)>,
@@ -2447,11 +2459,11 @@ impl App {
             return;
         }
         let i = if view == View::Spaces { 0 } else { 1 };
-        let (list, row_h) = (self.layout.col_lists[i], self.layout.passive_row_h);
+        let g = self.layout.col_geom[i];
         self.set_view(view);
-        self.layout.list = list;
-        self.layout.list_bottom = Rect::default();
-        self.layout.row_h = row_h;
+        self.layout.list = g.top;
+        self.layout.list_bottom = g.bottom;
+        self.layout.row_h = g.row_h;
     }
 
     /// Opens the quick open box with every server and project.
