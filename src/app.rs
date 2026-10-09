@@ -1913,7 +1913,6 @@ impl App {
                 return;
             }
             KeyCode::F(2) if n > 0 => return self.rename_tab_prompt(),
-            KeyCode::Char('b') if alt => return self.toggle_panel(),
             KeyCode::F(8) => return self.toggle_theme(),
             KeyCode::Char('k') if alt => return self.open_search(),
             KeyCode::Char('p') if alt && self.sudo_ready() => {
@@ -2464,18 +2463,6 @@ impl App {
         crate::ui::set_theme(terminal);
         crate::settings::save_theme(if terminal { "terminal" } else { "classic" });
         self.set_flash(if terminal { "Theme: pastel colours on your terminal's background" } else { "Theme: classic colours" });
-    }
-
-    /// Alt+B: folds both columns of the sidebar away, or brings them back.
-    fn toggle_panel(&mut self) {
-        let all = !self.fold.iter().all(|&f| f);
-        self.fold = [all; 2];
-        self.header = None;
-        if all && !self.blank() {
-            self.focus = Focus::Terminal;
-        } else if !all {
-            self.focus = Focus::Sidebar;
-        }
     }
 
     /// Folds one column away (0: Projects, 1: Servers) or brings it back. The one left stays the active view.
@@ -3455,21 +3442,16 @@ mod tests {
     }
 
     #[test]
-    fn both_lists_are_built_and_a_column_can_be_folded() {
+    fn both_lists_are_built_and_the_panel_cannot_be_folded() {
         let mut app = app_with_servers(2);
         assert!(!app.rows.is_empty(), "the active view (Servers) has its rows");
         assert!(app.other_rows.is_empty(), "no projects yet");
         let dir = temp_dir("cols");
         app.spaces.add("proj".into(), dir.display().to_string());
         app.rebuild();
-        assert_eq!(app.other_rows.len(), 1, "the other column has its own rows");
+        assert_eq!(app.other_rows.len(), 1, "the other list has its own rows");
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(app.fold, [true, true]);
-        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(app.fold, [false, false]);
-        // Folding the active column hands the keyboard to the other one.
-        app.fold_column(1);
-        assert_eq!((app.fold, app.view), ([false, true], View::Spaces));
+        assert_eq!(app.fold, [false, false], "Alt+B no longer folds anything");
         std::fs::remove_dir_all(dir).ok();
     }
 

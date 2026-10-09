@@ -128,10 +128,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.layout.modal.clear();
 
     let [main, status] = RLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    // Two columns (Projects, Servers), each folded to a thin strip on request.
-    let folded = app.fold.iter().filter(|&&f| f).count() as u16;
-    let col_w: u16 = if area.width >= 110 { 30 } else if area.width >= 80 { 24 } else { 20 };
-    let side_w = (folded * 3 + (2 - folded) * col_w).min(area.width / 2);
+    // One column: Projects on top, Servers below.
+    let side_w: u16 = (if area.width >= 110 { 34 } else if area.width >= 80 { 28 } else { 22 }).min(area.width / 2);
     let [side, right] = RLayout::horizontal([Constraint::Length(side_w), Constraint::Min(1)]).areas(main);
     let [tabbar, content] = RLayout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(right);
     // One blank column between the sidebar (or the line between two groups) and the terminal.
@@ -189,15 +187,13 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.layout.col_geom = [ListGeom::default(); 2];
     app.layout.list = Rect::default();
     app.layout.list_bottom = Rect::default();
-    let strips = app.fold.iter().filter(|&&f| f).count() as u16;
-    let open_w = if strips < 2 { area.width.saturating_sub(strips * 3) / (2 - strips) } else { 0 };
-    let mut x = area.x;
-    let mut rects = [Rect::default(); 2];
-    for (i, r) in rects.iter_mut().enumerate() {
-        let w = if app.fold[i] { 3 } else { open_w };
-        *r = Rect::new(x, area.y, w, area.height);
-        x += w;
-    }
+    // Projects on top (as tall as its list needs, at most half), Servers below.
+    let projects_len = if app.view == View::Spaces { app.rows.len() } else { app.other_rows.len() };
+    let top_h = (projects_len as u16 + 5).clamp(8, (area.height / 2).max(8)).min(area.height.saturating_sub(8));
+    let rects = [
+        Rect::new(area.x, area.y, area.width, top_h),
+        Rect::new(area.x, area.y + top_h, area.width, area.height - top_h),
+    ];
     // The titles come first in the toolbar: the keyboard highlight finds them by position (`HEADER`).
     let names = ["Projects", "Servers"];
     for i in 0..2 {
@@ -251,10 +247,6 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
     f.render_widget(Paragraph::new(format!("  {name}")).style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
     // The list keeps two columns of margin on the left and a little on the right.
     let inner = Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(5), area.height.saturating_sub(3));
-    // The fold button, at the right end of the title row; big enough to click.
-    let fold = Rect::new(area.x + area.width.saturating_sub(5), area.y, 4, 1);
-    f.render_widget(Paragraph::new(" ‹  ").style(Style::new().fg(c_muted()).bg(c_sel())), fold);
-    app.layout.toolbar.push((fold, Hit::Fold(i)));
     // The actions of the column, as small padded buttons along the bottom.
     let by = area.y + area.height - 1;
     let actions: [(&str, Hit); 3] = if i == 0 {
@@ -926,7 +918,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.modal.is_some() {
         "Esc cancel"
     } else if app.focus == Focus::Terminal {
-        "F6 next area · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close · Alt+B fold panel"
+        "F6 next area · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close"
     } else if app.header.is_some() {
         "←→ choose column · Esc back to the list"
     } else if app.view == View::Spaces {
