@@ -193,7 +193,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.layout.list_bottom = Rect::default();
     // Projects on top (as tall as its list needs, at most half), Servers below.
     let projects_len = if app.view == View::Spaces { app.rows.len() } else { app.other_rows.len() };
-    let top_h = (projects_len as u16 * 2 + 5).clamp(8, (area.height / 2).max(8)).min(area.height.saturating_sub(8));
+    let top_h = (projects_len as u16 + 5).clamp(8, (area.height / 2).max(8)).min(area.height.saturating_sub(8));
     let rects = [
         Rect::new(area.x, area.y, area.width, top_h),
         Rect::new(area.x, area.y + top_h, area.width, area.height - top_h),
@@ -302,19 +302,17 @@ fn list_geom(rows: &[Row], view: View, list: Rect) -> ListGeom {
     let _ = view;
     let header = rows.iter().position(|r| r.node == NodeId::BastionsHeader);
     let split = if list.height >= 6 { header } else { None };
-    // Airy rows (a blank line under each) whenever the whole list fits that way; tighter otherwise.
-    let rh: u16 = if rows.len() * 2 <= list.height as usize { 2 } else { 1 };
     let (top, bottom) = match split {
         // The part below (folders, bastions) starts right after the top one, with a blank line between, and
         // takes at most half of the column.
         Some(h) => {
-            let bottom_lines = ((rows.len() - h) as u16 * rh).min(list.height / 2);
-            let top_h = (h as u16 * rh + 1).min(list.height - bottom_lines);
+            let bottom_lines = ((rows.len() - h) as u16).min(list.height / 2);
+            let top_h = (h as u16 + 1).min(list.height - bottom_lines);
             (Rect::new(list.x, list.y, list.width, top_h), Rect::new(list.x, list.y + top_h, list.width, list.height - top_h))
         }
         None => (list, Rect::default()),
     };
-    ListGeom { top, bottom, split, row_h: rh, bottom_row_h: rh, top_count: split.unwrap_or(rows.len()) }
+    ListGeom { top, bottom, split, row_h: 1, bottom_row_h: 1, top_count: split.unwrap_or(rows.len()) }
 }
 
 /// The list of the column that is not the active view. It is laid out exactly like the active one, from
@@ -426,10 +424,6 @@ fn draw_rows(
             }
         }
         style = style.bg(bg);
-        // The highlight covers the blank line under an airy row too.
-        if row_h > 1 && bg != Color::Reset && y + 1 < area.y + area.height {
-            f.render_widget(Paragraph::new("").style(Style::new().bg(bg)), Rect::new(area.x, y + 1, area.width, 1));
-        }
 
         if let NodeId::Space(id) = row.node {
             // A solid two-line block: name, and under it the git branch (or the directory).
