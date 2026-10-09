@@ -20,16 +20,16 @@ const GREEN: Color = Color::Rgb(158, 206, 106);
 const AMBER: Color = Color::Rgb(224, 175, 104);
 const REMOTE_GREEN: Color = Color::Rgb(187, 154, 247);
 const REMOTE_GREEN_BRIGHT: Color = Color::Rgb(208, 184, 255);
-/// Soft colours, one per space: greens, yellows, pinks, purples and reds (no browns, no blue wall).
+/// One colour per project, taken from ship's own palette and as far apart from each other as possible.
 const PASTELS: [(u8, u8, u8); 8] = [
-    (166, 227, 161), // green
-    (249, 226, 175), // yellow
-    (245, 194, 231), // pink
-    (203, 166, 247), // purple
-    (243, 139, 168), // red
-    (148, 226, 213), // mint
-    (255, 238, 140), // lemon
-    (190, 160, 255), // violet
+    (122, 162, 247), // blue
+    (247, 118, 142), // red
+    (158, 206, 106), // green
+    (224, 175, 104), // amber
+    (187, 154, 247), // lilac
+    (125, 207, 255), // cyan
+    (255, 150, 100), // orange
+    (115, 218, 180), // teal
 ];
 
 fn space_color(id: u64, live: bool) -> Color {
@@ -70,7 +70,6 @@ fn centered(w: u16, h: u16, area: Rect) -> Rect {
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     app.layout.tabs.clear();
-    app.layout.agents.clear();
     app.layout.toolbar.clear();
     app.layout.modal.clear();
 
@@ -93,10 +92,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 // ---------------------------------------------------------------- sidebar
 
 /// Fills `r` with `bg` and writes `lines` on it (the first lines of the block), so a block is a solid box.
-fn block(f: &mut Frame, r: Rect, lines: Vec<Line<'static>>, bg: Color) {
-    f.render_widget(Paragraph::new(lines).style(Style::new().bg(bg)), r);
-}
-
 fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar && app.modal.is_none();
     let block_frame = Block::bordered()
@@ -109,12 +104,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     // With room, the blocks are tall and airy; in a short window they shrink back to one line.
-    let roomy = inner.height >= 24;
     let in_spaces = app.view == View::Spaces;
 
     // Buttons: one small line at the very bottom. Everything also has a key, shown in the status bar.
     let buttons = [
-        (if in_spaces { " + Agent " } else { " + Server " }, Hit::AddServer),
+        (if in_spaces { " + Project " } else { " + Server " }, Hit::AddServer),
         (if in_spaces { " + Terminal " } else { " + Folder " }, Hit::AddFolder),
         (" Edit ", Hit::Edit),
     ];
@@ -131,7 +125,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // Views, at the top.
     let views_y = inner.y;
     let views = [
-        (" Agents ", View::Spaces, Hit::ViewSpaces),
+        (" Projects ", View::Spaces, Hit::ViewSpaces),
         (" SSH ", View::Folders, Hit::ViewFolders),
     ];
     let mut vx = inner.x;
@@ -158,63 +152,28 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // The line of buttons, and one line of air above it.
     let bottom_h: u16 = if inner.height >= 6 { 2 } else { 1 };
 
-    // Agents panel: every AI agent running in any terminal, above the terminal entry.
-    let agents = app.agent_tabs();
-    let agent_h: u16 = if roomy { 2 } else { 1 };
-    let shown = agents.len().min(if roomy { 3 } else { 5 });
-    let panel_h: u16 = if shown > 0 && inner.height >= 12 { shown as u16 * agent_h + 1 + if roomy { 1 } else { 0 } } else { 0 };
-    if panel_h > 0 {
-        let top = inner.y + inner.height - bottom_h - panel_h;
-        let extra = if agents.len() > shown { format!(" +{}", agents.len() - shown) } else { String::new() };
-        f.render_widget(
-            Paragraph::new(format!("running{extra}")).style(Style::new().fg(MUTED).add_modifier(Modifier::BOLD)),
-            Rect::new(inner.x, top, inner.width, 1),
-        );
-        for (k, &ti) in agents.iter().take(shown).enumerate() {
-            let tab = &app.tabs[ti];
-            let Some(info) = tab.session.agent() else { continue };
-            let color = if tab.attention {
-                GREEN
-            } else if info.working {
-                AMBER
-            } else {
-                MUTED
-            };
-            let here = (ti == app.active && tab.scope == app.scope && app.focus == Focus::Terminal)
-                || (focused && app.agent_sel == Some(k));
-            let bg = if here { SEL_BG } else { Color::Reset };
-            let place = fit(&app.tab_place(tab), (inner.width as usize).saturating_sub(3));
-            let name_style = Style::new().fg(if tab.attention { GREEN } else { FG }).bg(bg);
-            let r = Rect::new(inner.x, top + 1 + k as u16 * agent_h, inner.width, agent_h);
-            let lines = if roomy {
-                vec![
-                    Line::from(vec![
-                        Span::styled(" ", Style::new().bg(color)),
-                        Span::styled(format!(" {}", info.name), name_style.add_modifier(Modifier::BOLD)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(" ", Style::new().bg(color)),
-                        Span::styled(format!(" {place}"), Style::new().fg(MUTED).bg(bg)),
-                    ]),
-                ]
-            } else {
-                vec![Line::from(vec![
-                    Span::styled(" ", Style::new().bg(color)),
-                    Span::styled(format!(" {}", info.name), name_style),
-                    Span::styled(format!("  {place}"), Style::new().fg(MUTED).bg(bg)),
-                ])]
-            };
-            block(f, r, lines, bg);
-            app.layout.agents.push((r, ti));
-        }
-    }
-
     // The list. Spaces are packed two-line blocks when there is room; servers stay dense.
     let list_top = views_y + 2;
-    let list_h = (inner.y + inner.height).saturating_sub(list_top + bottom_h + panel_h);
+    let list_h = (inner.y + inner.height).saturating_sub(list_top + bottom_h);
     let list = Rect::new(inner.x, list_top, inner.width, list_h);
     app.layout.list = list;
-    let row_h: u16 = 1;
+    // Projects are two-line blocks with a blank line between them; with many projects they pack tighter.
+    // Folders (if any) take as many lines as they need, up to half of the list; the projects get the rest.
+    let split_at = if in_spaces { app.split_index() } else { None };
+    let bottom_lines = split_at.map(|h| ((app.rows.len() - h) as u16).min(list_h / 2)).unwrap_or(0);
+    let row_h: u16 = if in_spaces {
+        let n = split_at.unwrap_or(app.rows.len()) as u16;
+        let list_h = list_h - bottom_lines;
+        if n * 3 <= list_h + 1 {
+            3
+        } else if n * 2 <= list_h {
+            2
+        } else {
+            1
+        }
+    } else {
+        1
+    };
     app.layout.row_h = row_h;
     if list.height == 0 {
         return;
@@ -222,7 +181,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.rows.is_empty() {
         let lines: Vec<&str> = if app.view == View::Spaces {
-            vec!["No agents yet.", "Press a: a terminal opens;", "run claude, opencode… in it.", "It stays where you leave it (cd)."]
+            vec!["No projects yet.", "Press a: a terminal opens;", "run claude, opencode… in it.", "It stays where you leave it (cd)."]
         } else {
             vec!["No servers yet.", "Click “+ Server” or press a."]
         };
@@ -232,10 +191,10 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // The SSH view is split in two halves, folders above and the bastions below, starting at the middle.
-    let split = if app.view == View::Folders && list.height >= 6 { app.split_index() } else { None };
+    let split = if (app.view == View::Folders || in_spaces) && list.height >= 6 { app.split_index() } else { None };
     let (top, bottom) = match split {
         Some(_) => {
-            let top_h = list.height.div_ceil(2);
+            let top_h = if in_spaces { list.height - bottom_lines } else { list.height.div_ceil(2) };
             (Rect::new(list.x, list.y, list.width, top_h), Rect::new(list.x, list.y + top_h, list.width, list.height - top_h))
         }
         None => (list, Rect::default()),
@@ -255,7 +214,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
     app.offset = app.offset.min(top_count.saturating_sub(h_top));
     if let Some(header) = split {
-        let h_bottom = ((bottom.height / row_h) as usize).max(1);
+        let h_bottom = ((bottom.height / if in_spaces { 1 } else { row_h }) as usize).max(1);
         if app.selected >= header {
             let rel = app.selected - header;
             if rel < app.offset_bottom {
@@ -270,7 +229,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let (offset, offset_bottom, rows_len) = (app.offset, app.offset_bottom, app.rows.len());
     draw_rows(f, app, top, 0, top_count, offset, row_h, focused);
     if let Some(header) = split {
-        draw_rows(f, app, bottom, header, rows_len, offset_bottom, row_h, focused);
+        draw_rows(f, app, bottom, header, rows_len, offset_bottom, if in_spaces { 1 } else { row_h }, focused);
     }
 }
 
@@ -308,13 +267,57 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
             // One line: a coloured spine for the state, the name, and the branch (or directory) on the right.
             // The name turns green when the agent has finished; the spine keeps the space's own colour.
             let color = space_color(id, live);
-            let (text, tone) = match app.branches.get(&id) {
+            let (mut text, tone) = match app.branches.get(&id) {
                 Some(b) => (b.clone(), REMOTE_GREEN),
                 None => (cwd, MUTED),
             };
+            // A filed project that is on top says which folder it belongs to.
+            if !row.jump {
+                if let Some(fo) = sp.and_then(|s| s.folder).and_then(|f| app.spaces.folder(f)) {
+                    text = format!("▸ {}  {}", fo.name, text);
+                }
+            }
+            // The AI agent running in this project, if any: its name, coloured by what it is doing.
+            let agent = app
+                .tabs
+                .iter()
+                .filter(mine)
+                .filter_map(|t| t.session.agent().map(|a| (t.attention, a.working, a.name.clone())))
+                .max_by_key(|&(att, working, _)| (att, working));
             let name_w = name.width().min(width.saturating_sub(3));
-            // The name keeps its room; the rest goes to the branch, if there is enough to be useful.
-            let room = width.saturating_sub(2 + name_w + 3);
+            let tag = agent.map(|(att, working, aname)| {
+                if att {
+                    (format!("{aname} ✓"), GREEN)
+                } else if working {
+                    (format!("{aname} …"), AMBER)
+                } else {
+                    (aname, MUTED)
+                }
+            });
+            if row_h >= 2 {
+                // Two lines under a square bar: the name (and the agent on the right), then the branch.
+                let bar = || Span::styled("██", Style::new().fg(color).bg(bg));
+                let mut first = vec![
+                    bar(),
+                    Span::styled(
+                        format!(" {}", fit(&name, width.saturating_sub(4))),
+                        style.fg(if attention { GREEN } else { FG }).add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                if let Some((t, tc)) = tag {
+                    let room = width.saturating_sub(3 + name_w + 2);
+                    if t.width() <= room {
+                        first.push(Span::styled(" ".repeat(room - t.width() + 1), Style::new().bg(bg)));
+                        first.push(Span::styled(t, Style::new().fg(tc).bg(bg).add_modifier(Modifier::BOLD)));
+                    }
+                }
+                let second = vec![bar(), Span::styled(format!(" {}", fit(&text, width.saturating_sub(4))), Style::new().fg(tone).bg(bg))];
+                f.render_widget(
+                    Paragraph::new(vec![Line::from(first), Line::from(second)]).style(Style::new().bg(bg)),
+                    Rect::new(area.x, y, area.width, 2),
+                );
+                continue;
+            }
             let mut spans = vec![
                 Span::styled("▆", Style::new().fg(color).bg(bg)),
                 Span::styled(
@@ -322,10 +325,25 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
                     style.fg(if attention { GREEN } else { FG }).add_modifier(Modifier::BOLD),
                 ),
             ];
-            if room >= 6 {
+            // The rest of the line, right-aligned: the agent (if any) first, then the branch if it still fits.
+            let mut room = width.saturating_sub(2 + name_w + 3);
+            let mut right: Vec<Span<'static>> = vec![];
+            if let Some((t, tc)) = tag {
+                if t.width() <= room {
+                    room -= t.width() + 2;
+                    right.push(Span::styled(t, Style::new().fg(tc).bg(bg).add_modifier(Modifier::BOLD)));
+                }
+            }
+            if room >= 6 && !text.is_empty() {
                 let shown = fit(&text, room);
-                let pad = room.saturating_sub(shown.width());
-                spans.push(Span::styled(format!("{}{} ", " ".repeat(pad + 2), shown), Style::new().fg(tone).bg(bg)));
+                right.insert(0, Span::styled(format!("{}  ", shown), Style::new().fg(tone).bg(bg)));
+            }
+            let used: usize = right.iter().map(|sp| sp.content.width()).sum();
+            if used > 0 {
+                let pad = width.saturating_sub(2 + name_w + used + 1);
+                spans.push(Span::styled(" ".repeat(pad), Style::new().bg(bg)));
+                spans.extend(right);
+                spans.push(Span::styled(" ", Style::new().bg(bg)));
             }
             f.render_widget(Paragraph::new(Line::from(spans)).style(Style::new().bg(bg)), Rect::new(area.x, y, area.width, 1));
             continue;
@@ -335,10 +353,39 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
         let mut spans = vec![Span::raw(indent.clone())];
         match row.node {
             NodeId::Space(_) => {}
+            NodeId::SpaceFolder(id) => {
+                // One small line: the folder, how many projects it holds, and whether an agent runs inside.
+                let fo = app.spaces.folder(id);
+                let open = fo.is_some_and(|f| f.expanded);
+                let name = fo.map(|f| f.name.as_str()).unwrap_or("?");
+                let inside: Vec<u64> = app.spaces.spaces.iter().filter(|s| s.folder == Some(id)).map(|s| s.id).collect();
+                let agents = app.tabs.iter().filter(|t| matches!(t.scope, Scope::Space(s) if inside.contains(&s)));
+                let (mut att, mut work) = (false, false);
+                for t in agents {
+                    att |= t.attention;
+                    work |= t.session.agent().is_some_and(|a| a.working);
+                }
+                let (mark, mc) = if att {
+                    (" ✓", GREEN)
+                } else if work {
+                    (" …", AMBER)
+                } else {
+                    ("", MUTED)
+                };
+                let count = format!(" ({}){}", inside.len(), mark);
+                let label = fit(name, width.saturating_sub(indent.width() + 2 + count.width()));
+                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(AMBER)));
+                spans.push(Span::styled(label, Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(format!(" ({})", inside.len()), Style::new().fg(MUTED)));
+                if !mark.is_empty() {
+                    spans.push(Span::styled(mark, Style::new().fg(mc).add_modifier(Modifier::BOLD)));
+                }
+            }
             NodeId::BastionsHeader => {
                 // A fixed label with a rule after it: only the bastions below it fold.
-                spans.push(Span::styled("bastions", Style::new().fg(MUTED).add_modifier(Modifier::BOLD)));
-                let rest = width.saturating_sub(indent.width() + "bastions".len() + 1);
+                let title = if app.view == View::Spaces { "folders" } else { "bastions" };
+                spans.push(Span::styled(title, Style::new().fg(MUTED).add_modifier(Modifier::BOLD)));
+                let rest = width.saturating_sub(indent.width() + title.len() + 1);
                 spans.push(Span::styled(format!(" {}", "─".repeat(rest)), Style::new().fg(MUTED)));
             }
             NodeId::Folder(id) => {
@@ -586,11 +633,11 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
         Scope::Ssh => vec![
             "Double-click a server to open a session.".into(),
             "Drag servers and folders to reorganize them.".into(),
-            "F6 switches between the panel and the terminal.".into(),
+            "Alt+Q switches between the panel and the terminal.".into(),
         ],
         Scope::Space(0) => vec![
-            "No agents yet.".into(),
-            "Press a (or “+ Agent”): a terminal opens. Move around with cd and mkdir:".into(),
+            "No projects yet.".into(),
+            "Press a (or “+ Project”): a terminal opens. Move around with cd and mkdir:".into(),
             "it stays in the last directory you leave it in.".into(),
         ],
         Scope::Space(id) => {
@@ -619,11 +666,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else if app.modal.is_some() {
         "Esc cancel".to_string()
     } else if app.focus == Focus::Terminal {
-        "F6 panel · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close · F2 rename · drag: select+copy · Shift+PgUp/PgDn/Home/End history".to_string()
+        "Alt+Q panel · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close · F2 rename · drag: select+copy · Shift+PgUp/PgDn/Home/End history".to_string()
     } else if app.header.is_some() {
         "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
     } else if app.view == View::Spaces && app.header.is_none() {
-        "↑↓ choose · Enter open · a new agent · e rename · d delete · t terminal · Alt+n next agent · q quit".to_string()
+        "↑↓ choose · Enter open · a new project · f folder · m move to folder · e rename · d delete · t terminal · Alt+n next agent · q quit".to_string()
     } else if app.header.is_some() {
         "←→ choose · Enter activate · Esc (or ↑↓) back to the list".to_string()
     } else {

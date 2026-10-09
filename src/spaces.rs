@@ -14,6 +14,28 @@ pub struct Space {
     /// The name follows the directory until the user renames the space.
     #[serde(default = "yes")]
     pub auto_name: bool,
+    /// The folder it is filed in, if any.
+    #[serde(default)]
+    pub folder: Option<u64>,
+    /// When something was last run in it (unix seconds). A filed project shows on top for a while after that.
+    #[serde(default)]
+    pub used_at: u64,
+}
+
+/// A folder of projects: it only groups them in the lower part of the list.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SpaceFolder {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub expanded: bool,
+}
+
+/// How long a filed project stays on top of the list after you last ran something in it.
+const PROMOTED_FOR: u64 = 3 * 24 * 3600;
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 fn yes() -> bool {
@@ -24,6 +46,8 @@ fn yes() -> bool {
 pub struct Spaces {
     next_id: u64,
     pub spaces: Vec<Space>,
+    #[serde(default)]
+    pub folders: Vec<SpaceFolder>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -64,8 +88,20 @@ impl Spaces {
 
     pub fn add(&mut self, name: String, cwd: String) -> u64 {
         self.next_id += 1;
-        self.spaces.push(Space { id: self.next_id, name, cwd, auto_name: true });
+        self.spaces.push(Space { id: self.next_id, name, cwd, auto_name: true, folder: None, used_at: 0 });
         self.next_id
+    }
+
+    /// Moves a space to the top of the list (the most recently used first). Returns true if the order changed.
+    pub fn touch(&mut self, id: u64) -> bool {
+        match self.spaces.iter().position(|s| s.id == id) {
+            Some(i) if i > 0 => {
+                let s = self.spaces.remove(i);
+                self.spaces.insert(0, s);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// A name chosen by the user: it no longer follows the directory.
@@ -88,6 +124,51 @@ impl Spaces {
             s.name = auto_name;
         }
         true
+    }
+
+    pub fn folder(&self, id: u64) -> Option<&SpaceFolder> {
+        self.folders.iter().find(|f| f.id == id)
+    }
+
+    pub fn add_folder(&mut self, name: String) -> u64 {
+        self.next_id += 1;
+        self.folders.push(SpaceFolder { id: self.next_id, name, expanded: true });
+        self.next_id
+    }
+
+    /// The id of the folder with this name (ignoring case), if there is one.
+    pub fn folder_named(&self, name: &str) -> Option<u64> {
+        self.folders.iter().find(|f| f.name.eq_ignore_ascii_case(name)).map(|f| f.id)
+    }
+
+    /// Deletes a folder; its projects go back to the plain list.
+    pub fn remove_folder(&mut self, id: u64) {
+        self.folders.retain(|f| f.id != id);
+        for s in self.spaces.iter_mut().filter(|s| s.folder == Some(id)) {
+            s.folder = None;
+        }
+    }
+
+    /// Files a project in a folder (or takes it out). It leaves the top of the list until it is used again.
+    pub fn set_folder(&mut self, id: u64, folder: Option<u64>) {
+        if let Some(s) = self.spaces.iter_mut().find(|s| s.id == id) {
+            s.folder = folder;
+            s.used_at = 0;
+        }
+    }
+
+    /// Shown in the top part of the list: every project that is not filed, and the filed ones used recently.
+    pub fn on_top(&self, s: &Space) -> bool {
+        s.folder.is_none() || now().saturating_sub(s.used_at) < PROMOTED_FOR && s.used_at > 0
+    }
+
+    /// Something was run in this project. Returns true if that puts a filed project on top.
+    pub fn mark_used(&mut self, id: u64) -> bool {
+        let was = self.spaces.iter().find(|s| s.id == id).is_some_and(|s| self.on_top(s));
+        if let Some(s) = self.spaces.iter_mut().find(|s| s.id == id) {
+            s.used_at = now();
+        }
+        !was
     }
 
     pub fn remove(&mut self, id: u64) {
@@ -171,6 +252,24 @@ mod tests {
         let mut t = t;
         assert_eq!(t.add("x".into(), "/x".into()), 3, "ids keep growing");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn filed_projects_leave_the_top_until_they_are_used() {
+        let mut s = Spaces::default();
+        let a = s.add("a".into(), "/a".into());
+        let b = s.add("b".into(), "/b".into());
+        let f = s.add_folder("Work".into());
+        assert!(s.on_top(s.get(a).unwrap()), "an unfiled project is on top");
+        s.set_folder(a, Some(f));
+        assert!(!s.on_top(s.get(a).unwrap()), "filed and never used: only in its folder");
+        assert_eq!(s.folder_named("work"), Some(f), "names match without regard to case");
+        assert!(s.mark_used(a), "using it puts it on top");
+        assert!(s.on_top(s.get(a).unwrap()));
+        assert!(!s.mark_used(a), "already on top");
+        s.get(b).unwrap();
+        s.remove_folder(f);
+        assert_eq!(s.get(a).unwrap().folder, None, "deleting a folder frees its projects");
     }
 
     #[test]

@@ -396,6 +396,9 @@ pub enum PromptKind {
     NewFolder(Option<u64>),
     RenameFolder(u64),
     RenameTab(usize),
+    NewSpaceFolder,
+    RenameSpaceFolder(u64),
+    MoveSpace(u64),
 }
 
 pub struct Prompt {
@@ -542,8 +545,6 @@ pub struct Layout {
     pub tabbar: Rect,
     pub content: Rect,
     pub tabs: Vec<TabHit>,
-    /// Rows of the agents panel: (area, index in `App::tabs`).
-    pub agents: Vec<(Rect, usize)>,
     pub toolbar: Vec<(Rect, Hit)>,
     pub modal: Vec<(Rect, Hit)>,
     pub picker_list: Rect,
@@ -609,8 +610,6 @@ pub struct App {
     pub view: View,
     /// Keyboard focus on the sidebar header instead of the list: an index into `HEADER`.
     pub header: Option<usize>,
-    /// Keyboard focus on an entry of the “running” panel (an index into `layout.agents`).
-    pub agent_sel: Option<usize>,
     /// The slots of the tab bar, as tab ids. A slot is a window onto one session: clicking a project in the sidebar
     /// changes what the current slot shows, and only `+` / Ctrl+N add a slot.
     bar: Vec<u64>,
@@ -661,7 +660,6 @@ impl App {
             jump_open: HashSet::new(),
             ui_path: PathBuf::new(),
             header: None,
-            agent_sel: None,
             bar: Vec::new(),
             last_active: None,
             pin_next: false,
@@ -730,9 +728,31 @@ impl App {
                     walk_jump(&self.store, None, 1, &self.jump_open, &mut self.rows);
                 }
             }
-            View::Spaces => self.rows.extend(
-                self.spaces.spaces.iter().map(|s| Row { node: NodeId::Space(s.id), depth: 0, jump: false }),
-            ),
+            View::Spaces => {
+                // On top: every project that is not filed, and the filed ones used lately. Below, like the
+                // bastions, the folders (small, collapsible) with all their projects.
+                let sp = &self.spaces;
+                self.rows.extend(
+                    sp.spaces
+                        .iter()
+                        .filter(|s| sp.on_top(s))
+                        .map(|s| Row { node: NodeId::Space(s.id), depth: 0, jump: false }),
+                );
+                if !sp.folders.is_empty() {
+                    self.rows.push(Row { node: NodeId::BastionsHeader, depth: 0, jump: false });
+                    for f in &sp.folders {
+                        self.rows.push(Row { node: NodeId::SpaceFolder(f.id), depth: 0, jump: true });
+                        if f.expanded {
+                            self.rows.extend(
+                                sp.spaces
+                                    .iter()
+                                    .filter(|s| s.folder == Some(f.id))
+                                    .map(|s| Row { node: NodeId::Space(s.id), depth: 1, jump: true }),
+                            );
+                        }
+                    }
+                }
+            }
         }
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
         // The title of the bastions section is a label, not something to stand on.
@@ -748,6 +768,7 @@ impl App {
                     || self.store.servers.iter().any(|s| s.parent == Some(id))
             }
             NodeId::Server(id) if row.jump => self.store.servers.iter().any(|s| s.jump == Some(id)),
+            NodeId::SpaceFolder(id) => self.spaces.spaces.iter().any(|s| s.folder == Some(id)),
             NodeId::BastionsHeader | NodeId::Server(_) | NodeId::Space(_) => false,
         }
     }
@@ -756,6 +777,7 @@ impl App {
         match row.node {
             NodeId::Folder(id) => self.store.folder(id).is_some_and(|f| f.expanded),
             NodeId::Server(id) => self.jump_open.contains(&id),
+            NodeId::SpaceFolder(id) => self.spaces.folder(id).is_some_and(|f| f.expanded),
             NodeId::BastionsHeader | NodeId::Space(_) => false,
         }
     }
@@ -775,6 +797,12 @@ impl App {
                     self.jump_open.remove(&id);
                 }
                 self.save_ui();
+            }
+            NodeId::SpaceFolder(id) => {
+                if let Some(f) = self.spaces.folders.iter_mut().find(|f| f.id == id) {
+                    f.expanded = open;
+                }
+                self.save_spaces();
             }
             NodeId::BastionsHeader | NodeId::Space(_) => {}
         }
@@ -866,14 +894,6 @@ impl App {
     /// Indices of the tabs where an AI agent is running, in any scope.
     pub fn agent_tabs(&self) -> Vec<usize> {
         self.tabs.iter().enumerate().filter(|(_, t)| t.session.agent().is_some()).map(|(i, _)| i).collect()
-    }
-
-    /// Name shown next to an agent: the space it runs in.
-    pub fn tab_place(&self, t: &Tab) -> String {
-        match t.scope {
-            Scope::Space(id) => self.spaces.get(id).map(|s| s.name.clone()).unwrap_or_default(),
-            Scope::Ssh => "local".into(),
-        }
     }
 
     /// Makes tab `idx` the one on screen, wherever it lives: the sidebar moves to its place (the agent's
@@ -1055,6 +1075,7 @@ impl App {
                 t.attention = false;
             }
         }
+        self.reap_exited_projects();
         self.follow_directories();
         self.sync_meta();
         if !self.lost_warned && self.daemon.as_ref().is_some_and(|d| !d.alive()) {
@@ -1137,7 +1158,7 @@ impl App {
             None => Scope::Ssh,
         };
         if reuse.is_none() && id == LOCAL && self.view == View::Spaces && !in_space {
-            return self.set_flash("Create an agent first (press a)");
+            return self.set_flash("Create a project first (press a)");
         }
         let cwd = match scope {
             Scope::Space(sid) => self.spaces.get(sid).map(|s| PathBuf::from(expand_tilde(&s.cwd))),
@@ -1530,7 +1551,7 @@ impl App {
             Some(NodeId::Space(_)) => {
                 return match self.scoped().contains(&self.active) {
                     true => self.close_tab(self.active),
-                    false => self.set_flash("No open terminal in this agent"),
+                    false => self.set_flash("No open terminal in this project"),
                 };
             }
             _ => return,
@@ -1549,6 +1570,55 @@ impl App {
     /// The tabs of the bar (indices into `tabs`), one per slot.
     pub fn bar_tabs(&self) -> Vec<usize> {
         self.bar.iter().filter_map(|id| self.tabs.iter().position(|t| t.id == *id)).collect()
+    }
+
+    /// A project whose terminals have all exited (you typed `exit`) disappears from the list. Only the entry
+    /// goes: the directory is never touched. Not when the background server was lost, which ends every session.
+    fn reap_exited_projects(&mut self) {
+        if self.daemon.as_ref().is_some_and(|d| !d.alive()) {
+            return;
+        }
+        let dead: Vec<usize> = (0..self.tabs.len())
+            .filter(|&i| matches!(self.tabs[i].scope, Scope::Space(_)) && self.tabs[i].session.exit_code.is_some())
+            .collect();
+        if dead.is_empty() {
+            return;
+        }
+        let mut gone: Vec<u64> = vec![];
+        for &i in &dead {
+            if let Scope::Space(id) = self.tabs[i].scope {
+                if !gone.contains(&id) {
+                    gone.push(id);
+                }
+            }
+        }
+        for i in dead.into_iter().rev() {
+            self.close_tab(i);
+        }
+        for id in gone {
+            if !self.tabs.iter().any(|t| t.scope == Scope::Space(id)) {
+                self.remembered.remove(&Scope::Space(id));
+                self.spaces.remove(id);
+            }
+        }
+        self.save_spaces();
+        self.rebuild();
+        self.sync_scope();
+    }
+
+    /// The project you work in goes to the top of the list (most recently used first). It happens when you press
+    /// Enter in one of its terminals (you ran something), not when you merely select, open or type in it, so
+    /// moving through the list does not shuffle it.
+    fn touch_space(&mut self, id: u64) {
+        let promoted = self.spaces.mark_used(id);
+        if self.spaces.touch(id) || promoted {
+            self.save_spaces();
+            let keep = self.selected_node();
+            self.rebuild();
+            if let Some(n) = keep {
+                self.select_node(n);
+            }
+        }
     }
 
     /// Keeps the slots in step with what happened: closed tabs lose their slot, and going to a session that has
@@ -1649,7 +1719,7 @@ impl App {
         let n = self.tabs.len();
         let pos = self.active.min(n.saturating_sub(1));
         match key.code {
-            KeyCode::F(6) => {
+            KeyCode::F(6) | KeyCode::Char('q') if alt || key.code == KeyCode::F(6) => {
                 self.focus = if self.focus == Focus::Terminal || n == 0 { Focus::Sidebar } else { Focus::Terminal };
                 return;
             }
@@ -1697,6 +1767,11 @@ impl App {
         if let Some(bytes) = keys::encode(key, app_cursor) {
             tab.session.reset_scroll();
             tab.session.write(&bytes);
+            if key.code == KeyCode::Enter {
+                if let Scope::Space(id) = tab.scope {
+                    self.touch_space(id);
+                }
+            }
         }
     }
 
@@ -1741,10 +1816,7 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.move_in_menu(i.saturating_sub(1).max(row_start), buttons),
             KeyCode::Right | KeyCode::Char('l') => self.move_in_menu((i + 1).min(row_end - 1), buttons),
             // The buttons are below the list and the views above it: the arrow that leads back to the list.
-            KeyCode::Up | KeyCode::Char('k') if buttons => {
-                self.header = None;
-                self.agent_sel = self.layout.agents.len().checked_sub(1);
-            }
+            KeyCode::Up | KeyCode::Char('k') if buttons => self.header = None,
             KeyCode::Down | KeyCode::Char('j') if !buttons => self.header = None,
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {}
             KeyCode::Esc => self.header = None,
@@ -1760,35 +1832,7 @@ impl App {
         true
     }
 
-    /// Keys while an entry of the “running” panel is highlighted. Returns true if the key was consumed.
-    fn agent_panel_key(&mut self, k: usize, key: KeyEvent) -> bool {
-        let n = self.layout.agents.len();
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.agent_sel = k.checked_sub(1),
-            KeyCode::Down | KeyCode::Char('j') if k + 1 < n => self.agent_sel = Some(k + 1),
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.agent_sel = None;
-                self.header = Some(0);
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if let Some(&(_, ti)) = self.layout.agents.get(k) {
-                    self.agent_sel = None;
-                    self.focus_tab(ti);
-                }
-            }
-            KeyCode::Esc => self.agent_sel = None,
-            _ => return false,
-        }
-        true
-    }
-
     fn sidebar_key(&mut self, key: KeyEvent) {
-        if let Some(k) = self.agent_sel {
-            if self.agent_panel_key(k, key) {
-                return;
-            }
-            self.agent_sel = None;
-        }
         if let Some(i) = self.header {
             if self.header_key(i, key) {
                 return;
@@ -1803,9 +1847,6 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
             KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => self.header = Some(self.view_index()),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') if self.selected >= last && !self.layout.agents.is_empty() => {
-                self.agent_sel = Some(0)
-            }
             KeyCode::Down | KeyCode::Char('j') if self.selected >= last => self.header = Some(0),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
@@ -1820,7 +1861,7 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected_row() {
                 Some(Row { node: NodeId::Space(id), .. }) => self.open_space(id),
                 Some(Row { node: NodeId::Server(id), .. }) => self.open_or_focus_server(id),
-                Some(row @ Row { node: NodeId::Folder(_), .. }) => self.toggle(row),
+                Some(row @ Row { node: NodeId::Folder(_) | NodeId::SpaceFolder(_), .. }) => self.toggle(row),
                 Some(Row { node: NodeId::BastionsHeader, .. }) | None => {}
             },
             KeyCode::Char('v') | KeyCode::Tab => self.set_view(match self.view {
@@ -1838,6 +1879,7 @@ impl App {
             KeyCode::Char('a') if self.view == View::Spaces => self.new_space(),
             KeyCode::Char('a') => self.new_server_form(),
             KeyCode::Char('f') => self.new_folder_prompt(),
+            KeyCode::Char('m') if self.view == View::Spaces => self.move_space_prompt(),
             KeyCode::Char('e') | KeyCode::F(4) => self.edit_selected(),
             KeyCode::Char('d') | KeyCode::Delete => self.ask_delete(),
             KeyCode::Char('c') if !ctrl => self.close_selected_tab(),
@@ -1918,6 +1960,14 @@ impl App {
     }
 
     fn new_folder_prompt(&mut self) {
+        if self.view == View::Spaces {
+            self.modal = Some(Modal::Prompt(Prompt {
+                title: "New folder of projects".into(),
+                input: Input::default(),
+                kind: PromptKind::NewSpaceFolder,
+            }));
+            return;
+        }
         if self.view != View::Folders {
             return self.set_flash("Folders are created in the SSH view (press v)");
         }
@@ -1930,7 +1980,7 @@ impl App {
 
     fn save_spaces(&mut self) {
         if let Err(e) = self.spaces.save() {
-            self.set_flash(format!("Could not save agents: {e}"));
+            self.set_flash(format!("Could not save projects: {e}"));
         }
     }
 
@@ -1979,7 +2029,9 @@ impl App {
 
     /// Shows a space and puts the keyboard on its terminal, opening the first one if it has none.
     fn open_space(&mut self, id: u64) {
-        self.select_node(NodeId::Space(id));
+        if self.selected_node() != Some(NodeId::Space(id)) {
+            self.select_node(NodeId::Space(id));
+        }
         self.sync_scope();
         if self.scoped().is_empty() {
             self.open_server(LOCAL);
@@ -1993,7 +2045,7 @@ impl App {
             Some(NodeId::Space(id)) => {
                 if let Some(sp) = self.spaces.get(id) {
                     self.modal = Some(Modal::Prompt(Prompt {
-                        title: "Rename agent".into(),
+                        title: "Rename project".into(),
                         input: Input::new(&sp.name),
                         kind: PromptKind::RenameSpace(id),
                     }));
@@ -2013,8 +2065,31 @@ impl App {
                     }));
                 }
             }
+            Some(NodeId::SpaceFolder(id)) => {
+                if let Some(f) = self.spaces.folder(id) {
+                    self.modal = Some(Modal::Prompt(Prompt {
+                        title: "Rename folder".into(),
+                        input: Input::new(&f.name),
+                        kind: PromptKind::RenameSpaceFolder(id),
+                    }));
+                }
+            }
             Some(NodeId::BastionsHeader) | None => {}
         }
+    }
+
+    /// `m` on a project: file it in a folder by name (a new name makes the folder; `-` takes it out).
+    fn move_space_prompt(&mut self) {
+        let Some(NodeId::Space(id)) = self.selected_node() else {
+            return self.set_flash("Select a project to move it into a folder");
+        };
+        let current =
+            self.spaces.get(id).and_then(|s| s.folder).and_then(|f| self.spaces.folder(f)).map(|f| f.name.clone());
+        self.modal = Some(Modal::Prompt(Prompt {
+            title: "Folder (new name creates it, - takes it out)".into(),
+            input: Input::new(current.as_deref().unwrap_or("")),
+            kind: PromptKind::MoveSpace(id),
+        }));
     }
 
     fn ask_delete(&mut self) {
@@ -2022,8 +2097,15 @@ impl App {
         if node == NodeId::BastionsHeader {
             return;
         }
+        if let NodeId::SpaceFolder(id) = node {
+            // Only the folder goes: its projects go back to the plain list.
+            self.spaces.remove_folder(id);
+            self.save_spaces();
+            self.rebuild();
+            return self.set_flash("Folder removed; its projects are back in the list");
+        }
         let text = match node {
-            NodeId::BastionsHeader => return,
+            NodeId::BastionsHeader | NodeId::SpaceFolder(_) => return,
             NodeId::Space(id) => format!(
                 "Delete “{}”? Its terminals are closed; the directory is not touched.",
                 self.spaces.get(id).map(|s| s.name.as_str()).unwrap_or("?")
@@ -2166,6 +2248,34 @@ impl App {
                     f.name = name;
                 }
                 self.persist();
+            }
+            PromptKind::NewSpaceFolder => {
+                let id = self.spaces.add_folder(name);
+                self.save_spaces();
+                self.rebuild();
+                self.select_node(NodeId::SpaceFolder(id));
+                self.focus = Focus::Sidebar;
+            }
+            PromptKind::RenameSpaceFolder(id) => {
+                if let Some(f) = self.spaces.folders.iter_mut().find(|f| f.id == id) {
+                    f.name = name;
+                }
+                self.save_spaces();
+            }
+            PromptKind::MoveSpace(id) => {
+                let folder = if name == "-" {
+                    None
+                } else {
+                    let f = self.spaces.folder_named(&name).unwrap_or_else(|| self.spaces.add_folder(name.clone()));
+                    if let Some(fo) = self.spaces.folders.iter_mut().find(|x| x.id == f) {
+                        fo.expanded = true;
+                    }
+                    Some(f)
+                };
+                self.spaces.set_folder(id, folder);
+                self.save_spaces();
+                self.rebuild();
+                self.select_node(NodeId::Space(id));
             }
             PromptKind::RenameTab(i) => {
                 if let Some(t) = self.tabs.get_mut(i) {
@@ -2357,7 +2467,8 @@ impl App {
         let rh = self.layout.row_h.max(1);
         let b = self.layout.list_bottom;
         if let (true, Some(header)) = (inside(b, x, y), self.split_index()) {
-            return Some(header + self.offset_bottom + ((y - b.y) / rh) as usize);
+            let rhb = if self.view == View::Spaces { 1 } else { rh };
+            return Some(header + self.offset_bottom + ((y - b.y) / rhb) as usize);
         }
         let l = self.layout.list;
         if inside(l, x, y) { Some(self.offset + ((y - l.y) / rh) as usize) } else { None }
@@ -2408,16 +2519,12 @@ impl App {
         let double = self.is_double_click(x, y);
         self.drag = None;
         self.header = None;
-        self.agent_sel = None;
         self.selection = None;
         self.selecting = false;
         if let Some(&(_, hit)) = self.layout.toolbar.iter().find(|(r, _)| inside(*r, x, y)) {
             self.header = None;
             self.activate(hit);
             return;
-        }
-        if let Some(&(_, i)) = self.layout.agents.iter().find(|(r, _)| inside(*r, x, y)) {
-            return self.focus_tab(i);
         }
         if inside(self.layout.sidebar, x, y) {
             self.focus = Focus::Sidebar;
@@ -2426,7 +2533,7 @@ impl App {
                 let row = self.rows[i];
                 if double {
                     match row.node {
-                        NodeId::Folder(_) => self.toggle(row),
+                        NodeId::Folder(_) | NodeId::SpaceFolder(_) => self.toggle(row),
                         NodeId::BastionsHeader => {}
                         NodeId::Server(id) => self.open_or_focus_server(id),
                         NodeId::Space(id) => self.open_space(id),
@@ -2554,9 +2661,37 @@ impl App {
         }
     }
 
-    fn drop_node(&mut self, node: NodeId, from_jump: bool, x: u16, y: u16) {
-        if !inside(self.layout.sidebar, x, y) || self.view == View::Spaces {
+    /// A project dropped on a folder (or on a project filed in it) goes into it; dropped on the top part it is
+    /// taken out of its folder.
+    fn drop_space(&mut self, node: NodeId, x: u16, y: u16) {
+        let NodeId::Space(id) = node else { return };
+        let target = self.row_at(x, y).and_then(|i| self.rows.get(i)).copied();
+        let folder = match target {
+            Some(Row { node: NodeId::SpaceFolder(f), .. }) => Some(Some(f)),
+            Some(Row { node: NodeId::Space(t), jump: true, .. }) => self.spaces.get(t).map(|s| s.folder),
+            Some(Row { node: NodeId::BastionsHeader, .. }) => None,
+            _ if inside(self.layout.list, x, y) || target.is_some() => Some(None),
+            _ => None,
+        };
+        let Some(folder) = folder else { return };
+        if self.spaces.get(id).is_some_and(|s| s.folder == folder) {
             return;
+        }
+        if let Some(f) = folder.and_then(|f| self.spaces.folders.iter_mut().find(|x| x.id == f)) {
+            f.expanded = true;
+        }
+        self.spaces.set_folder(id, folder);
+        self.save_spaces();
+        self.rebuild();
+        self.select_node(NodeId::Space(id));
+    }
+
+    fn drop_node(&mut self, node: NodeId, from_jump: bool, x: u16, y: u16) {
+        if !inside(self.layout.sidebar, x, y) {
+            return;
+        }
+        if self.view == View::Spaces {
+            return self.drop_space(node, x, y);
         }
         let target = self.row_at(x, y).and_then(|i| self.rows.get(i)).copied();
         // A server dropped on a bastion (or on something behind one) is reached through it from then on; one that
@@ -2593,7 +2728,7 @@ impl App {
         }
         let moved = match target.map(|r| (r.node, r.jump)) {
             Some((t, _)) if t == node => return,
-            Some((_, true)) | Some((NodeId::BastionsHeader, _)) | Some((NodeId::Space(_), _)) => false,
+            Some((_, true)) | Some((NodeId::BastionsHeader, _)) | Some((NodeId::Space(_) | NodeId::SpaceFolder(_), _)) => false,
             Some((NodeId::Folder(f), _)) => self.store.move_into(node, Some(f)),
             Some((NodeId::Server(s), _)) => match node {
                 NodeId::Server(id) => self.store.move_server_before(id, s),
@@ -2601,7 +2736,7 @@ impl App {
                     let parent = self.store.server(s).and_then(|s| s.parent);
                     self.store.move_into(node, parent)
                 }
-                NodeId::Space(_) | NodeId::BastionsHeader => false,
+                NodeId::Space(_) | NodeId::SpaceFolder(_) | NodeId::BastionsHeader => false,
             },
             None if inside(self.layout.list, x, y) || y >= self.layout.list.y => self.store.move_into(node, None),
             None => false,
@@ -2901,7 +3036,7 @@ mod tests {
         press(&mut app, KeyCode::Up);
         assert_eq!((app.header, app.view), (Some(4), View::Folders));
         press(&mut app, KeyCode::Left);
-        assert_eq!((app.header, app.view), (Some(3), View::Spaces), "Agents is to the left of SSH");
+        assert_eq!((app.header, app.view), (Some(3), View::Spaces), "Projects is to the left of SSH");
         press(&mut app, KeyCode::Left);
         assert_eq!((app.header, app.view), (Some(3), View::Spaces), "stops at the first");
         press(&mut app, KeyCode::Right);
@@ -3040,6 +3175,99 @@ mod tests {
         assert_eq!(app.bar_tabs().len(), 2, "still two slots");
         std::fs::remove_dir_all(d1).ok();
         std::fs::remove_dir_all(d2).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_project_you_use_moves_to_the_top() {
+        let (d1, d2) = (temp_dir("m1"), temp_dir("m2"));
+        let mut app = app_with_servers(0);
+        let a = app.spaces.add("a".into(), d1.display().to_string());
+        let b = app.spaces.add("b".into(), d2.display().to_string());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        assert_eq!(app.spaces.spaces[0].id, a);
+        app.open_space(b);
+        app.sync_bar();
+        assert_eq!(app.spaces.spaces[0].id, a, "opening a project does not move it");
+        assert_eq!(app.focus, Focus::Terminal);
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.spaces.spaces[0].id, a, "typing without Enter does not either");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.spaces.spaces[0].id, b, "Enter in it does: b was used last, so it comes first");
+        assert_eq!(app.selected_node(), Some(NodeId::Space(b)), "and the selection follows it");
+        std::fs::remove_dir_all(d1).ok();
+        std::fs::remove_dir_all(d2).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn alt_q_switches_between_the_sidebar_and_the_terminal() {
+        let mut app = app_with_servers(1);
+        app.open_server(LOCAL);
+        assert_eq!(app.focus, Focus::Terminal);
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT));
+        assert_eq!(app.focus, Focus::Sidebar);
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT));
+        assert_eq!(app.focus, Focus::Terminal);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_project_whose_shell_exits_leaves_the_list() {
+        let (d1, d2) = (temp_dir("x1"), temp_dir("x2"));
+        let mut app = app_with_servers(0);
+        let a = app.spaces.add("a".into(), d1.display().to_string());
+        let b = app.spaces.add("b".into(), d2.display().to_string());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        app.open_space(a);
+        app.open_space(b);
+        let ti = app.tabs.iter().position(|t| t.scope == Scope::Space(b)).unwrap();
+        app.tabs[ti].session.write(b"exit\r");
+        for _ in 0..100 {
+            app.tick();
+            if app.spaces.get(b).is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(app.spaces.get(b).is_none(), "b is gone after exit");
+        assert!(app.spaces.get(a).is_some(), "a stays");
+        assert!(d2.exists(), "its directory is untouched");
+        std::fs::remove_dir_all(d1).ok();
+        std::fs::remove_dir_all(d2).ok();
+    }
+
+    #[test]
+    fn projects_are_filed_in_folders_below_the_list() {
+        let mut app = app_with_servers(0);
+        let a = app.spaces.add("a".into(), "/tmp".into());
+        let b = app.spaces.add("b".into(), "/tmp".into());
+        app.rebuild();
+        app.set_view(View::Spaces);
+        app.select_node(NodeId::Space(a));
+        app.modal = None;
+        app.submit_prompt(&Prompt {
+            title: String::new(),
+            input: Input::new("Work"),
+            kind: PromptKind::MoveSpace(a),
+        });
+        let nodes: Vec<(NodeId, bool)> = app.rows.iter().map(|r| (r.node, r.jump)).collect();
+        let f = app.spaces.get(a).unwrap().folder.expect("the folder was created");
+        assert_eq!(
+            nodes,
+            vec![
+                (NodeId::Space(b), false),
+                (NodeId::BastionsHeader, false),
+                (NodeId::SpaceFolder(f), true),
+                (NodeId::Space(a), true),
+            ],
+            "b on top; a only inside its folder"
+        );
+        // `-` takes it out again.
+        app.submit_prompt(&Prompt { title: String::new(), input: Input::new("-"), kind: PromptKind::MoveSpace(a) });
+        assert!(app.rows.iter().filter(|r| matches!(r.node, NodeId::Space(_))).all(|r| !r.jump));
     }
 
     #[test]
