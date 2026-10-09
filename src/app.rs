@@ -612,13 +612,8 @@ pub struct App {
     pub view: View,
     /// Keyboard focus on the sidebar header instead of the list: an index into `HEADER`.
     pub header: Option<usize>,
-    /// The slots of the tab bar, as tab ids. A slot is a window onto one session: clicking a project in the sidebar
-    /// changes what the current slot shows, and only `+` / Ctrl+N add a slot.
+    /// The tab bar, as tab ids: every open tab, in the order it was opened.
     bar: Vec<u64>,
-    /// The tab that was active at the last `sync_bar`.
-    last_active: Option<u64>,
-    /// The next new tab gets a slot of its own instead of taking over the current one.
-    pin_next: bool,
     /// Servers whose hidden hosts are unfolded in the jump view.
     /// Bastions the user folded in the jump view (everything is unfolded by default).
     pub jump_open: HashSet<u64>,
@@ -664,8 +659,6 @@ impl App {
             ui_path: PathBuf::new(),
             header: None,
             bar: Vec::new(),
-            last_active: None,
-            pin_next: false,
             drag: None,
             last_click: None,
         };
@@ -1657,24 +1650,16 @@ impl App {
         }
     }
 
-    /// Keeps the slots in step with what happened: closed tabs lose their slot, and going to a session that has
-    /// no slot (from the sidebar) makes the slot you were on show it, unless a new slot was asked for.
+    /// Keeps the bar in step with the tabs, like a browser: every open tab has its place, in the order it was
+    /// opened, and a closed one loses it. Going to a session from the sidebar never replaces another tab.
     fn sync_bar(&mut self) {
         let tabs = &self.tabs;
         self.bar.retain(|id| tabs.iter().any(|t| t.id == *id));
-        let Some(cur) = self.tabs.get(self.active).map(|t| t.id) else {
-            self.last_active = None;
-            return;
-        };
-        if !self.bar.contains(&cur) {
-            let at = self.last_active.and_then(|p| self.bar.iter().position(|&b| b == p));
-            match at {
-                Some(p) if !self.pin_next => self.bar[p] = cur,
-                _ => self.bar.push(cur),
+        for t in &self.tabs {
+            if !self.bar.contains(&t.id) {
+                self.bar.push(t.id);
             }
-            self.pin_next = false;
         }
-        self.last_active = Some(cur);
     }
 
     /// Alt+←/→: the previous or next tab of the bar.
@@ -1690,7 +1675,6 @@ impl App {
 
     /// Ctrl+N and the + button: another tab beside the one you are on, both kept in the bar (same server, or a terminal in the same project).
     fn new_tab_here(&mut self) {
-        self.pin_next = true;
         let server = self
             .tabs
             .get(self.active)
@@ -3220,7 +3204,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn moving_between_projects_reuses_the_slot_and_plus_adds_one() {
+    fn every_open_tab_has_its_place_in_the_bar() {
         let (d1, d2) = (temp_dir("s1"), temp_dir("s2"));
         let mut app = app_with_servers(0);
         let a = app.spaces.add("a".into(), d1.display().to_string());
@@ -3232,17 +3216,15 @@ mod tests {
         app.open_space(b);
         app.sync_bar();
         assert_eq!(app.tabs.len(), 2, "each project has its session");
-        assert_eq!(app.bar_tabs().len(), 1, "but the bar still has one slot, now showing b");
-        assert_eq!(app.tabs[app.bar_tabs()[0]].scope, Scope::Space(b));
-        // + adds a slot; moving to a project then changes only the slot you are on.
+        assert_eq!(app.bar_tabs().len(), 2, "and the bar shows both, like browser tabs");
         app.new_tab_here();
         app.sync_bar();
-        assert_eq!(app.bar_tabs().len(), 2);
+        assert_eq!(app.bar_tabs().len(), 3);
         app.select_node(NodeId::Space(a));
         app.sync_scope();
         app.open_space(a);
         app.sync_bar();
-        assert_eq!(app.bar_tabs().len(), 2, "still two slots");
+        assert_eq!(app.bar_tabs().len(), 3, "going back to a project opens nothing new");
         std::fs::remove_dir_all(d1).ok();
         std::fs::remove_dir_all(d2).ok();
     }
@@ -3669,9 +3651,9 @@ mod tests {
         // Ctrl+N adds a tab to the project you are on, and only that project shows it.
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
         assert_eq!(app.tabs.len(), 3);
-        assert_eq!(app.bar_tabs().len(), 2, "the SSH tab lost its slot to the project when it was selected");
+        assert_eq!(app.bar_tabs().len(), 3, "all three tabs are in the bar");
         app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
-        assert_eq!(app.active, app.bar_tabs()[0]);
+        assert_eq!(app.active, app.bar_tabs()[1]);
         std::fs::remove_dir_all(dir).ok();
     }
 
