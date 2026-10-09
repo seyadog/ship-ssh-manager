@@ -191,9 +191,8 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.layout.col_geom = [ListGeom::default(); 2];
     app.layout.list = Rect::default();
     app.layout.list_bottom = Rect::default();
-    // Projects on top (as tall as its list needs, at most half), Servers below.
-    let projects_len = if app.view == View::Spaces { app.rows.len() } else { app.other_rows.len() };
-    let top_h = (projects_len as u16 + 5).clamp(8, (area.height / 2).max(8)).min(area.height.saturating_sub(8));
+    // Projects in the top half, Servers in the bottom half.
+    let top_h = area.height / 2;
     let rects = [
         Rect::new(area.x, area.y, area.width, top_h),
         Rect::new(area.x, area.y + top_h, area.width, area.height - top_h),
