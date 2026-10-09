@@ -1857,13 +1857,16 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
             KeyCode::End | KeyCode::Char('G') => self.selected = last,
             KeyCode::Right | KeyCode::Char('l') if matches!(self.selected_node(), Some(NodeId::Space(_))) => {
-                if let Some(NodeId::Space(id)) = self.selected_node() {
-                    self.open_space(id);
+                match self.selected_row() {
+                    Some(Row { node: NodeId::Space(id), jump: true, .. }) => self.open_filed_space(id),
+                    Some(Row { node: NodeId::Space(id), .. }) => self.open_space(id),
+                    _ => {}
                 }
             }
             KeyCode::Right | KeyCode::Char('l') => self.step_in(),
             KeyCode::Left | KeyCode::Char('h') => self.step_out(),
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected_row() {
+                Some(Row { node: NodeId::Space(id), jump: true, .. }) => self.open_filed_space(id),
                 Some(Row { node: NodeId::Space(id), .. }) => self.open_space(id),
                 Some(Row { node: NodeId::Server(id), .. }) => self.open_or_focus_server(id),
                 Some(row @ Row { node: NodeId::Folder(_) | NodeId::SpaceFolder(_), .. }) => self.toggle(row),
@@ -2043,6 +2046,16 @@ impl App {
         } else {
             self.focus = Focus::Terminal;
         }
+    }
+
+    /// Enter on a project filed in a folder: the row is a shortcut to its directory, not a running project. Every
+    /// time it is opened, a new project of that directory appears on top of the list; the shortcut stays as it was.
+    fn open_filed_space(&mut self, id: u64) {
+        let Some(shortcut) = self.spaces.get(id).cloned() else { return };
+        let new = self.spaces.add(shortcut.name, shortcut.cwd);
+        self.save_spaces();
+        self.rebuild();
+        self.open_space(new);
     }
 
     fn edit_selected(&mut self) {
@@ -2541,6 +2554,7 @@ impl App {
                         NodeId::Folder(_) | NodeId::SpaceFolder(_) => self.toggle(row),
                         NodeId::BastionsHeader => {}
                         NodeId::Server(id) => self.open_or_focus_server(id),
+                        NodeId::Space(id) if row.jump => self.open_filed_space(id),
                         NodeId::Space(id) => self.open_space(id),
                     }
                 } else {
@@ -3150,6 +3164,26 @@ mod tests {
         app.open_server(LOCAL);
         assert_eq!(app.tabs[1].scope, Scope::Ssh, "a local terminal outside the spaces belongs to the SSH section");
         assert_eq!(app.scoped(), vec![1]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_filed_project_is_a_shortcut_that_opens_a_new_project_on_top() {
+        let dir = temp_dir("shortcut");
+        let mut app = app_with_servers(0);
+        let f = app.spaces.add_folder("F".into());
+        let id = app.spaces.add("proj".into(), dir.display().to_string());
+        app.spaces.set_folder(id, Some(f));
+        app.rebuild();
+        app.set_view(View::Spaces);
+        app.open_filed_space(id);
+        assert_eq!(app.spaces.spaces.len(), 2, "a project appears on top");
+        let top = app.spaces.spaces.iter().find(|s| s.folder.is_none()).unwrap().id;
+        assert_eq!(app.scope, Scope::Space(top));
+        assert!(app.tabs.iter().all(|t| t.scope == Scope::Space(top)), "the shortcut has no terminal");
+        app.open_filed_space(id);
+        assert_eq!(app.spaces.spaces.len(), 3, "every opening makes a new project");
         std::fs::remove_dir_all(dir).ok();
     }
 
