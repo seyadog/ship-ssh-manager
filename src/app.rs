@@ -585,8 +585,8 @@ pub struct App {
     pub scope: Scope,
     /// The last active tab (by id) of each scope, to come back to it.
     remembered: HashMap<Scope, u64>,
-    /// The scope whose last tab was just closed: it shows the welcome screen instead of another scope's tab.
-    emptied: Option<Scope>,
+    /// The scopes whose last tab was closed: each shows the welcome screen instead of another scope's tab.
+    emptied: HashSet<Scope>,
     next_tab_id: u64,
     pub spaces: Spaces,
     /// Git branch of each space's directory, refreshed every few seconds.
@@ -642,7 +642,7 @@ impl App {
             active: 0,
             scope: Scope::Ssh,
             remembered: HashMap::new(),
-            emptied: None,
+            emptied: HashSet::new(),
             next_tab_id: 0,
             spaces: Spaces::default(),
             branches: HashMap::new(),
@@ -872,7 +872,7 @@ impl App {
     /// was closed (the welcome screen is shown, rather than jumping to a tab of another scope).
     pub fn blank(&self) -> bool {
         self.tabs.is_empty()
-            || (self.emptied == Some(self.scope) && self.tabs.get(self.active).is_none_or(|t| t.scope != self.scope))
+            || (self.emptied.contains(&self.scope) && self.tabs.get(self.active).is_none_or(|t| t.scope != self.scope))
     }
 
     /// Indices in `tabs` of the tabs of the current scope, in order.
@@ -1553,7 +1553,7 @@ impl App {
         let scope_left = self.tabs.iter().any(|t| t.scope == closed_scope);
         if was_active && closed_scope == self.scope && !scope_left {
             // The last terminal of this part of ship: stay here and show the welcome screen.
-            self.emptied = Some(closed_scope);
+            self.emptied.insert(closed_scope);
             self.focus = Focus::Sidebar;
         } else if was_active && !self.tabs.is_empty() {
             self.select_tab(self.active); // the sidebar follows the tab we land on
@@ -3668,6 +3668,22 @@ mod tests {
         app.close_tab(1);
         assert_eq!((app.tabs.len(), app.view, app.focus), (1, view, Focus::Sidebar), "the sidebar stays where it was");
         assert!(app.blank(), "the empty scope shows the welcome screen, not the other scope's tab");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn every_emptied_scope_keeps_showing_the_welcome() {
+        let (mut app, id, dir) = app_with_two_tabs();
+        app.close_tab(1); // SSH emptied
+        assert!(app.blank());
+        app.select_tab(0); // go to the project, then empty it too
+        app.close_tab(0);
+        assert!(app.blank(), "the project is empty");
+        app.set_view(View::Folders);
+        app.sync_scope();
+        assert!(app.blank(), "SSH was emptied earlier and still shows the welcome");
+        let _ = id;
         std::fs::remove_dir_all(dir).ok();
     }
 
