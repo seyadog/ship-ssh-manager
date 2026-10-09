@@ -524,7 +524,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
 // ---------------------------------------------------------------- contenido
 
 fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.tabs.is_empty() {
+    if app.blank() {
         return draw_welcome(f, app, area);
     }
     let focused = app.focus == Focus::Terminal && app.modal.is_none();
