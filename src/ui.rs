@@ -130,7 +130,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let [main, status] = RLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     // Two columns (Projects, Servers), each folded to a thin strip on request.
     let folded = app.fold.iter().filter(|&&f| f).count() as u16;
-    let col_w: u16 = if area.width >= 110 { 26 } else if area.width >= 80 { 22 } else { 18 };
+    let col_w: u16 = if area.width >= 110 { 30 } else if area.width >= 80 { 24 } else { 20 };
     let side_w = (folded * 3 + (2 - folded) * col_w).min(area.width / 2);
     let [side, right] = RLayout::horizontal([Constraint::Length(side_w), Constraint::Min(1)]).areas(main);
     let [tabbar, content] = RLayout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(right);
@@ -248,29 +248,31 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
     } else {
         Style::new().fg(c_muted())
     };
-    f.render_widget(Paragraph::new(format!(" {name}")).style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
-    let inner = Rect::new(area.x + 1, area.y + 2, area.width - 3, area.height - 3);
-    // The actions of the column, as plain words; the last one folds the column.
+    f.render_widget(Paragraph::new(format!("  {name}")).style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
+    // The list keeps two columns of margin on the left and a little on the right.
+    let inner = Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(5), area.height.saturating_sub(3));
+    // The fold button, at the right end of the title row; big enough to click.
+    let fold = Rect::new(area.x + area.width.saturating_sub(5), area.y, 4, 1);
+    f.render_widget(Paragraph::new(" ‹  ").style(Style::new().fg(c_muted()).bg(c_sel())), fold);
+    app.layout.toolbar.push((fold, Hit::Fold(i)));
+    // The actions of the column, as small padded buttons along the bottom.
     let by = area.y + area.height - 1;
     let actions: [(&str, Hit); 3] = if i == 0 {
-        [("+ new", Hit::NewProject), ("edit", Hit::Edit), ("term", Hit::Term)]
+        [(" + new ", Hit::NewProject), (" edit ", Hit::Edit), (" term ", Hit::Term)]
     } else {
-        [("+ new", Hit::NewServer), ("edit", Hit::Edit), ("vault", Hit::Vault)]
+        [(" + new ", Hit::NewServer), (" edit ", Hit::Edit), (" vault ", Hit::Vault)]
     };
-    let mut bx = area.x + 1;
+    let mut bx = area.x + 2;
     for (n, (label, hit)) in actions.into_iter().enumerate() {
         let w = label.width() as u16;
-        if bx + w + 4 > area.x + area.width - 1 {
+        if bx + w > area.x + area.width - 2 {
             break;
         }
         let r = Rect::new(bx, by, w, 1);
-        f.render_widget(Paragraph::new(label).style(Style::new().fg(if n == 0 { c_accent() } else { c_muted() })), r);
+        f.render_widget(Paragraph::new(label).style(Style::new().fg(if n == 0 { c_accent() } else { c_fg() }).bg(c_sel())), r);
         app.layout.toolbar.push((r, hit));
-        bx += w + 2;
+        bx += w + 1;
     }
-    let fold = Rect::new(area.x + area.width - 4, by, 3, 1);
-    f.render_widget(Paragraph::new(" ‹ ").style(Style::new().fg(c_muted())), fold);
-    app.layout.toolbar.push((fold, Hit::Fold(i)));
     let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
     if active {
         draw_active_list(f, app, list, focused);
@@ -474,7 +476,9 @@ fn draw_rows(
                 }
                 out
             };
+            let width = width.saturating_sub(1);
             let mut spans = vec![
+                Span::styled(" ", Style::new().bg(bg)),
                 Span::styled("▆", Style::new().fg(color).bg(bg)),
                 Span::styled(
                     format!(" {}", fit(&name, width.saturating_sub(3))),
@@ -528,8 +532,8 @@ fn draw_rows(
                     ("", c_muted())
                 };
                 let count = format!(" ({}){}", inside.len(), mark);
-                let label = fit(name, width.saturating_sub(indent.width() + 2 + count.width()));
-                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(c_amber())));
+                let label = fit(name, width.saturating_sub(indent.width() + 4 + count.width()));
+                spans.push(Span::styled(if open { " ▾  " } else { " ▸  " }, Style::new().fg(c_amber())));
                 spans.push(Span::styled(label, Style::new().fg(c_amber()).add_modifier(Modifier::BOLD)));
                 spans.push(Span::styled(format!(" ({})", inside.len()), Style::new().fg(c_muted())));
                 if !mark.is_empty() {
@@ -547,27 +551,27 @@ fn draw_rows(
                 let fo = app.store.folder(id);
                 let open = fo.is_some_and(|f| f.expanded);
                 let name = fo.map(|f| f.name.as_str()).unwrap_or("?");
-                let label = fit(name, width.saturating_sub(indent.width() + 3));
-                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(c_amber())));
+                let label = fit(name, width.saturating_sub(indent.width() + 5));
+                spans.push(Span::styled(if open { " ▾  " } else { " ▸  " }, Style::new().fg(c_amber())));
                 spans.push(Span::styled(label, Style::new().fg(c_amber()).add_modifier(Modifier::BOLD)));
             }
             NodeId::Server(id) => {
                 let s = app.store.server(id);
                 let name = s.map(|s| s.name.as_str()).unwrap_or("?");
                 let live = app.tabs.iter().any(|t| t.server_id == id && t.session.exit_code.is_none());
-                let label = fit(name, width.saturating_sub(indent.width() + 3));
+                let label = fit(name, width.saturating_sub(indent.width() + 5));
                 if app.has_children(row) {
-                    let arrow = if app.is_open(row) { "▾ " } else { "▸ " };
+                    let arrow = if app.is_open(row) { " ▾  " } else { " ▸  " };
                     spans.push(Span::styled(arrow, Style::new().fg(c_accent())));
                 } else {
                     spans.push(Span::styled(
-                        if live { "◆ " } else { "◇ " },
+                        if live { " ◆  " } else { " ◇  " },
                         Style::new().fg(if live { c_green() } else { c_muted() }),
                     ));
                 }
                 spans.push(Span::styled(label, Style::new().fg(if live { c_green() } else { c_fg() })));
                 if let Some(s) = s {
-                    let room = width.saturating_sub(indent.width() + 2 + name.width() + 2);
+                    let room = width.saturating_sub(indent.width() + 4 + name.width() + 2);
                     let via = match (row.jump, s.jump.and_then(|j| app.store.server(j))) {
                         (false, Some(j)) => format!("{} ↪ {}", s.host, j.name),
                         _ => s.host.clone(),
@@ -613,7 +617,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
         let max_title = (avail / n).saturating_sub(9).clamp(6, 20);
         let cell = |p: usize| {
             let tab = &app.tabs[scoped[p]];
-            fit(&app.tab_label(tab), max_title).width() + 8 + 1 + tab_tag(tab).map_or(0, |(t, _)| t.width() + 1)
+            fit(&app.tab_label(tab), max_title).width() + 11 + 1 + tab_tag(tab).map_or(0, |(t, _)| t.width() + 1)
         };
         let active = scoped.iter().position(|&i| Some(i) == shown).unwrap_or(0);
         let mut start = 0;
@@ -632,7 +636,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
             };
             let tag = tab_tag(tab);
             let tag_text = tag.as_ref().map(|(t, _)| format!(" {t}")).unwrap_or_default();
-            let text = format!(" {num}{} {}{tag_text} ✕ ", if dead { "○" } else { "●" }, title);
+            let text = format!("  {num}{} {}{tag_text}  ✕  ", if dead { "○" } else { "●" }, title);
             let w = text.width() as u16;
             if x + w > end {
                 break;
@@ -650,7 +654,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
             let rect = Rect::new(x, area.y, w, 1);
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" ", Style::new().bg(bg)),
+                    Span::styled("  ", Style::new().bg(bg)),
                     Span::styled(num, Style::new().fg(c_muted()).bg(bg)),
                     Span::styled(if dead { "◇ " } else { "◆ " }, Style::new().fg(dot).bg(bg)),
                     Span::styled(
@@ -658,18 +662,18 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
                         Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
                     ),
                     Span::styled(tag_text, Style::new().fg(tag.map_or(c_muted(), |(_, c)| c)).bg(bg)),
-                    Span::styled(" ✕ ", Style::new().fg(c_muted()).bg(bg)),
+                    Span::styled("  ✕  ", Style::new().fg(c_muted()).bg(bg)),
                 ])),
                 rect,
             );
-            hits.push(TabHit { idx: i, rect, close: Rect::new(x + w - 3, area.y, 3, 1) });
+            hits.push(TabHit { idx: i, rect, close: Rect::new(x + w - 5, area.y, 5, 1) });
             x += w + 1;
         }
     }
     // “+” opens a new terminal in this scope.
-    if app.scope != Scope::Space(0) && x + 3 <= end {
-        let r = Rect::new(x, area.y, 3, 1);
-        f.render_widget(Paragraph::new(" + ").style(Style::new().fg(c_accent())), r);
+    if app.scope != Scope::Space(0) && x + 5 <= end {
+        let r = Rect::new(x, area.y, 5, 1);
+        f.render_widget(Paragraph::new("  +  ").style(Style::new().fg(c_accent())), r);
         app.layout.toolbar.push((r, if right { Hit::NewTabRight } else { Hit::NewTab }));
     }
     if right {

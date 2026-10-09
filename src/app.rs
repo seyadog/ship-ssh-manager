@@ -2887,6 +2887,12 @@ impl App {
             if let Some(i) = self.row_at(x, y).filter(|&i| i < self.rows.len() && self.rows[i].node != NodeId::BastionsHeader) {
                 self.selected = i;
                 let row = self.rows[i];
+                // A click on the arrow of a folder (or of a bastion) opens or closes it right away.
+                let on_arrow = (x.saturating_sub(self.layout.list.x) as usize) < row.depth * 2 + 4;
+                if !double && on_arrow && self.has_children(&row) && !matches!(row.node, NodeId::Space(_)) {
+                    self.toggle(row);
+                    return;
+                }
                 if double {
                     match row.node {
                         NodeId::Folder(_) | NodeId::SpaceFolder(_) => self.toggle(row),
