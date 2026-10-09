@@ -129,7 +129,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let [main, status] = RLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     // Two columns (Projects, Servers), each folded to a thin strip on request.
-    let side_w: u16 = (if area.width >= 110 { 34 } else if area.width >= 80 { 28 } else { 22 }).min(area.width / 2);
+    let folded = app.fold.iter().filter(|&&f| f).count() as u16;
+    let col_w: u16 = if area.width >= 110 { 30 } else if area.width >= 80 { 24 } else { 20 };
+    let side_w = (folded * 3 + (2 - folded) * col_w).min(area.width / 2);
     let [side, right] = RLayout::horizontal([Constraint::Length(side_w), Constraint::Min(1)]).areas(main);
     let [tabbar, content] = RLayout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(right);
     // One blank column between the sidebar (or the line between two groups) and the terminal.
@@ -187,15 +189,49 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.layout.col_geom = [ListGeom::default(); 2];
     app.layout.list = Rect::default();
     app.layout.list_bottom = Rect::default();
-    // One column, always open. The toolbar keeps a slot for the (absent) Projects title so indices stay put.
-    app.layout.toolbar.push((Rect::default(), HEADER[0]));
-    app.layout.toolbar.push((Rect::new(area.x, area.y, (7 + 2).min(area.width.saturating_sub(1)), 1), HEADER[1]));
-    draw_column(f, app, 1, area, focused);
+    let strips = app.fold.iter().filter(|&&f| f).count() as u16;
+    let open_w = if strips < 2 { area.width.saturating_sub(strips * 3) / (2 - strips) } else { 0 };
+    let mut x = area.x;
+    let mut rects = [Rect::default(); 2];
+    for (i, r) in rects.iter_mut().enumerate() {
+        let w = if app.fold[i] { 3 } else { open_w };
+        *r = Rect::new(x, area.y, w, area.height);
+        x += w;
+    }
+    // The titles come first in the toolbar: the keyboard highlight finds them by position (`HEADER`).
+    let names = ["Projects", "Servers"];
+    for i in 0..2 {
+        let title = if app.fold[i] {
+            Rect::default()
+        } else {
+            Rect::new(rects[i].x, rects[i].y, (names[i].width() as u16 + 2).min(rects[i].width.saturating_sub(1)), 1)
+        };
+        app.layout.toolbar.push((title, HEADER[i]));
+    }
+    for i in 0..2 {
+        draw_column(f, app, i, rects[i], focused);
+    }
+    // Keyboard focus on a title: highlight it.
+    if let (Some(i), true) = (app.header, focused) {
+        if let Some(&(r, _)) = app.layout.toolbar.get(i) {
+            f.buffer_mut().set_style(r, Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD));
+        }
+    }
 }
 
 fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool) {
-    let (view, name) = (View::Folders, "Servers");
+    let (view, name) = if i == 0 { (View::Spaces, "Projects") } else { (View::Folders, "Servers") };
     let active = app.view == view;
+    if app.fold[i] {
+        // A thin strip: click it to bring the column back.
+        let initial = name.chars().next().unwrap_or(' ').to_string();
+        f.render_widget(
+            Paragraph::new(vec![Line::raw(""), Line::from(Span::styled(" ›", Style::new().fg(c_accent()))), Line::from(Span::styled(format!(" {initial}"), Style::new().fg(c_muted())))]),
+            Rect::new(area.x, area.y, area.width, 3.min(area.height)),
+        );
+        app.layout.toolbar.push((Rect::new(area.x, area.y, area.width, 3.min(area.height)), Hit::Fold(i)));
+        return;
+    }
     app.layout.cols[i] = area;
     if area.height < 5 || area.width < 8 {
         return;
@@ -205,17 +241,27 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
     for y in area.y..area.y + area.height {
         f.render_widget(Paragraph::new("│").style(edge), Rect::new(area.x + area.width - 1, y, 1, 1));
     }
-    let title_style = if focused {
+    let title_style = if active && focused {
         Style::new().fg(c_accent()).add_modifier(Modifier::BOLD)
-    } else {
+    } else if active {
         Style::new().fg(c_fg()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(c_muted())
     };
     f.render_widget(Paragraph::new(format!("  {name}")).style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
     // The list keeps two columns of margin on the left and a little on the right.
     let inner = Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(5), area.height.saturating_sub(3));
+    // The fold button, at the right end of the title row; big enough to click.
+    let fold = Rect::new(area.x + area.width.saturating_sub(5), area.y, 4, 1);
+    f.render_widget(Paragraph::new(" ‹  ").style(Style::new().fg(c_muted()).bg(c_sel())), fold);
+    app.layout.toolbar.push((fold, Hit::Fold(i)));
     // The actions of the column, as small padded buttons along the bottom.
     let by = area.y + area.height - 1;
-    let actions: [(&str, Hit); 3] = [(" + new ", Hit::NewServer), (" edit ", Hit::Edit), (" vault ", Hit::Vault)];
+    let actions: [(&str, Hit); 3] = if i == 0 {
+        [(" + new ", Hit::NewProject), (" edit ", Hit::Edit), (" term ", Hit::Term)]
+    } else {
+        [(" + new ", Hit::NewServer), (" edit ", Hit::Edit), (" vault ", Hit::Vault)]
+    };
     let mut bx = area.x + 2;
     for (n, (label, hit)) in actions.into_iter().enumerate() {
         let w = label.width() as u16;
@@ -230,6 +276,8 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
     let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
     if active {
         draw_active_list(f, app, list, focused);
+    } else {
+        draw_passive_list(f, app, i, view, list);
     }
 }
 
@@ -250,6 +298,24 @@ fn list_geom(rows: &[Row], view: View, list: Rect) -> ListGeom {
         None => (list, Rect::default()),
     };
     ListGeom { top, bottom, split, row_h: 1, bottom_row_h: 1, top_count: split.unwrap_or(rows.len()) }
+}
+
+/// The list of the column that is not the active view. It is laid out exactly like the active one, from
+/// the top and without a selection, so that switching column does not rearrange anything; a click activates it.
+fn draw_passive_list(f: &mut Frame, app: &mut App, col: usize, view: View, list: Rect) {
+    let g = list_geom(&app.other_rows, view, list);
+    app.layout.col_geom[col] = g;
+    if app.other_rows.is_empty() {
+        let text = if view == View::Spaces { "No projects yet." } else { "No servers yet." };
+        f.render_widget(Paragraph::new(text).style(Style::new().fg(c_muted())), list);
+        return;
+    }
+    let app: &App = app;
+    let rows = &app.other_rows;
+    draw_rows(f, app, g.top, 0, g.top_count, 0, g.row_h, false, rows, None, view);
+    if let Some(header) = g.split {
+        draw_rows(f, app, g.bottom, header, rows.len(), 0, g.bottom_row_h, false, rows, None, view);
+    }
 }
 
 /// The list of the active view, with its selection and scrolling.
@@ -855,47 +921,20 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
 // ---------------------------------------------------------------- status bar
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    if let Some((msg, _)) = &app.flash {
+    let text = if let Some((msg, _)) = &app.flash {
         return f.render_widget(Paragraph::new(format!(" {msg}")).style(Style::new().fg(c_amber())), area);
-    }
-    let (mode, text) = if app.modal.is_some() {
-        ("DIALOG", "Esc cancel")
+    } else if app.modal.is_some() {
+        "Esc cancel"
     } else if app.focus == Focus::Terminal {
-        ("TERMINAL", "F6 next area · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close")
+        "F6 next area · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close · Alt+B fold panel"
     } else if app.header.is_some() {
-        ("COLUMNS", "←→ choose column · Esc back to the list")
+        "←→ choose column · Esc back to the list"
     } else if app.view == View::Spaces {
-        ("PROJECTS", "↑↓ move · Enter open · a add · e rename · d delete · F6 next area · / search · q quit")
+        "↑↓ move · Enter open · a add · e rename · d delete · Tab servers · F6 next area · / search · q quit"
     } else {
-        ("SERVERS", "↑↓ move · Enter open · a add · e edit · d delete · F6 next area · / search · q quit")
+        "↑↓ move · Enter open · a add · e edit · d delete · Tab projects · F6 next area · / search · q quit"
     };
-    let live = app.tabs.iter().filter(|t| t.session.exit_code.is_none()).count();
-    let stats = format!(" {} servers · {} open ", app.store.servers.len(), live);
-    let mut spans = vec![Span::styled(format!(" {mode} "), badge_accent().add_modifier(Modifier::BOLD)), Span::raw(" ")];
-    // "key action · key action": the key (first word of each hint) stands out, the rest stays quiet.
-    let room = (area.width as usize).saturating_sub(mode.width() + 3 + stats.width());
-    let mut used = 0;
-    for (n, hint) in text.split(" · ").enumerate() {
-        let (key, rest) = match hint.split_once(' ') {
-            Some((k, r)) => (k.to_string(), format!(" {r}")),
-            None => (hint.to_string(), String::new()),
-        };
-        let sep = if n > 0 { "  " } else { "" };
-        let w = sep.width() + key.width() + rest.width();
-        if used + w > room {
-            break;
-        }
-        used += w;
-        spans.push(Span::raw(sep));
-        spans.push(Span::styled(key, Style::new().fg(c_accent())));
-        spans.push(Span::styled(rest, Style::new().fg(c_muted())));
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
-    let sw = (stats.width() as u16).min(area.width);
-    f.render_widget(
-        Paragraph::new(stats).style(Style::new().fg(c_muted()).bg(c_sel())),
-        Rect::new(area.x + area.width - sw, area.y, sw, 1),
-    );
+    f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(c_muted())), area);
 }
 
 // ---------------------------------------------------------------- modales
