@@ -484,6 +484,19 @@ fn draw_rows(f: &mut Frame, app: &App, area: Rect, from: usize, to: usize, offse
 
 // ---------------------------------------------------------------- tabs
 
+/// What runs in a tab, shown in the bar so that it can be seen from the other group: the agent and its state
+/// (`…` working, `✓` finished and waiting for a look).
+fn tab_tag(tab: &crate::app::Tab) -> Option<(String, Color)> {
+    let a = tab.session.agent()?;
+    Some(if tab.attention {
+        (format!("{} ✓", a.name), GREEN)
+    } else if a.working {
+        (format!("{} …", a.name), AMBER)
+    } else {
+        (a.name, MUTED)
+    })
+}
+
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
     let end = area.x + area.width;
     // Every open tab of this group; the numbers (Alt+1..9, 0) run through the left group and on into the right one.
@@ -497,7 +510,10 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
         // Shrink titles so that as many tabs as possible fit, then scroll the bar so the active tab is always visible.
         let avail = area.width.saturating_sub(4) as usize;
         let max_title = (avail / n).saturating_sub(9).clamp(6, 20);
-        let cell = |p: usize| fit(&app.tab_label(&app.tabs[scoped[p]]), max_title).width() + 8 + 1;
+        let cell = |p: usize| {
+            let tab = &app.tabs[scoped[p]];
+            fit(&app.tab_label(tab), max_title).width() + 8 + 1 + tab_tag(tab).map_or(0, |(t, _)| t.width() + 1)
+        };
         let active = scoped.iter().position(|&i| Some(i) == shown).unwrap_or(0);
         let mut start = 0;
         while start < active && (start..=active).map(cell).sum::<usize>() > avail {
@@ -513,7 +529,9 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
                 9 => "0 ".to_string(),
                 _ => "  ".to_string(),
             };
-            let text = format!(" {num}{} {} ✕ ", if dead { "○" } else { "●" }, title);
+            let tag = tab_tag(tab);
+            let tag_text = tag.as_ref().map(|(t, _)| format!(" {t}")).unwrap_or_default();
+            let text = format!(" {num}{} {}{tag_text} ✕ ", if dead { "○" } else { "●" }, title);
             let w = text.width() as u16;
             if x + w > end {
                 break;
@@ -538,6 +556,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
                         title,
                         Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
                     ),
+                    Span::styled(tag_text, Style::new().fg(tag.map_or(MUTED, |(_, c)| c)).bg(bg)),
                     Span::styled(" ✕ ", Style::new().fg(MUTED).bg(bg)),
                 ])),
                 rect,
