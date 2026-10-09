@@ -48,7 +48,9 @@ fn main() -> Result<()> {
     let vault = vault::Vault::new(store::Store::config_dir().join("vault.json"));
     let mut app = app::App::new(store, vault);
     app.spaces = spaces::Spaces::load()?;
-    app.sound = settings::Settings::load().sound;
+    let settings = settings::Settings::load();
+    app.sound = settings.sound;
+    ui::set_theme(settings.theme != "classic");
     let ui = uistate::UiState::load();
     app.jump_open = ui.open_nodes.into_iter().collect();
     app.ui_path = uistate::UiState::path();

@@ -11,15 +11,58 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-const ACCENT: Color = Color::Rgb(122, 162, 247);
-const FG: Color = Color::Rgb(192, 202, 245);
-const MUTED: Color = Color::Rgb(86, 95, 137);
-const SEL_BG: Color = Color::Rgb(40, 52, 87);
-const DROP_BG: Color = Color::Rgb(58, 82, 60);
-const GREEN: Color = Color::Rgb(158, 206, 106);
-const AMBER: Color = Color::Rgb(224, 175, 104);
 const REMOTE_GREEN: Color = Color::Rgb(187, 154, 247);
 const REMOTE_GREEN_BRIGHT: Color = Color::Rgb(208, 184, 255);
+// ---------------------------------------------------------------- theme
+
+/// "Your terminal": the colours of the interface come from the terminal's own palette (default foreground,
+/// ANSI colours), so oso looks like the rest of the desktop. The other theme, "classic", has fixed colours.
+static TERMINAL_THEME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_theme(terminal: bool) {
+    TERMINAL_THEME.store(terminal, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn terminal_theme() -> bool {
+    TERMINAL_THEME.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The blue of the bear: the logo does not follow the theme.
+const LOGO_BLUE: Color = Color::Rgb(122, 162, 247);
+
+fn themed(terminal: Color, classic: Color) -> Color {
+    if terminal_theme() { terminal } else { classic }
+}
+fn c_accent() -> Color {
+    themed(Color::Reset, Color::Rgb(122, 162, 247))
+}
+fn c_fg() -> Color {
+    themed(Color::Reset, Color::Rgb(192, 202, 245))
+}
+fn c_muted() -> Color {
+    themed(Color::Indexed(8), Color::Rgb(86, 95, 137))
+}
+/// Background of the selected thing outside the lists (the list rows are drawn in reverse video instead).
+fn c_sel() -> Color {
+    themed(Color::Indexed(8), Color::Rgb(40, 52, 87))
+}
+fn c_drop() -> Color {
+    themed(Color::Indexed(2), Color::Rgb(58, 82, 60))
+}
+fn c_green() -> Color {
+    themed(Color::Indexed(2), Color::Rgb(158, 206, 106))
+}
+fn c_amber() -> Color {
+    themed(Color::Indexed(3), Color::Rgb(224, 175, 104))
+}
+fn c_red() -> Color {
+    themed(Color::Indexed(1), Color::Rgb(247, 118, 142))
+}
+/// Text on the accent colour (a button that stands out).
+fn badge_accent() -> Style {
+    if terminal_theme() { Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD) } else { Style::new().fg(Color::Black).bg(c_accent()) }
+}
+
 /// One colour per project, taken from oso's own palette and as far apart from each other as possible.
 const PASTELS: [(u8, u8, u8); 8] = [
     (122, 162, 247), // blue
@@ -33,6 +76,10 @@ const PASTELS: [(u8, u8, u8); 8] = [
 ];
 
 fn space_color(id: u64, live: bool) -> Color {
+    if terminal_theme() {
+        // The terminal's own colours: blue, red, green, yellow, magenta, cyan and two bright ones.
+        return Color::Indexed([4, 1, 2, 3, 5, 6, 12, 9][(id as usize) % 8]);
+    }
     let (r, g, b) = PASTELS[(id as usize) % PASTELS.len()];
     // Idle spaces keep their hue but wash out towards grey (fading to black would turn yellows brown).
     let k = if live { 1.0 } else { 0.55 };
@@ -40,7 +87,11 @@ fn space_color(id: u64, live: bool) -> Color {
     Color::Rgb(fade(r, 80.0), fade(g, 82.0), fade(b, 100.0))
 }
 
-const RED: Color = Color::Rgb(247, 118, 142);
+/// An idle project's mark is dimmed (in the classic theme its colour is washed out instead).
+fn space_dim(live: bool) -> Modifier {
+    if terminal_theme() && !live { Modifier::DIM } else { Modifier::empty() }
+}
+
 
 /// Truncates `s` to `w` columns, adding “…” if it does not fit.
 fn fit(s: &str, w: usize) -> String {
@@ -107,7 +158,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         app.layout.content = if focus_right { rcont } else { lcont };
         draw_tabs(f, app, lbar, false);
         draw_tabs(f, app, rbar, true);
-        let line = Style::new().fg(MUTED);
+        let line = Style::new().fg(c_muted());
         for y in drect.y..drect.y + drect.height {
             f.render_widget(Paragraph::new("│").style(line), Rect::new(drect.x, y, 1, 1));
         }
@@ -172,7 +223,7 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
         // A thin strip: click it to bring the column back.
         let initial = name.chars().next().unwrap_or(' ').to_string();
         f.render_widget(
-            Paragraph::new(vec![Line::raw(""), Line::from(Span::styled(" ›", Style::new().fg(ACCENT))), Line::from(Span::styled(format!(" {initial}"), Style::new().fg(MUTED)))]),
+            Paragraph::new(vec![Line::raw(""), Line::from(Span::styled(" ›", Style::new().fg(c_accent()))), Line::from(Span::styled(format!(" {initial}"), Style::new().fg(c_muted())))]),
             Rect::new(area.x, area.y, area.width, 3.min(area.height)),
         );
         app.layout.toolbar.push((Rect::new(area.x, area.y, area.width, 3.min(area.height)), Hit::Fold(i)));
@@ -183,16 +234,16 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
         return;
     }
     // No frames: the title, the list, a row of actions at the bottom, and a faint line on the right edge.
-    let edge = Style::new().fg(Color::Rgb(44, 50, 74));
+    let edge = Style::new().fg(themed(Color::Indexed(8), Color::Rgb(44, 50, 74)));
     for y in area.y..area.y + area.height {
         f.render_widget(Paragraph::new("│").style(edge), Rect::new(area.x + area.width - 1, y, 1, 1));
     }
     let title_style = if active && focused {
-        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        Style::new().fg(c_accent()).add_modifier(Modifier::BOLD)
     } else if active {
-        Style::new().fg(FG).add_modifier(Modifier::BOLD)
+        Style::new().fg(c_fg()).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(MUTED)
+        Style::new().fg(c_muted())
     };
     f.render_widget(Paragraph::new(format!(" {name}")).style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
     let inner = Rect::new(area.x + 1, area.y + 2, area.width - 3, area.height - 3);
@@ -210,12 +261,12 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
             break;
         }
         let r = Rect::new(bx, by, w, 1);
-        f.render_widget(Paragraph::new(label).style(Style::new().fg(if n == 0 { ACCENT } else { MUTED })), r);
+        f.render_widget(Paragraph::new(label).style(Style::new().fg(if n == 0 { c_accent() } else { c_muted() })), r);
         app.layout.toolbar.push((r, hit));
         bx += w + 2;
     }
     let fold = Rect::new(area.x + area.width - 4, by, 3, 1);
-    f.render_widget(Paragraph::new(" ‹ ").style(Style::new().fg(MUTED)), fold);
+    f.render_widget(Paragraph::new(" ‹ ").style(Style::new().fg(c_muted())), fold);
     app.layout.toolbar.push((fold, Hit::Fold(i)));
     let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
     if active {
@@ -251,7 +302,7 @@ fn draw_passive_list(f: &mut Frame, app: &mut App, col: usize, view: View, list:
     app.layout.col_geom[col] = g;
     if app.other_rows.is_empty() {
         let text = if view == View::Spaces { "No projects yet." } else { "No servers yet." };
-        f.render_widget(Paragraph::new(text).style(Style::new().fg(MUTED)), list);
+        f.render_widget(Paragraph::new(text).style(Style::new().fg(c_muted())), list);
         return;
     }
     let app: &App = app;
@@ -274,7 +325,7 @@ fn draw_active_list(f: &mut Frame, app: &mut App, list: Rect, focused: bool) {
         } else {
             vec!["No servers yet.", "Click “+ Server” or press a."]
         };
-        let hint = Paragraph::new(lines.into_iter().map(|l| Line::from(Span::styled(l, Style::new().fg(MUTED)))).collect::<Vec<_>>());
+        let hint = Paragraph::new(lines.into_iter().map(|l| Line::from(Span::styled(l, Style::new().fg(c_muted())))).collect::<Vec<_>>());
         f.render_widget(hint, list);
         return;
     }
@@ -345,9 +396,14 @@ fn draw_rows(
         let mut style = Style::new();
         let mut bg = Color::Reset;
         if is_drop {
-            bg = DROP_BG;
+            bg = c_drop();
         } else if is_sel {
-            bg = SEL_BG;
+            if terminal_theme() {
+                // Whatever the terminal's colours are, reverse video marks the selected row.
+                style = style.add_modifier(Modifier::REVERSED);
+            } else {
+                bg = c_sel();
+            }
             if focused {
                 style = style.add_modifier(Modifier::BOLD);
             }
@@ -365,9 +421,10 @@ fn draw_rows(
             // One line: a coloured spine for the state, the name, and the branch (or directory) on the right.
             // The name turns green when the agent has finished; the spine keeps the space's own colour.
             let color = space_color(id, live);
+            let dim = space_dim(live);
             let (mut text, tone) = match app.branches.get(&id) {
                 Some(b) => (b.clone(), REMOTE_GREEN),
-                None => (cwd, MUTED),
+                None => (cwd, c_muted()),
             };
             // A filed project that is on top says which folder it belongs to.
             if !row.jump {
@@ -388,11 +445,11 @@ fn draw_rows(
                 .into_iter()
                 .map(|(att, working, aname)| {
                     if att {
-                        (format!("{aname} ✓"), GREEN)
+                        (format!("{aname} ✓"), c_green())
                     } else if working {
-                        (format!("{aname} …"), AMBER)
+                        (format!("{aname} …"), c_amber())
                     } else {
-                        (aname, MUTED)
+                        (aname, c_muted())
                     }
                 })
                 .collect();
@@ -421,10 +478,10 @@ fn draw_rows(
                 out
             };
             let mut spans = vec![
-                Span::styled("▆", Style::new().fg(color).bg(bg)),
+                Span::styled("▆", Style::new().fg(color).bg(bg).add_modifier(dim)),
                 Span::styled(
                     format!(" {}", fit(&name, width.saturating_sub(3))),
-                    style.fg(if attention { GREEN } else { color }).add_modifier(Modifier::BOLD),
+                    style.fg(if attention { c_green() } else { color }).add_modifier(Modifier::BOLD | dim),
                 ),
             ];
             // The rest of the line, right-aligned: the agent (if any) first, then the branch if it still fits.
@@ -446,7 +503,7 @@ fn draw_rows(
                 spans.extend(right);
                 spans.push(Span::styled(" ", Style::new().bg(bg)));
             }
-            f.render_widget(Paragraph::new(Line::from(spans)).style(Style::new().bg(bg)), Rect::new(area.x, y, area.width, 1));
+            f.render_widget(Paragraph::new(Line::from(spans)).style(style), Rect::new(area.x, y, area.width, 1));
             continue;
         }
 
@@ -467,17 +524,17 @@ fn draw_rows(
                     work |= t.session.agent().is_some_and(|a| a.working);
                 }
                 let (mark, mc) = if att {
-                    (" ✓", GREEN)
+                    (" ✓", c_green())
                 } else if work {
-                    (" …", AMBER)
+                    (" …", c_amber())
                 } else {
-                    ("", MUTED)
+                    ("", c_muted())
                 };
                 let count = format!(" ({}){}", inside.len(), mark);
                 let label = fit(name, width.saturating_sub(indent.width() + 2 + count.width()));
-                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(AMBER)));
-                spans.push(Span::styled(label, Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(format!(" ({})", inside.len()), Style::new().fg(MUTED)));
+                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(c_amber())));
+                spans.push(Span::styled(label, Style::new().fg(c_amber()).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(format!(" ({})", inside.len()), Style::new().fg(c_muted())));
                 if !mark.is_empty() {
                     spans.push(Span::styled(mark, Style::new().fg(mc).add_modifier(Modifier::BOLD)));
                 }
@@ -485,17 +542,17 @@ fn draw_rows(
             NodeId::BastionsHeader => {
                 // A fixed label with a rule after it: only the bastions below it fold.
                 let title = if view == View::Spaces { "folders" } else { "bastions" };
-                spans.push(Span::styled(title, Style::new().fg(MUTED).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(title, Style::new().fg(c_muted()).add_modifier(Modifier::BOLD)));
                 let rest = width.saturating_sub(indent.width() + title.len() + 1);
-                spans.push(Span::styled(format!(" {}", "─".repeat(rest)), Style::new().fg(MUTED)));
+                spans.push(Span::styled(format!(" {}", "─".repeat(rest)), Style::new().fg(c_muted())));
             }
             NodeId::Folder(id) => {
                 let fo = app.store.folder(id);
                 let open = fo.is_some_and(|f| f.expanded);
                 let name = fo.map(|f| f.name.as_str()).unwrap_or("?");
                 let label = fit(name, width.saturating_sub(indent.width() + 3));
-                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(AMBER)));
-                spans.push(Span::styled(label, Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(if open { "▾ " } else { "▸ " }, Style::new().fg(c_amber())));
+                spans.push(Span::styled(label, Style::new().fg(c_amber()).add_modifier(Modifier::BOLD)));
             }
             NodeId::Server(id) => {
                 let s = app.store.server(id);
@@ -504,14 +561,14 @@ fn draw_rows(
                 let label = fit(name, width.saturating_sub(indent.width() + 3));
                 if app.has_children(row) {
                     let arrow = if app.is_open(row) { "▾ " } else { "▸ " };
-                    spans.push(Span::styled(arrow, Style::new().fg(ACCENT)));
+                    spans.push(Span::styled(arrow, Style::new().fg(c_accent())));
                 } else {
                     spans.push(Span::styled(
                         if live { "◆ " } else { "◇ " },
-                        Style::new().fg(if live { GREEN } else { MUTED }),
+                        Style::new().fg(if live { c_green() } else { c_muted() }),
                     ));
                 }
-                spans.push(Span::styled(label, Style::new().fg(if live { GREEN } else { FG })));
+                spans.push(Span::styled(label, Style::new().fg(if live { c_green() } else { c_fg() })));
                 if let Some(s) = s {
                     let room = width.saturating_sub(indent.width() + 2 + name.width() + 2);
                     let via = match (row.jump, s.jump.and_then(|j| app.store.server(j))) {
@@ -519,7 +576,7 @@ fn draw_rows(
                         _ => s.host.clone(),
                     };
                     if room > 6 {
-                        spans.push(Span::styled(format!("  {}", fit(&via, room)), Style::new().fg(MUTED)));
+                        spans.push(Span::styled(format!("  {}", fit(&via, room)), Style::new().fg(c_muted())));
                     }
                 }
             }
@@ -536,11 +593,11 @@ fn draw_rows(
 fn tab_tag(tab: &crate::app::Tab) -> Option<(String, Color)> {
     let a = tab.session.agent()?;
     Some(if tab.attention {
-        (format!("{} ✓", a.name), GREEN)
+        (format!("{} ✓", a.name), c_green())
     } else if a.working {
-        (format!("{} …", a.name), AMBER)
+        (format!("{} …", a.name), c_amber())
     } else {
-        (a.name, MUTED)
+        (a.name, c_muted())
     })
 }
 
@@ -585,26 +642,26 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
             }
             let is_active = Some(i) == shown;
             let dot = if dead {
-                RED
+                c_red()
             } else if tab.attention {
-                AMBER
+                c_amber()
             } else {
-                GREEN
+                c_green()
             };
-            let bg = if is_active { SEL_BG } else { Color::Reset };
-            let fg = if is_active { FG } else { MUTED };
+            let bg = if is_active { c_sel() } else { Color::Reset };
+            let fg = if is_active { c_fg() } else { c_muted() };
             let rect = Rect::new(x, area.y, w, 1);
             f.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(" ", Style::new().bg(bg)),
-                    Span::styled(num, Style::new().fg(MUTED).bg(bg)),
+                    Span::styled(num, Style::new().fg(c_muted()).bg(bg)),
                     Span::styled(if dead { "◇ " } else { "◆ " }, Style::new().fg(dot).bg(bg)),
                     Span::styled(
                         title,
                         Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
                     ),
-                    Span::styled(tag_text, Style::new().fg(tag.map_or(MUTED, |(_, c)| c)).bg(bg)),
-                    Span::styled(" ✕ ", Style::new().fg(MUTED).bg(bg)),
+                    Span::styled(tag_text, Style::new().fg(tag.map_or(c_muted(), |(_, c)| c)).bg(bg)),
+                    Span::styled(" ✕ ", Style::new().fg(c_muted()).bg(bg)),
                 ])),
                 rect,
             );
@@ -615,7 +672,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
     // “+” opens a new terminal in this scope.
     if app.scope != Scope::Space(0) && x + 3 <= end {
         let r = Rect::new(x, area.y, 3, 1);
-        f.render_widget(Paragraph::new(" + ").style(Style::new().fg(ACCENT)), r);
+        f.render_widget(Paragraph::new(" + ").style(Style::new().fg(c_accent())), r);
         app.layout.toolbar.push((r, if right { Hit::NewTabRight } else { Hit::NewTab }));
     }
     if right {
@@ -698,13 +755,13 @@ fn draw_terminal(f: &mut Frame, app: &mut App, idx: usize, area: Rect, in_focus:
         let target = app.store.server(tab.server_id).map(|s| format!("{}:{}", s.host, s.port)).unwrap_or_default();
         let msg = format!("Connecting to {target}… {waited}s (gives up after 15s; Alt+W closes this tab)");
         let w = (msg.width() as u16).min(area.width);
-        f.render_widget(Paragraph::new(msg).style(Style::new().fg(MUTED)), Rect::new(area.x, area.y, w, 1));
+        f.render_widget(Paragraph::new(msg).style(Style::new().fg(c_muted())), Rect::new(area.x, area.y, w, 1));
     }
     if scrolled > 0 {
         let msg = format!(" ↑ {scrolled} lines up · Shift+End or type: back to live ");
         let w = (msg.width() as u16).min(area.width);
         f.render_widget(
-            Paragraph::new(msg).style(Style::new().fg(Color::Black).bg(AMBER)),
+            Paragraph::new(msg).style(Style::new().fg(Color::Black).bg(c_amber())),
             Rect::new(area.x + area.width - w, area.y, w, 1),
         );
     }
@@ -721,7 +778,7 @@ fn draw_terminal(f: &mut Frame, app: &mut App, idx: usize, area: Rect, in_focus:
         let bar = Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1);
         let text = " sudo is asking for a password · Alt+P: fill it from the vault · or just type ";
         f.render_widget(
-            Paragraph::new(fit(text, area.width as usize)).style(Style::new().fg(Color::Black).bg(ACCENT)),
+            Paragraph::new(fit(text, area.width as usize)).style(badge_accent()),
             bar,
         );
     }
@@ -737,9 +794,9 @@ fn draw_terminal(f: &mut Frame, app: &mut App, idx: usize, area: Rect, in_focus:
         let text = format!(" {msg}  Enter: reconnect · Alt+W: close ");
         f.render_widget(
             Paragraph::new(fit(&text, area.width as usize)).style(Style::new().fg(Color::Black).bg(if code == 0 {
-                AMBER
+                c_amber()
             } else {
-                RED
+                c_red()
             })),
             bar,
         );
@@ -812,7 +869,7 @@ fn pixel_lines(grid: &[&str], color: impl Fn(char) -> Option<Color>) -> Vec<Line
 
 fn bear_lines() -> Vec<Line<'static>> {
     pixel_lines(&BEAR, |c| match c {
-        '#' => Some(ACCENT),
+        '#' => Some(LOGO_BLUE),
         'o' => Some(Color::Rgb(187, 154, 247)),
         'i' => Some(Color::Rgb(240, 198, 240)),
         'E' | 'n' => Some(Color::Rgb(20, 21, 30)),
@@ -823,7 +880,7 @@ fn bear_lines() -> Vec<Line<'static>> {
 }
 
 fn wordmark_lines() -> Vec<Line<'static>> {
-    pixel_lines(&WORDMARK, |c| (c == '#').then_some(ACCENT))
+    pixel_lines(&WORDMARK, |c| (c == '#').then_some(LOGO_BLUE))
 }
 
 fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
@@ -853,7 +910,7 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
         }
     };
     for t in hints {
-        lines.push(Line::from(Span::styled(t, Style::new().fg(MUTED))));
+        lines.push(Line::from(Span::styled(t, Style::new().fg(c_muted()))));
     }
     let h = lines.len() as u16;
     let r = centered(area.width, h, area);
@@ -864,7 +921,7 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let text = if let Some((msg, _)) = &app.flash {
-        return f.render_widget(Paragraph::new(format!(" {msg}")).style(Style::new().fg(AMBER)), area);
+        return f.render_widget(Paragraph::new(format!(" {msg}")).style(Style::new().fg(c_amber())), area);
     } else if app.modal.is_some() {
         "Esc cancel"
     } else if app.focus == Focus::Terminal {
@@ -876,7 +933,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         "↑↓ move · Enter open · a add · e edit · d delete · Tab projects · F6 next area · / search · q quit"
     };
-    f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(MUTED)), area);
+    f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(c_muted())), area);
 }
 
 // ---------------------------------------------------------------- modales
@@ -884,12 +941,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 fn modal_block(title: &str) -> Block<'_> {
     Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
-        .title(Span::styled(format!(" {title} "), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)))
+        .border_style(Style::new().fg(c_accent()))
+        .title(Span::styled(format!(" {title} "), Style::new().fg(c_accent()).add_modifier(Modifier::BOLD)))
 }
 
 fn button(label: &str, primary: bool) -> Span<'static> {
-    let style = if primary { Style::new().fg(Color::Black).bg(ACCENT) } else { Style::new().fg(FG).bg(SEL_BG) };
+    let style = if primary { badge_accent() } else { Style::new().fg(c_fg()).bg(c_sel()) };
     Span::styled(format!(" {label} "), style)
 }
 
@@ -913,10 +970,10 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
             let inner = block.inner(r);
             f.render_widget(block, r);
             let field = Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1);
-            f.render_widget(Paragraph::new(p.input.value.as_str()).style(Style::new().fg(FG).bg(SEL_BG)), field);
+            f.render_widget(Paragraph::new(p.input.value.as_str()).style(Style::new().fg(c_fg()).bg(c_sel())), field);
             cursor = Some(Position::new(field.x + p.input.cursor as u16, field.y));
             f.render_widget(
-                Paragraph::new("Enter accept · Esc cancel").style(Style::new().fg(MUTED)),
+                Paragraph::new("Enter accept · Esc cancel").style(Style::new().fg(c_muted())),
                 Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1),
             );
         }
@@ -928,17 +985,17 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
             let inner = block.inner(r);
             f.render_widget(block, r);
             let field = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1);
-            f.render_widget(Paragraph::new(q.input.value.as_str()).style(Style::new().fg(FG).bg(SEL_BG)), field);
+            f.render_widget(Paragraph::new(q.input.value.as_str()).style(Style::new().fg(c_fg()).bg(c_sel())), field);
             cursor = Some(Position::new(field.x + q.input.cursor as u16, field.y));
             if q.hits.is_empty() {
-                f.render_widget(Paragraph::new("Nothing matches.").style(Style::new().fg(MUTED)), Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1));
+                f.render_widget(Paragraph::new("Nothing matches.").style(Style::new().fg(c_muted())), Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1));
             }
             // A window of the matches that keeps the selected one in view.
             let first = q.selected.saturating_sub(shown.saturating_sub(1));
             for (k, &i) in q.hits.iter().skip(first).take(shown).enumerate() {
                 let item = &q.items[i];
                 let sel = first + k == q.selected;
-                let bg = if sel { SEL_BG } else { Color::Reset };
+                let bg = if sel { c_sel() } else { Color::Reset };
                 let w = inner.width.saturating_sub(2) as usize;
                 let detail_w = item.detail.width().min(w / 2);
                 let name = fit(&item.label, w.saturating_sub(detail_w + 4));
@@ -951,17 +1008,17 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
                 let row = Rect::new(inner.x + 1, inner.y + 1 + k as u16, w as u16, 1);
                 f.render_widget(
                     Paragraph::new(Line::from(vec![
-                        Span::styled(mark, Style::new().fg(ACCENT).bg(bg)),
-                        Span::styled(name, Style::new().fg(FG).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
+                        Span::styled(mark, Style::new().fg(c_accent()).bg(bg)),
+                        Span::styled(name, Style::new().fg(c_fg()).bg(bg).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
                         Span::styled(" ".repeat(pad), Style::new().bg(bg)),
-                        Span::styled(fit(&item.detail, detail_w), Style::new().fg(MUTED).bg(bg)),
+                        Span::styled(fit(&item.detail, detail_w), Style::new().fg(c_muted()).bg(bg)),
                     ])),
                     row,
                 );
                 hits.push((row, Hit::Field(first + k)));
             }
             f.render_widget(
-                Paragraph::new("↑↓ choose · Enter open · Esc cancel").style(Style::new().fg(MUTED)),
+                Paragraph::new("↑↓ choose · Enter open · Esc cancel").style(Style::new().fg(c_muted())),
                 Rect::new(inner.x + 1, inner.y + inner.height - 1, inner.width.saturating_sub(2), 1),
             );
         }
@@ -972,7 +1029,7 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
             let inner = block.inner(r);
             f.render_widget(block, r);
             f.render_widget(
-                Paragraph::new(c.text.as_str()).style(Style::new().fg(FG)).wrap(ratatui::widgets::Wrap { trim: true }),
+                Paragraph::new(c.text.as_str()).style(Style::new().fg(c_fg())).wrap(ratatui::widgets::Wrap { trim: true }),
                 Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 2),
             );
             let by = inner.y + inner.height - 1;
@@ -1046,22 +1103,22 @@ fn draw_form(
             ),
         };
         let label_style =
-            if focused { Style::new().fg(ACCENT).add_modifier(Modifier::BOLD) } else { Style::new().fg(MUTED) };
+            if focused { Style::new().fg(c_accent()).add_modifier(Modifier::BOLD) } else { Style::new().fg(c_muted()) };
         let label_rect = Rect::new(row.x, y, LABEL_W, 1);
         f.render_widget(Paragraph::new(Span::styled(label, label_style)), label_rect);
 
         let browse_w = if fi == F_KEY { 12 } else { 0 };
         let val = Rect::new(row.x + LABEL_W, y, row.width.saturating_sub(LABEL_W + browse_w), 1);
-        let bg = if focused { SEL_BG } else { Color::Reset };
+        let bg = if focused { c_sel() } else { Color::Reset };
         if fi == F_JUMP {
             let name = form.jump.and_then(|j| store.server(j)).map(|s| s.name.as_str()).unwrap_or("(none)");
             let text = format!("◀ {name} ▶");
-            f.render_widget(Paragraph::new(text).style(Style::new().fg(if focused { FG } else { MUTED }).bg(bg)), val);
+            f.render_widget(Paragraph::new(text).style(Style::new().fg(if focused { c_fg() } else { c_muted() }).bg(bg)), val);
             continue;
         }
         if fi == F_AUTH {
             let text = format!("◀ {} ▶", form.auth.label());
-            f.render_widget(Paragraph::new(text).style(Style::new().fg(if focused { FG } else { MUTED }).bg(bg)), val);
+            f.render_widget(Paragraph::new(text).style(Style::new().fg(if focused { c_fg() } else { c_muted() }).bg(bg)), val);
             continue;
         }
         let input = match fi {
@@ -1079,9 +1136,9 @@ fn draw_form(
             input.value.clone()
         };
         let (text, style) = if shown.is_empty() {
-            (placeholder.to_string(), Style::new().fg(MUTED).bg(bg))
+            (placeholder.to_string(), Style::new().fg(c_muted()).bg(bg))
         } else {
-            (shown, Style::new().fg(FG).bg(bg))
+            (shown, Style::new().fg(c_fg()).bg(bg))
         };
         // Horizontal scroll so the cursor is always visible
         let vis = val.width.saturating_sub(1) as usize;
@@ -1093,7 +1150,7 @@ fn draw_form(
         }
         if fi == F_KEY {
             let b = Rect::new(val.x + val.width + 1, y, 11, 1);
-            f.render_widget(Paragraph::new(Span::styled(" Browse… ", Style::new().fg(Color::Black).bg(ACCENT))), b);
+            f.render_widget(Paragraph::new(Span::styled(" Browse… ", badge_accent())), b);
             hits.push((b, Hit::Browse));
         }
     }
@@ -1101,7 +1158,7 @@ fn draw_form(
     let ey = inner.y + 1 + fields.len() as u16;
     if let Some(e) = &form.error {
         f.render_widget(
-            Paragraph::new(format!("✕ {e}")).style(Style::new().fg(RED)),
+            Paragraph::new(format!("✕ {e}")).style(Style::new().fg(c_red())),
             Rect::new(inner.x + 1, ey, inner.width.saturating_sub(2), 1),
         );
     }
@@ -1111,7 +1168,7 @@ fn draw_form(
             button("Save", true),
             Span::raw("  "),
             button("Cancel", false),
-            Span::styled("  Tab next · Ctrl+O browse", Style::new().fg(MUTED)),
+            Span::styled("  Tab next · Ctrl+O browse", Style::new().fg(c_muted())),
         ])),
         Rect::new(inner.x + 1, by, inner.width.saturating_sub(2), 1),
     );
@@ -1139,30 +1196,30 @@ fn draw_picker(f: &mut Frame, area: Rect, p: &mut Picker) -> Rect {
     for (n, e) in p.entries.iter().enumerate().skip(offset).take(h) {
         let y = list.y + (n - offset) as u16;
         let (icon, style) = if e.is_dir {
-            ("▸ ", Style::new().fg(ACCENT))
+            ("▸ ", Style::new().fg(c_accent()))
         } else if e.key_like {
-            ("◆ ", Style::new().fg(GREEN).add_modifier(Modifier::BOLD))
+            ("◆ ", Style::new().fg(c_green()).add_modifier(Modifier::BOLD))
         } else {
-            ("  ", Style::new().fg(MUTED))
+            ("  ", Style::new().fg(c_muted()))
         };
         let tag = if e.key_like { "  private key" } else { "" };
         let name = fit(&e.name, list.width as usize - 2 - tag.width());
         let mut line_style = Style::new();
         if n == p.selected {
-            line_style = line_style.bg(SEL_BG);
+            line_style = line_style.bg(c_sel());
         }
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(icon, style),
                 Span::styled(name, style),
-                Span::styled(tag, Style::new().fg(MUTED)),
+                Span::styled(tag, Style::new().fg(c_muted())),
             ]))
             .style(line_style),
             Rect::new(list.x, y, list.width, 1),
         );
     }
     f.render_widget(
-        Paragraph::new("Enter open/select · Backspace up · . hidden · ~ home · Esc back").style(Style::new().fg(MUTED)),
+        Paragraph::new("Enter open/select · Backspace up · . hidden · ~ home · Esc back").style(Style::new().fg(c_muted())),
         Rect::new(inner.x + 1, inner.y + inner.height - 1, inner.width.saturating_sub(2), 1),
     );
     Rect::new(list.x, list.y, list.width, list.height)
@@ -1258,10 +1315,10 @@ fn mask(s: &str) -> String {
 
 /// A masked single-line field; returns the cursor position when `focused`.
 fn draw_secret_field(f: &mut Frame, rect: Rect, input: &Input, focused: bool) -> Position {
-    let bg = if focused { SEL_BG } else { Color::Reset };
+    let bg = if focused { c_sel() } else { Color::Reset };
     let skip = input.cursor.saturating_sub(rect.width.saturating_sub(1) as usize);
     let shown: String = mask(&input.value).chars().skip(skip).collect();
-    f.render_widget(Paragraph::new(shown).style(Style::new().fg(FG).bg(bg)), rect);
+    f.render_widget(Paragraph::new(shown).style(Style::new().fg(c_fg()).bg(bg)), rect);
     Position::new(rect.x + (input.cursor - skip) as u16, rect.y)
 }
 
@@ -1282,9 +1339,9 @@ fn draw_unlock(f: &mut Frame, area: Rect, u: &UnlockModal) -> Position {
             Paragraph::new(vec![
                 Line::from("Your saved passwords will be encrypted with a master"),
                 Line::from("password that is never stored anywhere."),
-                Line::from(Span::styled("If you forget it, they cannot be recovered.", Style::new().fg(AMBER))),
+                Line::from(Span::styled("If you forget it, they cannot be recovered.", Style::new().fg(c_amber()))),
             ])
-            .style(Style::new().fg(FG)),
+            .style(Style::new().fg(c_fg())),
             Rect::new(x, y, w, 3),
         );
         y += 4;
@@ -1293,7 +1350,7 @@ fn draw_unlock(f: &mut Frame, area: Rect, u: &UnlockModal) -> Position {
     }
 
     let label_w = 10;
-    f.render_widget(Paragraph::new("Master").style(Style::new().fg(MUTED)), Rect::new(x, y, label_w, 1));
+    f.render_widget(Paragraph::new("Master").style(Style::new().fg(c_muted())), Rect::new(x, y, label_w, 1));
     let field = Rect::new(x + label_w, y, w.saturating_sub(label_w), 1);
     let c = draw_secret_field(f, field, &u.input, u.focus == 0);
     if u.focus == 0 {
@@ -1301,7 +1358,7 @@ fn draw_unlock(f: &mut Frame, area: Rect, u: &UnlockModal) -> Position {
     }
     if u.creating {
         y += 1;
-        f.render_widget(Paragraph::new("Repeat").style(Style::new().fg(MUTED)), Rect::new(x, y, label_w, 1));
+        f.render_widget(Paragraph::new("Repeat").style(Style::new().fg(c_muted())), Rect::new(x, y, label_w, 1));
         let field = Rect::new(x + label_w, y, w.saturating_sub(label_w), 1);
         let c = draw_secret_field(f, field, &u.confirm, u.focus == 1);
         if u.focus == 1 {
@@ -1310,10 +1367,10 @@ fn draw_unlock(f: &mut Frame, area: Rect, u: &UnlockModal) -> Position {
     }
     y += 1;
     if let Some(e) = &u.error {
-        f.render_widget(Paragraph::new(format!("✕ {e}")).style(Style::new().fg(RED)), Rect::new(x, y, w, 1));
+        f.render_widget(Paragraph::new(format!("✕ {e}")).style(Style::new().fg(c_red())), Rect::new(x, y, w, 1));
     }
     let hint = if u.creating { "Enter next/create · Esc cancel" } else { "Enter unlock · Esc skip" };
-    f.render_widget(Paragraph::new(hint).style(Style::new().fg(MUTED)), Rect::new(x, inner.y + inner.height - 1, w, 1));
+    f.render_widget(Paragraph::new(hint).style(Style::new().fg(c_muted())), Rect::new(x, inner.y + inner.height - 1, w, 1));
     cursor
 }
 
@@ -1329,17 +1386,17 @@ fn draw_master(f: &mut Frame, area: Rect, m: &MasterModal) -> Position {
     let mut cursor = Position::new(x, inner.y + 1);
     for (i, (label, input)) in [("New", &m.input), ("Repeat", &m.confirm)].into_iter().enumerate() {
         let y = inner.y + 1 + i as u16;
-        f.render_widget(Paragraph::new(label).style(Style::new().fg(MUTED)), Rect::new(x, y, label_w, 1));
+        f.render_widget(Paragraph::new(label).style(Style::new().fg(c_muted())), Rect::new(x, y, label_w, 1));
         let c = draw_secret_field(f, Rect::new(x + label_w, y, w.saturating_sub(label_w), 1), input, m.focus == i);
         if m.focus == i {
             cursor = c;
         }
     }
     if let Some(e) = &m.error {
-        f.render_widget(Paragraph::new(format!("✕ {e}")).style(Style::new().fg(RED)), Rect::new(x, inner.y + 3, w, 1));
+        f.render_widget(Paragraph::new(format!("✕ {e}")).style(Style::new().fg(c_red())), Rect::new(x, inner.y + 3, w, 1));
     }
     f.render_widget(
-        Paragraph::new("Enter next/save · Esc cancel").style(Style::new().fg(MUTED)),
+        Paragraph::new("Enter next/save · Esc cancel").style(Style::new().fg(c_muted())),
         Rect::new(x, inner.y + inner.height - 1, w, 1),
     );
     cursor
@@ -1357,7 +1414,7 @@ fn draw_vault(f: &mut Frame, area: Rect, v: &VaultView) {
     if v.rows.is_empty() {
         f.render_widget(
             Paragraph::new("Nothing saved yet. Passwords you enter when adding a server appear here.")
-                .style(Style::new().fg(MUTED)),
+                .style(Style::new().fg(c_muted())),
             Rect::new(x, inner.y + 1, w as u16, 1),
         );
     }
@@ -1368,22 +1425,22 @@ fn draw_vault(f: &mut Frame, area: Rect, v: &VaultView) {
         let shown = v.shown.as_ref().filter(|s| s.id == row.id);
         let cell = |present: bool, value: Option<&String>| -> Span<'static> {
             match (present, value) {
-                (false, _) => Span::styled("—".to_string(), Style::new().fg(MUTED)),
-                (true, Some(s)) => Span::styled(s.clone(), Style::new().fg(GREEN).add_modifier(Modifier::BOLD)),
-                (true, None) => Span::styled("••••••••".to_string(), Style::new().fg(FG)),
+                (false, _) => Span::styled("—".to_string(), Style::new().fg(c_muted())),
+                (true, Some(s)) => Span::styled(s.clone(), Style::new().fg(c_green()).add_modifier(Modifier::BOLD)),
+                (true, None) => Span::styled("••••••••".to_string(), Style::new().fg(c_fg())),
             }
         };
         let name = fit(&row.name, 20);
         let host = fit(&row.host, 22);
         let line = Line::from(vec![
-            Span::styled(format!("{name:<21}"), Style::new().fg(FG)),
-            Span::styled(format!("{host:<23}"), Style::new().fg(MUTED)),
-            Span::styled("login ", Style::new().fg(MUTED)),
+            Span::styled(format!("{name:<21}"), Style::new().fg(c_fg())),
+            Span::styled(format!("{host:<23}"), Style::new().fg(c_muted())),
+            Span::styled("login ", Style::new().fg(c_muted())),
             cell(row.login, shown.and_then(|s| s.login.as_ref())),
-            Span::styled("  sudo ", Style::new().fg(MUTED)),
+            Span::styled("  sudo ", Style::new().fg(c_muted())),
             cell(row.sudo, shown.and_then(|s| s.sudo.as_ref())),
         ]);
-        let style = if n == v.selected { Style::new().bg(SEL_BG) } else { Style::new() };
+        let style = if n == v.selected { Style::new().bg(c_sel()) } else { Style::new() };
         f.render_widget(Paragraph::new(line).style(style), Rect::new(x, y, w as u16, 1));
         if n == v.selected {
             // Underline the column the c / e / d keys act on.
@@ -1394,7 +1451,7 @@ fn draw_vault(f: &mut Frame, area: Rect, v: &VaultView) {
     }
     f.render_widget(
         Paragraph::new("↑↓ row · ←→ column · r reveal · c copy · e change · d remove · m master · Esc")
-            .style(Style::new().fg(MUTED)),
+            .style(Style::new().fg(c_muted())),
         Rect::new(x, inner.y + inner.height - 1, w as u16, 1),
     );
 }
@@ -1409,23 +1466,23 @@ fn draw_secret_edit(f: &mut Frame, area: Rect, e: &SecretEdit) -> Position {
     let x = inner.x + 1;
     let w = inner.width.saturating_sub(2);
     let field = Rect::new(x + 6, inner.y + 1, w.saturating_sub(6), 1);
-    f.render_widget(Paragraph::new("New").style(Style::new().fg(MUTED)), Rect::new(x, inner.y + 1, 6, 1));
+    f.render_widget(Paragraph::new("New").style(Style::new().fg(c_muted())), Rect::new(x, inner.y + 1, 6, 1));
     let cursor = if e.show {
         let skip = e.input.cursor.saturating_sub(field.width.saturating_sub(1) as usize);
         let shown: String = e.input.value.chars().skip(skip).collect();
-        f.render_widget(Paragraph::new(shown).style(Style::new().fg(FG).bg(SEL_BG)), field);
+        f.render_widget(Paragraph::new(shown).style(Style::new().fg(c_fg()).bg(c_sel())), field);
         Position::new(field.x + (e.input.cursor - skip) as u16, field.y)
     } else {
         draw_secret_field(f, field, &e.input, true)
     };
     if let Some(err) = &e.error {
         f.render_widget(
-            Paragraph::new(format!("✕ {err}")).style(Style::new().fg(RED)),
+            Paragraph::new(format!("✕ {err}")).style(Style::new().fg(c_red())),
             Rect::new(x, inner.y + 2, w, 1),
         );
     }
     f.render_widget(
-        Paragraph::new("Enter save · Ctrl+T show/hide · Esc cancel").style(Style::new().fg(MUTED)),
+        Paragraph::new("Enter save · Ctrl+T show/hide · Esc cancel").style(Style::new().fg(c_muted())),
         Rect::new(x, inner.y + inner.height - 1, w, 1),
     );
     cursor

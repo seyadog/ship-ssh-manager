@@ -1914,6 +1914,7 @@ impl App {
             }
             KeyCode::F(2) if n > 0 => return self.rename_tab_prompt(),
             KeyCode::Char('b') if alt => return self.toggle_panel(),
+            KeyCode::F(8) => return self.toggle_theme(),
             KeyCode::Char('k') if alt => return self.open_search(),
             KeyCode::Char('p') if alt && self.sudo_ready() => {
                 self.modal = self.gate(Pending::FillSudo(self.active));
@@ -2455,6 +2456,14 @@ impl App {
                 }
             }
         }
+    }
+
+    /// F8: switches between the colours of the terminal and the classic fixed ones, and remembers it.
+    fn toggle_theme(&mut self) {
+        let terminal = !crate::ui::terminal_theme();
+        crate::ui::set_theme(terminal);
+        crate::settings::save_theme(if terminal { "terminal" } else { "classic" });
+        self.set_flash(if terminal { "Theme: your terminal's colours" } else { "Theme: classic colours" });
     }
 
     /// Alt+B: folds both columns of the sidebar away, or brings them back.
