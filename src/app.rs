@@ -1613,10 +1613,15 @@ impl App {
         let promoted = self.spaces.mark_used(id);
         if self.spaces.touch(id) || promoted {
             self.save_spaces();
-            let keep = self.selected_node();
+            // Stay on the row you were on: a filed project also shows on top, and the selection must not jump
+            // out of its folder to that copy.
+            let keep = self.rows.get(self.selected).map(|r| (r.node, r.jump));
             self.rebuild();
-            if let Some(n) = keep {
-                self.select_node(n);
+            if let Some((n, jump)) = keep {
+                match self.rows.iter().position(|r| r.node == n && r.jump == jump) {
+                    Some(i) => self.selected = i,
+                    None => self.select_node(n),
+                }
             }
         }
     }
