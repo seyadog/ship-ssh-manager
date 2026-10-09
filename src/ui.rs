@@ -67,7 +67,7 @@ fn badge_accent() -> Style {
     Style::new().fg(Color::Black).bg(c_accent())
 }
 
-/// One colour per project, taken from oso's own palette and as far apart from each other as possible.
+/// One colour per server, taken from oso's own palette and as far apart from each other as possible.
 const PASTELS: [(u8, u8, u8); 8] = [
     (122, 162, 247), // blue
     (247, 118, 142), // red
@@ -79,12 +79,9 @@ const PASTELS: [(u8, u8, u8); 8] = [
     (115, 218, 180), // teal
 ];
 
-fn space_color(id: u64, live: bool) -> Color {
+fn server_color(id: u64) -> Color {
     let (r, g, b) = if terminal_theme() { MOCHA[(id as usize) % MOCHA.len()] } else { PASTELS[(id as usize) % PASTELS.len()] };
-    // Idle spaces keep their hue but wash out towards grey (fading to black would turn yellows brown).
-    let k = if live { 1.0 } else { 0.6 };
-    let fade = |c: u8, grey: f32| (c as f32 * k + grey * (1.0 - k)) as u8;
-    Color::Rgb(fade(r, 80.0), fade(g, 82.0), fade(b, 100.0))
+    Color::Rgb(r, g, b)
 }
 
 /// The colours of the default theme, soft but lively: blue, pink, green, orange, violet, cyan, yellow, teal.
@@ -182,56 +179,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 // ---------------------------------------------------------------- sidebar
 
-/// The sidebar: two columns side by side, Projects and Servers. The one that is the active view takes the
-/// keyboard and the selection; the other shows its list and a click makes it the active one. Each can be folded.
+/// The sidebar: one column with the servers (folders, and below them the bastions), a title with a dot per
+/// open session, and a row of actions at the bottom.
 fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar && app.modal.is_none();
     app.layout.sidebar = area;
-    app.layout.cols = [Rect::default(); 2];
-    app.layout.col_geom = [ListGeom::default(); 2];
     app.layout.list = Rect::default();
     app.layout.list_bottom = Rect::default();
-    // Projects in the top half, Servers in the bottom half.
-    let top_h = area.height / 2;
-    let rects = [
-        Rect::new(area.x, area.y, area.width, top_h),
-        Rect::new(area.x, area.y + top_h, area.width, area.height - top_h),
-    ];
-    // The titles come first in the toolbar: the keyboard highlight finds them by position (`HEADER`).
-    let names = ["Projects", "Servers"];
-    for i in 0..2 {
-        let title = if app.fold[i] {
-            Rect::default()
-        } else {
-            Rect::new(rects[i].x, rects[i].y, (names[i].width() as u16 + 2).min(rects[i].width.saturating_sub(1)), 1)
-        };
-        app.layout.toolbar.push((title, HEADER[i]));
-    }
-    for i in 0..2 {
-        draw_column(f, app, i, rects[i], focused);
-    }
-    // Keyboard focus on a title: highlight it.
-    if let (Some(i), true) = (app.header, focused) {
-        if let Some(&(r, _)) = app.layout.toolbar.get(i) {
-            f.buffer_mut().set_style(r, Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD));
-        }
-    }
-}
-
-fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool) {
-    let (view, name) = if i == 0 { (View::Spaces, "Projects") } else { (View::Folders, "Servers") };
-    let active = app.view == view;
-    if app.fold[i] {
-        // A thin strip: click it to bring the column back.
-        let initial = name.chars().next().unwrap_or(' ').to_string();
-        f.render_widget(
-            Paragraph::new(vec![Line::raw(""), Line::from(Span::styled(" ›", Style::new().fg(c_accent()))), Line::from(Span::styled(format!(" {initial}"), Style::new().fg(c_muted())))]),
-            Rect::new(area.x, area.y, area.width, 3.min(area.height)),
-        );
-        app.layout.toolbar.push((Rect::new(area.x, area.y, area.width, 3.min(area.height)), Hit::Fold(i)));
-        return;
-    }
-    app.layout.cols[i] = area;
     if area.height < 5 || area.width < 8 {
         return;
     }
@@ -240,42 +194,34 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
     for y in area.y..area.y + area.height {
         f.render_widget(Paragraph::new("│").style(edge), Rect::new(area.x + area.width - 1, y, 1, 1));
     }
-    let title_style = if active && focused {
+    let title_style = if focused {
         Style::new().fg(c_accent()).add_modifier(Modifier::BOLD)
-    } else if active {
-        Style::new().fg(c_fg()).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(c_muted())
+        Style::new().fg(c_fg()).add_modifier(Modifier::BOLD)
     };
-    f.render_widget(Paragraph::new(format!("  {name}")).style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
-    // A dot per thing that is open in this column (a project with a live tab, a server with a live session),
-    // each in its own colour, at the right end of the title.
+    f.render_widget(Paragraph::new("  Servers").style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
+    // A dot per server with a live session, each in its own colour, at the right end of the title.
     let mut open: Vec<u64> = vec![];
     for t in app.tabs.iter().filter(|t| t.session.exit_code.is_none()) {
-        let id = match (i, t.scope) {
-            (0, Scope::Space(id)) => id,
-            (1, Scope::Ssh) => t.server_id,
-            _ => continue,
-        };
-        if !open.contains(&id) {
-            open.push(id);
+        if !open.contains(&t.server_id) {
+            open.push(t.server_id);
         }
     }
-    let room = (area.width as usize).saturating_sub(name.width() + 7) / 2;
-    let dots: Vec<Span> = open.iter().take(room).flat_map(|&id| [Span::styled("●", Style::new().fg(space_color(id, true))), Span::raw(" ")]).collect();
+    let room = (area.width as usize).saturating_sub(9 + 7) / 2;
+    let dots: Vec<Span> = open
+        .iter()
+        .take(room)
+        .flat_map(|&id| [Span::styled("●", Style::new().fg(server_color(id))), Span::raw(" ")])
+        .collect();
     let dw = (dots.len() as u16).min(area.width.saturating_sub(4));
     if dw > 0 {
         f.render_widget(Paragraph::new(Line::from(dots)), Rect::new(area.x + area.width - 2 - dw, area.y, dw, 1));
     }
     // The list keeps two columns of margin on the left and a little on the right.
     let inner = Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(5), area.height.saturating_sub(3));
-    // The actions of the column, as small padded buttons along the bottom.
+    // The actions, as small padded buttons along the bottom.
     let by = area.y + area.height - 1;
-    let actions: [(&str, Hit); 3] = if i == 0 {
-        [(" + new ", Hit::NewProject), (" edit ", Hit::Edit), (" term ", Hit::Term)]
-    } else {
-        [(" + new ", Hit::NewServer), (" edit ", Hit::Edit), (" vault ", Hit::Vault)]
-    };
+    let actions: [(&str, Hit); 4] = [(" + new ", Hit::NewServer), (" edit ", Hit::Edit), (" term ", Hit::Term), (" vault ", Hit::Vault)];
     let mut bx = area.x + 2;
     for (n, (label, hit)) in actions.into_iter().enumerate() {
         let w = label.width() as u16;
@@ -288,17 +234,11 @@ fn draw_column(f: &mut Frame, app: &mut App, i: usize, area: Rect, focused: bool
         bx += w + 1;
     }
     let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
-    if active {
-        draw_active_list(f, app, list, focused);
-    } else {
-        draw_passive_list(f, app, i, view, list);
-    }
+    draw_list(f, app, list, focused);
 }
 
-/// Where the parts of a list go in its column: projects as two-line blocks (tighter when there are many),
-/// with the folders below (up to half the list); the servers' bastions below, from the middle.
-fn list_geom(rows: &[Row], view: View, list: Rect) -> ListGeom {
-    let _ = view;
+/// Where the parts of the list go: the folder tree on top and the bastions below it (up to half the list).
+fn list_geom(rows: &[Row], list: Rect) -> ListGeom {
     let header = rows.iter().position(|r| r.node == NodeId::BastionsHeader);
     let split = if list.height >= 6 { header } else { None };
     let (top, bottom) = match split {
@@ -314,41 +254,19 @@ fn list_geom(rows: &[Row], view: View, list: Rect) -> ListGeom {
     ListGeom { top, bottom, split, row_h: 1, bottom_row_h: 1, top_count: split.unwrap_or(rows.len()) }
 }
 
-/// The list of the column that is not the active view. It is laid out exactly like the active one, from
-/// the top and without a selection, so that switching column does not rearrange anything; a click activates it.
-fn draw_passive_list(f: &mut Frame, app: &mut App, col: usize, view: View, list: Rect) {
-    let g = list_geom(&app.other_rows, view, list);
-    app.layout.col_geom[col] = g;
-    if app.other_rows.is_empty() {
-        let text = if view == View::Spaces { "No projects yet." } else { "No servers yet." };
-        f.render_widget(Paragraph::new(text).style(Style::new().fg(c_muted())), list);
-        return;
-    }
-    let app: &App = app;
-    let rows = &app.other_rows;
-    draw_rows(f, app, g.top, 0, g.top_count, 0, g.row_h, false, rows, None, view);
-    if let Some(header) = g.split {
-        draw_rows(f, app, g.bottom, header, rows.len(), 0, g.bottom_row_h, false, rows, None, view);
-    }
-}
-
-/// The list of the active view, with its selection and scrolling.
-fn draw_active_list(f: &mut Frame, app: &mut App, list: Rect, focused: bool) {
+/// The list, with its selection and scrolling.
+fn draw_list(f: &mut Frame, app: &mut App, list: Rect, focused: bool) {
     app.layout.list = list;
     if list.height == 0 {
         return;
     }
     if app.rows.is_empty() {
-        let lines: Vec<&str> = if app.view == View::Spaces {
-            vec!["No projects yet.", "Press a: a terminal opens;", "run claude, opencode… in it.", "It stays where you leave it (cd)."]
-        } else {
-            vec!["No servers yet.", "Click “+ Server” or press a."]
-        };
+        let lines: Vec<&str> = vec!["No servers yet.", "Click “+ new” or press a."];
         let hint = Paragraph::new(lines.into_iter().map(|l| Line::from(Span::styled(l, Style::new().fg(c_muted())))).collect::<Vec<_>>());
         f.render_widget(hint, list);
         return;
     }
-    let g = list_geom(&app.rows, app.view, list);
+    let g = list_geom(&app.rows, list);
     let (top, bottom, split, row_h) = (g.top, g.bottom, g.split, g.row_h);
     app.layout.row_h = row_h;
     app.layout.list = top;
@@ -379,12 +297,11 @@ fn draw_active_list(f: &mut Frame, app: &mut App, list: Rect, focused: bool) {
     }
 
     let (offset, offset_bottom, rows_len) = (app.offset, app.offset_bottom, app.rows.len());
-    let view = app.view;
     let selected = Some(app.selected);
     let rows = std::mem::take(&mut app.rows);
-    draw_rows(f, app, top, 0, top_count, offset, row_h, focused, &rows, selected, view);
+    draw_rows(f, app, top, 0, top_count, offset, row_h, focused, &rows, selected);
     if let Some(header) = split {
-        draw_rows(f, app, bottom, header, rows_len, offset_bottom, g.bottom_row_h, focused, &rows, selected, view);
+        draw_rows(f, app, bottom, header, rows_len, offset_bottom, g.bottom_row_h, focused, &rows, selected);
     }
     app.rows = rows;
 }
@@ -402,7 +319,6 @@ fn draw_rows(
     focused: bool,
     rows: &[Row],
     selected: Option<usize>,
-    view: View,
 ) {
     let width = area.width as usize;
     let h = ((area.height / row_h) as usize).max(1);
@@ -424,139 +340,12 @@ fn draw_rows(
         }
         style = style.bg(bg);
 
-        if let NodeId::Space(id) = row.node {
-            // A solid two-line block: name, and under it the git branch (or the directory).
-            let sp = app.spaces.get(id);
-            let name = sp.map(|s| s.name.clone()).unwrap_or_else(|| "?".into());
-            let cwd = sp.map(|s| app.tilde(&s.cwd)).unwrap_or_default();
-            let mine = |t: &&Tab| t.scope == Scope::Space(id);
-            let live = app.tabs.iter().filter(mine).any(|t| t.session.exit_code.is_none());
-            let attention = app.tabs.iter().filter(mine).any(|t| t.attention);
-            // One line: a coloured spine for the state, the name, and the branch (or directory) on the right.
-            // The name turns green when the agent has finished; the spine keeps the space's own colour.
-            let color = space_color(id, live);
-            let (mut text, tone) = match app.branches.get(&id) {
-                Some(b) => (b.clone(), themed(Color::Rgb(190, 140, 255), REMOTE_GREEN)),
-                None => (cwd, c_muted()),
-            };
-            // A filed project that is on top says which folder it belongs to.
-            if !row.jump {
-                if let Some(fo) = sp.and_then(|s| s.folder).and_then(|f| app.spaces.folder(f)) {
-                    text = format!("▸ {}  {}", fo.name, text);
-                }
-            }
-            // The AI agents running in this project (one per tab), each named and coloured by what it is doing.
-            let mut agents: Vec<(bool, bool, String)> = app
-                .tabs
-                .iter()
-                .filter(mine)
-                .filter_map(|t| t.session.agent().map(|a| (t.attention, a.working, a.name.clone())))
-                .collect();
-            agents.sort_by_key(|&(att, working, _)| std::cmp::Reverse((att, working)));
-            let name_w = name.width().min(width.saturating_sub(3));
-            let tags: Vec<(String, Color)> = agents
-                .into_iter()
-                .map(|(att, working, aname)| {
-                    if att {
-                        (format!("{aname} ✓"), c_green())
-                    } else if working {
-                        (format!("{aname} …"), c_amber())
-                    } else {
-                        (aname, c_muted())
-                    }
-                })
-                .collect();
-            // The tags that fit in `room` columns, separated by a space; the later ones are dropped first.
-            let fit_tags = |room: usize| -> Vec<(String, Color)> {
-                let (mut used, mut out) = (0, vec![]);
-                for (t, c) in &tags {
-                    let w = t.width() + usize::from(!out.is_empty());
-                    if used + w > room {
-                        break;
-                    }
-                    used += w;
-                    out.push((t.clone(), *c));
-                }
-                out
-            };
-            let tags_width = |v: &[(String, Color)]| v.iter().map(|(t, _)| t.width()).sum::<usize>() + v.len().saturating_sub(1);
-            let tag_spans = |v: Vec<(String, Color)>| -> Vec<Span<'static>> {
-                let mut out = vec![];
-                for (i, (t, c)) in v.into_iter().enumerate() {
-                    if i > 0 {
-                        out.push(Span::styled(" ", Style::new().bg(bg)));
-                    }
-                    out.push(Span::styled(t, Style::new().fg(c).bg(bg).add_modifier(Modifier::BOLD)));
-                }
-                out
-            };
-            let width = width.saturating_sub(1);
-            let mut spans = vec![
-                Span::styled(" ", Style::new().bg(bg)),
-                Span::styled("▆", Style::new().fg(color).bg(bg)),
-                Span::styled(
-                    format!(" {}", fit(&name, width.saturating_sub(3))),
-                    style.fg(if attention { c_green() } else { color }).add_modifier(Modifier::BOLD),
-                ),
-            ];
-            // The rest of the line, right-aligned: the agent (if any) first, then the branch if it still fits.
-            let mut room = width.saturating_sub(2 + name_w + 3);
-            let mut right: Vec<Span<'static>> = vec![];
-            let shown = fit_tags(room);
-            if !shown.is_empty() {
-                room -= tags_width(&shown) + 2;
-                right.extend(tag_spans(shown));
-            }
-            if room >= 6 && !text.is_empty() {
-                let shown = fit(&text, room);
-                right.insert(0, Span::styled(format!("{}  ", shown), Style::new().fg(tone).bg(bg)));
-            }
-            let used: usize = right.iter().map(|sp| sp.content.width()).sum();
-            if used > 0 {
-                let pad = width.saturating_sub(2 + name_w + used + 1);
-                spans.push(Span::styled(" ".repeat(pad), Style::new().bg(bg)));
-                spans.extend(right);
-                spans.push(Span::styled(" ", Style::new().bg(bg)));
-            }
-            f.render_widget(Paragraph::new(Line::from(spans)).style(style), Rect::new(area.x, y, area.width, 1));
-            continue;
-        }
-
         let indent = "  ".repeat(row.depth);
         let mut spans = vec![Span::raw(indent.clone())];
         match row.node {
-            NodeId::Space(_) => {}
-            NodeId::SpaceFolder(id) => {
-                // One small line: the folder, how many projects it holds, and whether an agent runs inside.
-                let fo = app.spaces.folder(id);
-                let open = fo.is_some_and(|f| f.expanded);
-                let name = fo.map(|f| f.name.as_str()).unwrap_or("?");
-                let inside: Vec<u64> = app.spaces.spaces.iter().filter(|s| s.folder == Some(id)).map(|s| s.id).collect();
-                let agents = app.tabs.iter().filter(|t| matches!(t.scope, Scope::Space(s) if inside.contains(&s)));
-                let (mut att, mut work) = (false, false);
-                for t in agents {
-                    att |= t.attention;
-                    work |= t.session.agent().is_some_and(|a| a.working);
-                }
-                let (mark, mc) = if att {
-                    (" ✓", c_green())
-                } else if work {
-                    (" …", c_amber())
-                } else {
-                    ("", c_muted())
-                };
-                let count = format!(" ({}){}", inside.len(), mark);
-                let label = fit(name, width.saturating_sub(indent.width() + 4 + count.width()));
-                spans.push(Span::styled(if open { " ▾  " } else { " ▸  " }, Style::new().fg(c_folder())));
-                spans.push(Span::styled(label, Style::new().fg(c_folder()).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(format!(" ({})", inside.len()), Style::new().fg(c_muted())));
-                if !mark.is_empty() {
-                    spans.push(Span::styled(mark, Style::new().fg(mc).add_modifier(Modifier::BOLD)));
-                }
-            }
             NodeId::BastionsHeader => {
                 // A fixed label with a rule after it: only the bastions below it fold.
-                let title = if view == View::Spaces { "folders" } else { "bastions" };
+                let title = "bastions";
                 spans.push(Span::styled(title, Style::new().fg(c_muted()).add_modifier(Modifier::BOLD)));
                 let rest = width.saturating_sub(indent.width() + title.len() + 1);
                 spans.push(Span::styled(format!(" {}", "─".repeat(rest)), Style::new().fg(c_muted())));
@@ -603,19 +392,6 @@ fn draw_rows(
 
 // ---------------------------------------------------------------- tabs
 
-/// What runs in a tab, shown in the bar so that it can be seen from the other group: the agent and its state
-/// (`…` working, `✓` finished and waiting for a look).
-fn tab_tag(tab: &crate::app::Tab) -> Option<(String, Color)> {
-    let a = tab.session.agent()?;
-    Some(if tab.attention {
-        (format!("{} ✓", a.name), c_green())
-    } else if a.working {
-        (format!("{} …", a.name), c_amber())
-    } else {
-        (a.name, c_muted())
-    })
-}
-
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
     let end = area.x + area.width;
     // Every open tab of this group; the numbers (Alt+1..9, 0) run through the left group and on into the right one.
@@ -631,7 +407,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
         let max_title = (avail / n).saturating_sub(9).clamp(6, 20);
         let cell = |p: usize| {
             let tab = &app.tabs[scoped[p]];
-            fit(&app.tab_label(tab), max_title).width() + 11 + 1 + tab_tag(tab).map_or(0, |(t, _)| t.width() + 1)
+            fit(&app.tab_label(tab), max_title).width() + 11 + 1
         };
         let active = scoped.iter().position(|&i| Some(i) == shown).unwrap_or(0);
         let mut start = 0;
@@ -648,9 +424,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
                 9 => "0 ".to_string(),
                 _ => "  ".to_string(),
             };
-            let tag = tab_tag(tab);
-            let tag_text = tag.as_ref().map(|(t, _)| format!(" {t}")).unwrap_or_default();
-            let text = format!("  {num}{} {}{tag_text}  ✕  ", if dead { "○" } else { "●" }, title);
+            let text = format!("  {num}{} {}  ✕  ", if dead { "○" } else { "●" }, title);
             let w = text.width() as u16;
             if x + w > end {
                 break;
@@ -658,8 +432,6 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
             let is_active = Some(i) == shown;
             let dot = if dead {
                 c_red()
-            } else if tab.attention {
-                c_amber()
             } else {
                 c_green()
             };
@@ -675,7 +447,6 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
                         title,
                         Style::new().fg(fg).bg(bg).add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
                     ),
-                    Span::styled(tag_text, Style::new().fg(tag.map_or(c_muted(), |(_, c)| c)).bg(bg)),
                     Span::styled("  ✕  ", Style::new().fg(c_muted()).bg(bg)),
                 ])),
                 rect,
@@ -684,8 +455,8 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
             x += w + 1;
         }
     }
-    // “+” opens a new terminal in this scope.
-    if app.scope != Scope::Space(0) && x + 5 <= end {
+    // “+” opens a new terminal.
+    if x + 5 <= end {
         let r = Rect::new(x, area.y, 5, 1);
         f.render_widget(Paragraph::new("  +  ").style(Style::new().fg(c_accent())), r);
         app.layout.toolbar.push((r, if right { Hit::NewTabRight } else { Hit::NewTab }));
@@ -701,7 +472,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect, right: bool) {
 
 fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     if app.blank() {
-        return draw_welcome(f, app, area);
+        return draw_welcome(f, area);
     }
     let idx = app.active.min(app.tabs.len() - 1);
     draw_terminal(f, app, idx, area, true);
@@ -898,32 +669,16 @@ fn wordmark_lines() -> Vec<Line<'static>> {
     pixel_lines(&WORDMARK, |c| (c == '#').then_some(LOGO_BLUE))
 }
 
-fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
+fn draw_welcome(f: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = bear_lines();
     lines.push(Line::raw(""));
     lines.extend(wordmark_lines());
     lines.push(Line::raw(""));
-    let hints: Vec<String> = match app.scope {
-        Scope::Ssh => vec![
-            "Double-click a server to open a session.".into(),
-            "Drag servers and folders to reorganize them.".into(),
-            "Alt+Q switches between the panel and the terminal.".into(),
-        ],
-        Scope::Space(0) => vec![
-            "No projects yet.".into(),
-            "Press a (or “+ Project”): a terminal opens. Move around with cd and mkdir:".into(),
-            "it stays in the last directory you leave it in.".into(),
-        ],
-        Scope::Space(id) => {
-            let sp = app.spaces.get(id);
-            vec![
-                sp.map(|s| s.name.clone()).unwrap_or_default(),
-                sp.map(|s| s.cwd.clone()).unwrap_or_default(),
-                "Press Enter or t to open a terminal here.".into(),
-                "Run claude, opencode… in it: it shows under “running”.".into(),
-            ]
-        }
-    };
+    let hints = [
+        "Double-click a server to open a session.",
+        "Drag servers and folders to reorganize them.",
+        "Alt+Q switches between the panel and the terminal.",
+    ];
     for t in hints {
         lines.push(Line::from(Span::styled(t, Style::new().fg(c_muted()))));
     }
@@ -935,20 +690,43 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
 // ---------------------------------------------------------------- status bar
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let text = if let Some((msg, _)) = &app.flash {
+    if let Some((msg, _)) = &app.flash {
         return f.render_widget(Paragraph::new(format!(" {msg}")).style(Style::new().fg(c_amber())), area);
-    } else if app.modal.is_some() {
-        "Esc cancel"
+    }
+    let (mode, text) = if app.modal.is_some() {
+        ("DIALOG", "Esc cancel")
     } else if app.focus == Focus::Terminal {
-        "F6 next area · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close"
-    } else if app.header.is_some() {
-        "←→ choose column · Esc back to the list"
-    } else if app.view == View::Spaces {
-        "↑↓ move · Enter open · a add · e rename · d delete · Tab servers · F6 next area · / search · q quit"
+        ("TERMINAL", "F6 next area · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close")
     } else {
-        "↑↓ move · Enter open · a add · e edit · d delete · Tab projects · F6 next area · / search · q quit"
+        ("SERVERS", "↑↓ move · Enter open · a add · e edit · d delete · F6 next area · / search · q quit")
     };
-    f.render_widget(Paragraph::new(format!(" {text}")).style(Style::new().fg(c_muted())), area);
+    let live = app.tabs.iter().filter(|t| t.session.exit_code.is_none()).count();
+    let stats = format!(" {} servers · {} open ", app.store.servers.len(), live);
+    let mut spans = vec![Span::styled(format!(" {mode} "), badge_accent().add_modifier(Modifier::BOLD)), Span::raw(" ")];
+    // "key action · key action": the key (first word of each hint) stands out, the rest stays quiet.
+    let room = (area.width as usize).saturating_sub(mode.width() + 3 + stats.width());
+    let mut used = 0;
+    for (n, hint) in text.split(" · ").enumerate() {
+        let (key, rest) = match hint.split_once(' ') {
+            Some((k, r)) => (k.to_string(), format!(" {r}")),
+            None => (hint.to_string(), String::new()),
+        };
+        let sep = if n > 0 { "  " } else { "" };
+        let w = sep.width() + key.width() + rest.width();
+        if used + w > room {
+            break;
+        }
+        used += w;
+        spans.push(Span::raw(sep));
+        spans.push(Span::styled(key, Style::new().fg(c_accent())));
+        spans.push(Span::styled(rest, Style::new().fg(c_muted())));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    let sw = (stats.width() as u16).min(area.width);
+    f.render_widget(
+        Paragraph::new(stats).style(Style::new().fg(c_muted()).bg(c_sel())),
+        Rect::new(area.x + area.width - sw, area.y, sw, 1),
+    );
 }
 
 // ---------------------------------------------------------------- modales
@@ -1016,7 +794,6 @@ fn draw_modal(f: &mut Frame, app: &mut App, area: Rect) {
                 let name = fit(&item.label, w.saturating_sub(detail_w + 4));
                 let pad = w.saturating_sub(2 + name.width() + detail_w);
                 let mark = match item.target {
-                    SearchTarget::Space(_) => "▌ ",
                     SearchTarget::Server(_) => "▤ ",
                     SearchTarget::Local => "› ",
                 };

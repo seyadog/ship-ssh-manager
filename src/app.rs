@@ -4,13 +4,12 @@ use crate::keys;
 use crate::clipboard;
 use crate::daemon::Daemon;
 use crate::session::{Autofill, Session, SpawnOpts};
-use crate::spaces::{self, Spaces};
 use crate::store::{Auth, NodeId, Server, Store};
 use crate::vault::{Kind, UnlockError, Vault};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -155,24 +154,13 @@ pub enum Focus {
     Terminal,
 }
 
-/// Where a tab lives: the SSH section, or one space. Each has its own tab bar, so what runs in a space
-/// (an AI agent, say) never shows up among the SSH tabs. `Space(0)` stands for "no space selected".
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Scope {
-    Ssh,
-    Space(u64),
-}
-
 pub struct Tab {
     pub id: u64,
     pub title: String,
     pub server_id: u64,
-    pub scope: Scope,
     /// Shown in the right group of tabs (see `App::is_split`).
     pub right: bool,
     pub session: Session,
-    /// An agent finished here and the user has not looked yet.
-    pub attention: bool,
     /// The last description of this tab sent to the background server.
     meta_sent: String,
 }
@@ -394,13 +382,9 @@ fn looks_like_private_key(path: &Path) -> bool {
 }
 
 pub enum PromptKind {
-    RenameSpace(u64),
     NewFolder(Option<u64>),
     RenameFolder(u64),
     RenameTab(usize),
-    NewSpaceFolder,
-    RenameSpaceFolder(u64),
-    MoveSpace(u64),
 }
 
 pub struct Prompt {
@@ -412,7 +396,6 @@ pub struct Prompt {
 pub enum ConfirmAction {
     DeleteSecret(u64, Kind),
     Delete(NodeId),
-    DeleteSpace(u64),
     Quit,
 }
 
@@ -495,7 +478,6 @@ pub struct SecretEdit {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SearchTarget {
     Server(u64),
-    Space(u64),
     Local,
 }
 
@@ -559,15 +541,10 @@ pub enum Modal {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hit {
-    ViewFolders,
-    NewProject,
     NewServer,
     Edit,
     Term,
     Vault,
-    /// Folds a column of the sidebar away (0: Projects, 1: Servers) or brings it back.
-    Fold(usize),
-    ViewSpaces,
     NewTab,
     NewTabRight,
     Field(usize),
@@ -577,10 +554,6 @@ pub enum Hit {
     Yes,
     No,
 }
-
-/// The titles of the two columns, in keyboard order: Projects, Servers. The sidebar pushes its toolbar hits in
-/// this same order.
-pub const HEADER: [Hit; 2] = [Hit::ViewSpaces, Hit::ViewFolders];
 
 /// `Tab::server_id` of the terminal of this computer (real servers start at 1).
 pub const LOCAL: u64 = 0;
@@ -623,10 +596,6 @@ pub struct Layout {
     /// The draggable line between the groups, and the whole area they share.
     pub divider: Rect,
     pub split_area: Rect,
-    /// The two columns of the sidebar (0: Projects, 1: Servers), whole boxes.
-    pub cols: [Rect; 2],
-    /// How the list of each column is laid out (where the one that is not the active view was drawn).
-    pub col_geom: [ListGeom; 2],
     pub tabs: Vec<TabHit>,
     pub toolbar: Vec<(Rect, Hit)>,
     pub modal: Vec<(Rect, Hit)>,
@@ -635,14 +604,6 @@ pub struct Layout {
 
 fn inside(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum View {
-    /// Shown as “SSH”: the folder tree, and below it the bastions.
-    Folders,
-    /// Shown as “Agents”.
-    Spaces,
 }
 
 enum Drag {
@@ -665,20 +626,9 @@ pub struct App {
     /// Scroll of the lower half (the bastions) of the SSH view.
     pub offset_bottom: usize,
     pub tabs: Vec<Tab>,
-    /// Index in `tabs` of the active tab of the current scope (meaningless while the scope has no tabs).
+    /// Index in `tabs` of the active tab (meaningless while there are none).
     pub active: usize,
-    pub scope: Scope,
-    /// The last active tab (by id) of each scope, to come back to it.
-    remembered: HashMap<Scope, u64>,
-    /// The scopes whose last tab was closed: each shows the welcome screen instead of another scope's tab.
-    emptied: HashSet<Scope>,
     next_tab_id: u64,
-    pub spaces: Spaces,
-    /// Git branch of each space's directory, refreshed every few seconds.
-    pub branches: HashMap<u64, String>,
-    branches_at: Option<Instant>,
-    /// Play a sound when an agent finishes.
-    pub sound: bool,
     pub selection: Option<Selection>,
     /// The mouse button is down and the selection is being dragged out.
     selecting: bool,
@@ -694,13 +644,6 @@ pub struct App {
     pub flash: Option<(String, Instant)>,
     /// Row under the pointer while dragging (highlighted as the drop target).
     pub drop_hover: Option<usize>,
-    pub view: View,
-    /// Which columns of the sidebar are folded away (0: Projects, 1: Servers); `Alt+B` folds or brings back both.
-    pub fold: [bool; 2],
-    /// The rows of the view that is not the active one, shown in its column.
-    pub other_rows: Vec<Row>,
-    /// Keyboard focus on the sidebar header instead of the list: an index into `HEADER`.
-    pub header: Option<usize>,
     /// The tab bar, as tab ids: every open tab, in the order it was opened.
     bar: Vec<u64>,
     /// Where the line between the two groups is, in thousandths of the width (500 = half and half).
@@ -728,14 +671,7 @@ impl App {
             offset_bottom: 0,
             tabs: vec![],
             active: 0,
-            scope: Scope::Ssh,
-            remembered: HashMap::new(),
-            emptied: HashSet::new(),
             next_tab_id: 0,
-            spaces: Spaces::default(),
-            branches: HashMap::new(),
-            branches_at: None,
-            sound: true,
             selection: None,
             selecting: false,
             daemon: None,
@@ -747,13 +683,9 @@ impl App {
             quit: false,
             flash: None,
             drop_hover: None,
-            view: View::Folders,
             jump_open: HashSet::new(),
             ui_path: PathBuf::new(),
-            header: None,
             bar: Vec::new(),
-            fold: [false; 2],
-            other_rows: Vec::new(),
             split_pm: 500,
             shown: [None; 2],
             drag: None,
@@ -763,24 +695,12 @@ impl App {
         app
     }
 
-    /// A path with the home directory written as `~`.
-    pub fn tilde(&self, path: &str) -> String {
-        match home_dir() {
-            Some(h) => match Path::new(path).strip_prefix(&h) {
-                Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-                Ok(rest) => format!("~/{}", rest.display()),
-                Err(_) => path.to_string(),
-            },
-            None => path.to_string(),
-        }
-    }
-
     pub fn set_flash(&mut self, msg: impl Into<String>) {
         self.flash = Some((msg.into(), Instant::now()));
     }
 
-    /// The rows of one view of the sidebar.
-    fn build_rows(&self, view: View) -> Vec<Row> {
+    /// The rows of the sidebar: the folder tree, and below it the bastions.
+    fn build_rows(&self) -> Vec<Row> {
         fn walk(store: &Store, parent: Option<u64>, depth: usize, out: &mut Vec<Row>) {
             for f in store.folders.iter().filter(|f| f.parent == parent) {
                 out.push(Row { node: NodeId::Folder(f.id), depth, jump: false });
@@ -808,55 +728,22 @@ impl App {
             }
         }
         let mut rows: Vec<Row> = vec![];
-        match view {
-            View::Folders => {
-                walk(&self.store, None, 0, &mut rows);
-                // Below the folders, the bastions and what is reached through them (only if there are any).
-                let bastions = self
-                    .store
-                    .servers
-                    .iter()
-                    .any(|s| s.jump.is_none() && self.store.servers.iter().any(|x| x.jump == Some(s.id)));
-                if bastions {
-                    rows.push(Row { node: NodeId::BastionsHeader, depth: 0, jump: false });
-                    walk_jump(&self.store, None, 1, &self.jump_open, &mut rows);
-                }
-            }
-            View::Spaces => {
-                // On top: every project that is not filed, and the filed ones used lately. Below, like the
-                // bastions, the folders (small, collapsible) with all their projects.
-                let sp = &self.spaces;
-                rows.extend(
-                    sp.spaces
-                        .iter()
-                        .filter(|s| sp.on_top(s))
-                        .map(|s| Row { node: NodeId::Space(s.id), depth: 0, jump: false }),
-                );
-                if !sp.folders.is_empty() {
-                    rows.push(Row { node: NodeId::BastionsHeader, depth: 0, jump: false });
-                    for f in &sp.folders {
-                        rows.push(Row { node: NodeId::SpaceFolder(f.id), depth: 0, jump: true });
-                        if f.expanded {
-                            rows.extend(
-                                sp.spaces
-                                    .iter()
-                                    .filter(|s| s.folder == Some(f.id))
-                                    .map(|s| Row { node: NodeId::Space(s.id), depth: 1, jump: true }),
-                            );
-                        }
-                    }
-                }
-            }
+        walk(&self.store, None, 0, &mut rows);
+        // Below the folders, the bastions and what is reached through them (only if there are any).
+        let bastions = self
+            .store
+            .servers
+            .iter()
+            .any(|s| s.jump.is_none() && self.store.servers.iter().any(|x| x.jump == Some(s.id)));
+        if bastions {
+            rows.push(Row { node: NodeId::BastionsHeader, depth: 0, jump: false });
+            walk_jump(&self.store, None, 1, &self.jump_open, &mut rows);
         }
         rows
     }
 
     pub fn rebuild(&mut self) {
-        self.rows = self.build_rows(self.view);
-        self.other_rows = self.build_rows(match self.view {
-            View::Spaces => View::Folders,
-            View::Folders => View::Spaces,
-        });
+        self.rows = self.build_rows();
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
         // The title of the bastions section is a label, not something to stand on.
         if self.rows.get(self.selected).is_some_and(|r| r.node == NodeId::BastionsHeader) {
@@ -871,8 +758,7 @@ impl App {
                     || self.store.servers.iter().any(|s| s.parent == Some(id))
             }
             NodeId::Server(id) if row.jump => self.store.servers.iter().any(|s| s.jump == Some(id)),
-            NodeId::SpaceFolder(id) => self.spaces.spaces.iter().any(|s| s.folder == Some(id)),
-            NodeId::BastionsHeader | NodeId::Server(_) | NodeId::Space(_) => false,
+            NodeId::BastionsHeader | NodeId::Server(_) => false,
         }
     }
 
@@ -880,8 +766,7 @@ impl App {
         match row.node {
             NodeId::Folder(id) => self.store.folder(id).is_some_and(|f| f.expanded),
             NodeId::Server(id) => self.jump_open.contains(&id),
-            NodeId::SpaceFolder(id) => self.spaces.folder(id).is_some_and(|f| f.expanded),
-            NodeId::BastionsHeader | NodeId::Space(_) => false,
+            NodeId::BastionsHeader => false,
         }
     }
 
@@ -901,84 +786,14 @@ impl App {
                 }
                 self.save_ui();
             }
-            NodeId::SpaceFolder(id) => {
-                if let Some(f) = self.spaces.folders.iter_mut().find(|f| f.id == id) {
-                    f.expanded = open;
-                }
-                self.save_spaces();
-            }
-            NodeId::BastionsHeader | NodeId::Space(_) => {}
+            NodeId::BastionsHeader => {}
         }
         self.rebuild();
     }
 
-    fn set_view(&mut self, view: View) {
-        if self.view == view {
-            return;
-        }
-        let keep = self.selected_node();
-        self.view = view;
-        self.offset = 0;
-        self.offset_bottom = 0;
-        self.rebuild();
-        if view == View::Spaces {
-            // Start on the space whose tabs are on screen.
-            match self.scope {
-                Scope::Space(id) => self.select_node(NodeId::Space(id)),
-                Scope::Ssh => self.selected = 0,
-            }
-        } else if let Some(n) = keep {
-            self.select_node(n);
-        }
-        self.sync_scope();
-    }
-
-    // ------------------------------------------------------------ scopes
-
-    /// The scope whose tabs the current view shows: a space in the Spaces view, the SSH section otherwise.
-    fn sync_scope(&mut self) {
-        let want = match self.view {
-            View::Spaces => match self.selected_node() {
-                Some(NodeId::Space(id)) => Scope::Space(id),
-                _ => Scope::Space(0),
-            },
-            _ => Scope::Ssh,
-        };
-        self.set_scope(want);
-    }
-
-    fn set_scope(&mut self, scope: Scope) {
-        if self.scope == scope {
-            return;
-        }
-        if let Some(t) = self.tabs.get(self.active).filter(|t| t.scope == self.scope) {
-            self.remembered.insert(self.scope, t.id);
-        }
-        self.scope = scope;
-        // Going to another part of the sidebar brings back the tab you had there. If it has none, the tab
-        // you were looking at stays.
-        let back = self
-            .remembered
-            .get(&scope)
-            .and_then(|id| self.tabs.iter().position(|t| t.id == *id))
-            .or_else(|| self.tabs.iter().rposition(|t| t.scope == scope));
-        if let Some(i) = back {
-            self.active = i;
-        }
-        self.fix_active();
-    }
-
-    /// True when the content area has no terminal to show: no tabs at all, or the current scope's last tab
-    /// was closed (the welcome screen is shown, rather than jumping to a tab of another scope).
+    /// True when the content area has no terminal to show.
     pub fn blank(&self) -> bool {
-        !self.is_split()
-            && (self.tabs.is_empty()
-            || (self.emptied.contains(&self.scope) && self.tabs.get(self.active).is_none_or(|t| t.scope != self.scope)))
-    }
-
-    /// Indices in `tabs` of the tabs of the current scope, in order.
-    pub fn scoped(&self) -> Vec<usize> {
-        self.tabs.iter().enumerate().filter(|(_, t)| t.scope == self.scope).map(|(i, _)| i).collect()
+        !self.is_split() && self.tabs.is_empty()
     }
 
     /// Keeps `active` pointing at a tab, and the keyboard off an empty terminal.
@@ -990,60 +805,23 @@ impl App {
         }
     }
 
-    /// What a tab is called in the tab bar, which shows every tab of every part of oso: a terminal of an
-    /// agent's project carries the project's name.
+    /// What a tab is called in the tab bar.
     pub fn tab_label(&self, t: &Tab) -> String {
-        match t.scope {
-            Scope::Space(id) => {
-                let place = self.spaces.get(id).map(|s| s.name.as_str()).unwrap_or("?");
-                if t.title == "shell" { place.to_string() } else { format!("{place}/{}", t.title) }
-            }
-            Scope::Ssh => t.title.clone(),
-        }
+        t.title.clone()
     }
 
-    /// Indices of the tabs where an AI agent is running, in any scope.
-    pub fn agent_tabs(&self) -> Vec<usize> {
-        self.tabs.iter().enumerate().filter(|(_, t)| t.session.agent().is_some()).map(|(i, _)| i).collect()
-    }
-
-    /// Makes tab `idx` the one on screen, wherever it lives: the sidebar moves to its place (the agent's
-    /// project, or the SSH section), like a browser jumping between sites.
+    /// Makes tab `idx` the one on screen.
     pub fn select_tab(&mut self, idx: usize) {
-        let Some(scope) = self.tabs.get(idx).map(|t| t.scope) else { return };
-        match scope {
-            Scope::Space(id) => {
-                self.set_view(View::Spaces);
-                self.select_node(NodeId::Space(id));
-            }
-            Scope::Ssh if self.view == View::Spaces => self.set_view(View::Folders),
-            Scope::Ssh => {}
+        if idx < self.tabs.len() {
+            self.active = idx;
         }
-        self.sync_scope();
-        self.active = idx;
     }
 
     /// Like `select_tab`, and puts the keyboard on the terminal.
     pub fn focus_tab(&mut self, idx: usize) {
         self.select_tab(idx);
-        if let Some(t) = self.tabs.get_mut(idx) {
-            t.attention = false;
+        if idx < self.tabs.len() {
             self.focus = Focus::Terminal;
-        }
-    }
-
-    /// Alt+N: the agent that wants attention, else the next one after the current tab.
-    fn next_agent(&mut self) {
-        let agents = self.agent_tabs();
-        let pick = agents
-            .iter()
-            .copied()
-            .find(|&i| self.tabs[i].attention)
-            .or_else(|| agents.iter().copied().find(|&i| i > self.active))
-            .or_else(|| agents.first().copied());
-        match pick {
-            Some(i) => self.focus_tab(i),
-            None => self.set_flash("No agents running"),
         }
     }
 
@@ -1077,7 +855,7 @@ impl App {
     /// Folder where new items would be created.
     fn current_parent(&self) -> Option<u64> {
         match self.selected_node()? {
-            NodeId::Folder(id) if self.view == View::Folders => Some(id),
+            NodeId::Folder(id) => Some(id),
             n => self.store.parent_of(n),
         }
     }
@@ -1112,16 +890,10 @@ impl App {
             return;
         }
         for (i, t) in self.tabs.iter_mut().enumerate() {
-            let space = match t.scope {
-                Scope::Space(id) => Some(id),
-                Scope::Ssh => None,
-            };
             let meta = serde_json::json!({
                 "title": t.title,
                 "server_id": t.server_id,
-                "space": space,
                 "order": i,
-                "attention": t.attention,
             });
             let text = meta.to_string();
             if text != t.meta_sent {
@@ -1138,10 +910,6 @@ impl App {
         list.sort_by_key(|i| i.meta.get("order").and_then(|v| v.as_u64()).unwrap_or(u64::MAX));
         for info in &list {
             let meta = &info.meta;
-            let scope = match meta.get("space").and_then(|v| v.as_u64()) {
-                Some(id) if self.spaces.get(id).is_some() => Scope::Space(id),
-                _ => Scope::Ssh,
-            };
             let title = meta.get("title").and_then(|v| v.as_str()).unwrap_or("session").to_string();
             let server_id = meta.get("server_id").and_then(|v| v.as_u64()).unwrap_or(LOCAL);
             self.next_tab_id += 1;
@@ -1149,10 +917,8 @@ impl App {
                 id: self.next_tab_id,
                 title,
                 server_id,
-                scope,
                 right: false,
                 session: Session::from_remote(d.attach(info.sid, rows, cols)),
-                attention: meta.get("attention").and_then(|v| v.as_bool()).unwrap_or(false),
                 meta_sent: String::new(),
             });
         }
@@ -1169,40 +935,14 @@ impl App {
     /// Called on every pass of the event loop.
     pub fn tick(&mut self) {
         self.sync_bar();
-        let mut finished = false;
         for t in &mut self.tabs {
             t.session.poll_exit();
-            t.session.poll_agent();
-            if t.session.take_done() {
-                t.attention = true;
-                finished = true;
-            }
         }
-        if finished && self.sound {
-            crate::notify::ring();
-        }
-        // Looking at an agent's tab is the attention it asked for.
-        if self.focus == Focus::Terminal && self.modal.is_none() {
-            if let Some(t) = self.tabs.get_mut(self.active) {
-                t.attention = false;
-            }
-        }
-        self.reap_exited_projects();
         self.reap_clean_ssh_exits();
-        self.follow_directories();
         self.sync_meta();
         if !self.lost_warned && self.daemon.as_ref().is_some_and(|d| !d.alive()) {
             self.lost_warned = true;
             self.set_flash("Lost the background server: its sessions ended");
-        }
-        if self.branches_at.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
-            self.branches_at = Some(Instant::now());
-            self.branches = self
-                .spaces
-                .spaces
-                .iter()
-                .filter_map(|s| spaces::git_branch(Path::new(&expand_tilde(&s.cwd))).map(|b| (s.id, b)))
-                .collect();
         }
         if self.flash.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(5)) {
             self.flash = None;
@@ -1248,7 +988,7 @@ impl App {
     /// Enter / double click on a server: go to its tab if it already has a live one; a new tab only when there is
     /// none (more of them are opened on purpose, with `n`).
     fn open_or_focus_server(&mut self, id: u64) {
-        let live = self.tabs.iter().position(|t| t.server_id == id && t.scope == Scope::Ssh && t.session.exit_code.is_none());
+        let live = self.tabs.iter().position(|t| t.server_id == id && t.session.exit_code.is_none());
         match live {
             Some(i) => self.focus_tab(i),
             None => self.open_server(id),
@@ -1262,23 +1002,8 @@ impl App {
     /// Starts `ssh` for a server, in a new tab or replacing the session of tab `reuse`.
     fn connect(&mut self, id: u64, reuse: Option<usize>, fills: Vec<Autofill>) {
         let reuse = reuse.filter(|&i| i < self.tabs.len());
-        // Where the tab lives: a reconnected tab stays put, a local terminal opens in the current space,
-        // and servers always go in the SSH section.
-        let in_space = matches!(self.scope, Scope::Space(s) if s != 0);
-        let scope = match reuse {
-            Some(i) => self.tabs[i].scope,
-            None if id == LOCAL && in_space => self.scope,
-            None => Scope::Ssh,
-        };
-        if reuse.is_none() && id == LOCAL && self.view == View::Spaces && !in_space {
-            return self.set_flash("Create a project first (press a)");
-        }
-        let cwd = match scope {
-            Scope::Space(sid) => self.spaces.get(sid).map(|s| PathBuf::from(expand_tilde(&s.cwd))),
-            Scope::Ssh => None,
-        };
         let (argv, title, login_expected) = if id == LOCAL {
-            (local_shell(), if cwd.is_some() { "shell" } else { "Local" }.to_string(), false)
+            (local_shell(), "Local".to_string(), false)
         } else {
             let Some(server) = self.store.server(id).cloned() else {
                 return self.set_flash("This server no longer exists");
@@ -1295,7 +1020,7 @@ impl App {
         if self.daemon.as_ref().is_some_and(|d| !d.alive()) {
             self.daemon = None; // the server is gone: carry on inside this process
         }
-        let opts = SpawnOpts { argv: argv.clone(), rows, cols, fills, login_expected, cwd, env: None, tap: None };
+        let opts = SpawnOpts { argv: argv.clone(), rows, cols, fills, login_expected, cwd: None, env: None, tap: None };
         match Session::spawn_with(opts, self.daemon.as_deref()) {
             Ok(session) => match reuse {
                 Some(i) => {
@@ -1309,13 +1034,10 @@ impl App {
                         id: self.next_tab_id,
                         title,
                         server_id: id,
-                        scope,
                         right: self.is_split() && self.tabs.get(self.active).is_some_and(|t| t.right),
                         session,
-                        attention: false,
                         meta_sent: String::new(),
                     });
-                    self.set_scope(scope);
                     self.active = self.tabs.len() - 1;
                     self.focus = Focus::Terminal;
                 }
@@ -1643,7 +1365,6 @@ impl App {
             _ => None,
         };
         let was_active = idx == self.active;
-        let closed_scope = self.tabs[idx].scope;
         self.tabs.remove(idx).session.kill();
         if self.active > idx {
             self.active -= 1;
@@ -1654,13 +1375,9 @@ impl App {
             }
         }
         self.fix_active();
-        let scope_left = self.tabs.iter().any(|t| t.scope == closed_scope);
-        if was_active && closed_scope == self.scope && !scope_left {
-            // The last terminal of this part of oso: stay here and show the welcome screen.
-            self.emptied.insert(closed_scope);
+        if was_active && self.tabs.is_empty() {
+            // The last terminal: show the welcome screen.
             self.focus = Focus::Sidebar;
-        } else if was_active && !self.tabs.is_empty() {
-            self.select_tab(self.active); // the sidebar follows the tab we land on
         }
     }
 
@@ -1668,12 +1385,6 @@ impl App {
     fn close_selected_tab(&mut self) {
         let id = match self.selected_node() {
             Some(NodeId::Server(id)) => id,
-            Some(NodeId::Space(_)) => {
-                return match self.scoped().contains(&self.active) {
-                    true => self.close_tab(self.active),
-                    false => self.set_flash("No open terminal in this project"),
-                };
-            }
             _ => return,
         };
         let idx = match self.tabs.get(self.active) {
@@ -1739,64 +1450,10 @@ impl App {
             return;
         }
         let done: Vec<usize> = (0..self.tabs.len())
-            .filter(|&i| self.tabs[i].scope == Scope::Ssh && self.tabs[i].session.exit_code == Some(0))
+            .filter(|&i| self.tabs[i].session.exit_code == Some(0))
             .collect();
         for i in done.into_iter().rev() {
             self.close_tab(i);
-        }
-    }
-
-    /// A project whose terminals have all exited (you typed `exit`) disappears from the list. Only the entry
-    /// goes: the directory is never touched. Not when the background server was lost, which ends every session.
-    fn reap_exited_projects(&mut self) {
-        if self.daemon.as_ref().is_some_and(|d| !d.alive()) {
-            return;
-        }
-        let dead: Vec<usize> = (0..self.tabs.len())
-            .filter(|&i| matches!(self.tabs[i].scope, Scope::Space(_)) && self.tabs[i].session.exit_code.is_some())
-            .collect();
-        if dead.is_empty() {
-            return;
-        }
-        let mut gone: Vec<u64> = vec![];
-        for &i in &dead {
-            if let Scope::Space(id) = self.tabs[i].scope {
-                if !gone.contains(&id) {
-                    gone.push(id);
-                }
-            }
-        }
-        for i in dead.into_iter().rev() {
-            self.close_tab(i);
-        }
-        for id in gone {
-            if !self.tabs.iter().any(|t| t.scope == Scope::Space(id)) {
-                self.remembered.remove(&Scope::Space(id));
-                self.spaces.remove(id);
-            }
-        }
-        self.save_spaces();
-        self.rebuild();
-        self.sync_scope();
-    }
-
-    /// The project you work in goes to the top of the list (most recently used first). It happens when you press
-    /// Enter in one of its terminals (you ran something), not when you merely select, open or type in it, so
-    /// moving through the list does not shuffle it.
-    fn touch_space(&mut self, id: u64) {
-        let promoted = self.spaces.mark_used(id);
-        if self.spaces.touch(id) || promoted {
-            self.save_spaces();
-            // Stay on the row you were on: a filed project also shows on top, and the selection must not jump
-            // out of its folder to that copy.
-            let keep = self.rows.get(self.selected).map(|r| (r.node, r.jump));
-            self.rebuild();
-            if let Some((n, jump)) = keep {
-                match self.rows.iter().position(|r| r.node == n && r.jump == jump) {
-                    Some(i) => self.selected = i,
-                    None => self.select_node(n),
-                }
-            }
         }
     }
 
@@ -1837,7 +1494,6 @@ impl App {
         let server = self
             .tabs
             .get(self.active)
-            .filter(|t| t.scope == self.scope && self.scope == Scope::Ssh)
             .map(|t| t.server_id)
             .or(self.selected_server_id());
         self.open_server(server.unwrap_or(LOCAL));
@@ -1845,7 +1501,7 @@ impl App {
 
     fn selected_server_id(&self) -> Option<u64> {
         match self.selected_node() {
-            Some(NodeId::Server(id)) if self.scope == Scope::Ssh => Some(id),
+            Some(NodeId::Server(id)) => Some(id),
             _ => None,
         }
     }
@@ -1891,7 +1547,6 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) {
         self.on_key_inner(key);
-        self.sync_scope();
         self.sync_bar();
     }
 
@@ -1924,7 +1579,6 @@ impl App {
             KeyCode::Left if alt && n > 0 => return self.step_tab(-1),
             KeyCode::Right if alt && n > 0 => return self.step_tab(1),
             KeyCode::Char('n') if ctrl => return self.new_tab_here(),
-            KeyCode::Char('n') if alt => return self.next_agent(),
             KeyCode::Char('w') if alt && n > 0 => return self.close_tab(self.active),
             KeyCode::Char(c @ '1'..='9') if alt => return self.goto_tab(c as usize - '1' as usize),
             KeyCode::Char('0') if alt => return self.goto_tab(9),
@@ -1959,32 +1613,15 @@ impl App {
         if let Some(bytes) = keys::encode(key, app_cursor) {
             tab.session.reset_scroll();
             tab.session.write(&bytes);
-            if key.code == KeyCode::Enter {
-                if let Scope::Space(id) = tab.scope {
-                    self.touch_space(id);
-                }
-            }
-        }
-    }
-
-    /// The header item (index into `HEADER`) of the current view.
-    fn view_index(&self) -> usize {
-        match self.view {
-            View::Spaces => 0,
-            View::Folders => 1,
         }
     }
 
     /// Runs a sidebar header button (by mouse or keyboard).
     fn activate(&mut self, hit: Hit) {
         match hit {
-            Hit::ViewFolders => self.set_view(View::Folders),
-            Hit::ViewSpaces => self.set_view(View::Spaces),
-            Hit::NewProject => self.new_space(),
             Hit::NewServer => self.new_server_form(),
             Hit::Term => self.open_server(LOCAL),
             Hit::Vault => self.modal = self.gate(Pending::OpenVault),
-            Hit::Fold(i) => self.fold_column(i),
             Hit::Edit => self.edit_selected(),
             Hit::NewTab => self.new_tab_here(),
             Hit::NewTabRight => {
@@ -1997,76 +1634,24 @@ impl App {
         }
     }
 
-    /// Moves the menu highlight. On the views it also opens the view, so the arrows are enough to switch.
-    fn move_in_menu(&mut self, to: usize, buttons: bool) {
-        self.header = Some(to);
-        if !buttons {
-            self.activate(HEADER[to]);
-        }
-    }
-
-    /// Keys while the menu has focus: the views above the list or the buttons below it. Returns true if the
-    /// key was consumed.
-    fn header_key(&mut self, i: usize, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Left | KeyCode::Char('h') => self.move_in_menu(i.saturating_sub(1), false),
-            KeyCode::Right | KeyCode::Char('l') => self.move_in_menu((i + 1).min(HEADER.len() - 1), false),
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Esc => self.header = None,
-            KeyCode::Up | KeyCode::Char('k') => {}
-            // On a column title Enter is just a way to (re)open it.
-            KeyCode::Enter | KeyCode::Char(' ') => self.activate(HEADER[i]),
-            _ => return false,
-        }
-        true
-    }
-
     fn sidebar_key(&mut self, key: KeyEvent) {
-        if let Some(i) = self.header {
-            if self.header_key(i, key) {
-                return;
-            }
-            self.header = None;
-        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let last = self.rows.len().saturating_sub(1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if alt => self.shift_selected(-1),
             KeyCode::Down | KeyCode::Char('j') if alt => self.shift_selected(1),
-            // Past the first row of Servers: the last row of Projects (and the other way round past the last one).
-            KeyCode::Up | KeyCode::Char('k') if self.selected == 0 && self.view == View::Folders => {
-                self.set_view(View::Spaces);
-                self.selected = self.rows.len().saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') if self.selected >= last && self.view == View::Spaces => {
-                self.set_view(View::Folders);
-                self.selected = 0;
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.selected == 0 => self.header = Some(self.view_index()),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
             KeyCode::End | KeyCode::Char('G') => self.selected = last,
-            KeyCode::Right | KeyCode::Char('l') if matches!(self.selected_node(), Some(NodeId::Space(_))) => {
-                match self.selected_row() {
-                    Some(Row { node: NodeId::Space(id), jump: true, .. }) => self.open_filed_space(id),
-                    Some(Row { node: NodeId::Space(id), .. }) => self.open_space(id),
-                    _ => {}
-                }
-            }
             KeyCode::Right | KeyCode::Char('l') => self.step_in(),
             KeyCode::Left | KeyCode::Char('h') => self.step_out(),
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected_row() {
-                Some(Row { node: NodeId::Space(id), jump: true, .. }) => self.open_filed_space(id),
-                Some(Row { node: NodeId::Space(id), .. }) => self.open_space(id),
                 Some(Row { node: NodeId::Server(id), .. }) => self.open_or_focus_server(id),
-                Some(row @ Row { node: NodeId::Folder(_) | NodeId::SpaceFolder(_), .. }) => self.toggle(row),
+                Some(row @ Row { node: NodeId::Folder(_), .. }) => self.toggle(row),
                 Some(Row { node: NodeId::BastionsHeader, .. }) | None => {}
             },
-            KeyCode::Char('v') | KeyCode::Tab => self.set_view(match self.view {
-                View::Spaces => View::Folders,
-                View::Folders => View::Spaces,
-            }),
             KeyCode::Char(c @ '1'..='9') if !ctrl && !alt => self.goto_tab(c as usize - '1' as usize),
             KeyCode::Char('t') => self.open_server(LOCAL),
             KeyCode::Char('n') => {
@@ -2076,10 +1661,8 @@ impl App {
             }
             KeyCode::Char('/') => self.open_search(),
             KeyCode::Char('p') => self.modal = self.gate(Pending::OpenVault),
-            KeyCode::Char('a') if self.view == View::Spaces => self.new_space(),
             KeyCode::Char('a') => self.new_server_form(),
             KeyCode::Char('f') => self.new_folder_prompt(),
-            KeyCode::Char('m') if self.view == View::Spaces => self.move_space_prompt(),
             KeyCode::Char('e') | KeyCode::F(4) => self.edit_selected(),
             KeyCode::Char('d') | KeyCode::Delete => self.ask_delete(),
             KeyCode::Char('c') if !ctrl => self.close_selected_tab(),
@@ -2102,14 +1685,6 @@ impl App {
     }
 
     fn shift_selected(&mut self, delta: i32) {
-        if let Some(NodeId::Space(id)) = self.selected_node() {
-            if self.spaces.shift(id, delta) {
-                self.save_spaces();
-                self.rebuild();
-                self.select_node(NodeId::Space(id));
-            }
-            return;
-        }
         if let Some(n) = self.selected_node() {
             let jump = self.selected_row().is_some_and(|r| r.jump);
             if self.store.shift(n, delta, jump) {
@@ -2160,17 +1735,6 @@ impl App {
     }
 
     fn new_folder_prompt(&mut self) {
-        if self.view == View::Spaces {
-            self.modal = Some(Modal::Prompt(Prompt {
-                title: "New folder of projects".into(),
-                input: Input::default(),
-                kind: PromptKind::NewSpaceFolder,
-            }));
-            return;
-        }
-        if self.view != View::Folders {
-            return self.set_flash("Folders are created in the SSH view (press v)");
-        }
         self.modal = Some(Modal::Prompt(Prompt {
             title: "New folder".into(),
             input: Input::default(),
@@ -2178,89 +1742,8 @@ impl App {
         }));
     }
 
-    fn save_spaces(&mut self) {
-        if let Err(e) = self.spaces.save() {
-            self.set_flash(format!("Could not save projects: {e}"));
-        }
-    }
-
-    /// A new space: opens a plain terminal. Wherever you leave it (`cd`, `mkdir`...) becomes the space's directory.
-    fn new_space(&mut self) {
-        let start = match self.selected_node() {
-            Some(NodeId::Space(id)) if self.view == View::Spaces => {
-                self.spaces.get(id).map(|s| PathBuf::from(expand_tilde(&s.cwd)))
-            }
-            _ => None,
-        };
-        let dir = start.filter(|d| d.is_dir()).or_else(home_dir).unwrap_or_else(|| PathBuf::from("/"));
-        let id = self.spaces.add(space_name(&dir), dir.display().to_string());
-        self.save_spaces();
-        self.rebuild();
-        self.open_space(id);
-    }
-
-    /// Spaces follow their terminal: the directory the shell is in becomes the space's directory (and,
-    /// unless it was renamed, its name and git branch).
-    fn follow_directories(&mut self) {
-        let mut moved = vec![];
-        for sp in &self.spaces.spaces {
-            let scope = Scope::Space(sp.id);
-            // The terminal that counts is the one the space is showing, or the one it showed last.
-            let tab = if scope == self.scope {
-                self.tabs.get(self.active).filter(|t| t.scope == scope)
-            } else {
-                self.remembered
-                    .get(&scope)
-                    .and_then(|id| self.tabs.iter().find(|t| t.id == *id))
-                    .or_else(|| self.tabs.iter().find(|t| t.scope == scope))
-            };
-            if let Some(dir) = tab.and_then(|t| t.session.cwd()) {
-                moved.push((sp.id, dir.display().to_string()));
-            }
-        }
-        let mut changed = false;
-        for (id, dir) in moved {
-            changed |= self.spaces.follow_by_dir(id, &dir, space_name(Path::new(&dir)));
-        }
-        if changed {
-            self.save_spaces();
-        }
-    }
-
-    /// Shows a space and puts the keyboard on its terminal, opening the first one if it has none.
-    fn open_space(&mut self, id: u64) {
-        if self.selected_node() != Some(NodeId::Space(id)) {
-            self.select_node(NodeId::Space(id));
-        }
-        self.sync_scope();
-        if self.scoped().is_empty() {
-            self.open_server(LOCAL);
-        } else {
-            self.focus = Focus::Terminal;
-        }
-    }
-
-    /// Enter on a project filed in a folder: the row is a shortcut to its directory, not a running project. Every
-    /// time it is opened, a new project of that directory appears on top of the list; the shortcut stays as it was.
-    fn open_filed_space(&mut self, id: u64) {
-        let Some(shortcut) = self.spaces.get(id).cloned() else { return };
-        let new = self.spaces.add(shortcut.name, shortcut.cwd);
-        self.save_spaces();
-        self.rebuild();
-        self.open_space(new);
-    }
-
     fn edit_selected(&mut self) {
         match self.selected_node() {
-            Some(NodeId::Space(id)) => {
-                if let Some(sp) = self.spaces.get(id) {
-                    self.modal = Some(Modal::Prompt(Prompt {
-                        title: "Rename project".into(),
-                        input: Input::new(&sp.name),
-                        kind: PromptKind::RenameSpace(id),
-                    }));
-                }
-            }
             Some(NodeId::Server(id)) => {
                 if let Some(s) = self.store.server(id) {
                     self.modal = Some(Modal::Form(Box::new(ServerForm::from_server(s))));
@@ -2275,31 +1758,8 @@ impl App {
                     }));
                 }
             }
-            Some(NodeId::SpaceFolder(id)) => {
-                if let Some(f) = self.spaces.folder(id) {
-                    self.modal = Some(Modal::Prompt(Prompt {
-                        title: "Rename folder".into(),
-                        input: Input::new(&f.name),
-                        kind: PromptKind::RenameSpaceFolder(id),
-                    }));
-                }
-            }
             Some(NodeId::BastionsHeader) | None => {}
         }
-    }
-
-    /// `m` on a project: file it in a folder by name (a new name makes the folder; `-` takes it out).
-    fn move_space_prompt(&mut self) {
-        let Some(NodeId::Space(id)) = self.selected_node() else {
-            return self.set_flash("Select a project to move it into a folder");
-        };
-        let current =
-            self.spaces.get(id).and_then(|s| s.folder).and_then(|f| self.spaces.folder(f)).map(|f| f.name.clone());
-        self.modal = Some(Modal::Prompt(Prompt {
-            title: "Folder (new name creates it, - takes it out)".into(),
-            input: Input::new(current.as_deref().unwrap_or("")),
-            kind: PromptKind::MoveSpace(id),
-        }));
     }
 
     fn ask_delete(&mut self) {
@@ -2307,19 +1767,8 @@ impl App {
         if node == NodeId::BastionsHeader {
             return;
         }
-        if let NodeId::SpaceFolder(id) = node {
-            // Only the folder goes: its projects go back to the plain list.
-            self.spaces.remove_folder(id);
-            self.save_spaces();
-            self.rebuild();
-            return self.set_flash("Folder removed; its projects are back in the list");
-        }
         let text = match node {
-            NodeId::BastionsHeader | NodeId::SpaceFolder(_) => return,
-            NodeId::Space(id) => format!(
-                "Delete “{}”? Its terminals are closed; the directory is not touched.",
-                self.spaces.get(id).map(|s| s.name.as_str()).unwrap_or("?")
-            ),
+            NodeId::BastionsHeader => return,
             NodeId::Server(id) => {
                 format!("Delete server “{}”?", self.store.server(id).map(|s| s.name.as_str()).unwrap_or("?"))
             }
@@ -2328,11 +1777,7 @@ impl App {
                 self.store.folder(id).map(|f| f.name.as_str()).unwrap_or("?")
             ),
         };
-        let action = match node {
-            NodeId::Space(id) => ConfirmAction::DeleteSpace(id),
-            n => ConfirmAction::Delete(n),
-        };
-        self.modal = Some(Modal::Confirm(Confirm { text, action }));
+        self.modal = Some(Modal::Confirm(Confirm { text, action: ConfirmAction::Delete(node) }));
     }
 
     // ------------------------------------------------------------ modales (teclado)
@@ -2425,20 +1870,15 @@ impl App {
         Some(Modal::Picker(p, f))
     }
 
-    /// F6 / Shift+F6: the keyboard goes to the next (or previous) area on screen: the Projects column, the
-    /// Servers column and the terminal (both terminals when the screen is split). Folded columns are skipped.
+    /// F6 / Shift+F6: the keyboard goes to the next (or previous) area on screen: the sidebar and the terminal
+    /// (both terminals when the screen is split).
     fn cycle_focus(&mut self, d: isize) {
         #[derive(PartialEq, Clone, Copy)]
         enum Zone {
-            Column(View),
+            Sidebar,
             Terminal(bool),
         }
-        let mut zones = vec![];
-        for (i, view) in [(0, View::Spaces), (1, View::Folders)] {
-            if !self.fold[i] {
-                zones.push(Zone::Column(view));
-            }
-        }
+        let mut zones = vec![Zone::Sidebar];
         if self.is_split() {
             zones.extend([Zone::Terminal(false), Zone::Terminal(true)]);
         } else if !self.tabs.is_empty() {
@@ -2447,16 +1887,12 @@ impl App {
         let here = if self.focus == Focus::Terminal {
             Zone::Terminal(self.tabs.get(self.active).is_some_and(|t| t.right))
         } else {
-            Zone::Column(self.view)
+            Zone::Sidebar
         };
         let at = zones.iter().position(|&z| z == here).unwrap_or(0) as isize;
         let Some(&to) = zones.get((at + d).rem_euclid(zones.len().max(1) as isize) as usize) else { return };
-        self.header = None;
         match to {
-            Zone::Column(view) => {
-                self.set_view(view);
-                self.focus = Focus::Sidebar;
-            }
+            Zone::Sidebar => self.focus = Focus::Sidebar,
             Zone::Terminal(right) => {
                 if let Some(i) = self.pane_tab(right) {
                     self.active = i;
@@ -2474,51 +1910,9 @@ impl App {
         self.set_flash(if terminal { "Theme: pastel colours on your terminal's background" } else { "Theme: classic colours" });
     }
 
-    /// Folds one column away (0: Projects, 1: Servers) or brings it back. The one left stays the active view.
-    fn fold_column(&mut self, i: usize) {
-        let view = if i == 0 { View::Spaces } else { View::Folders };
-        self.fold[i] = !self.fold[i];
-        self.header = None;
-        if self.fold[i] {
-            if self.view == view && !self.fold[1 - i] {
-                self.set_view(if i == 0 { View::Folders } else { View::Spaces });
-            }
-            if self.fold.iter().all(|&f| f) && !self.blank() {
-                self.focus = Focus::Terminal;
-            }
-        } else {
-            self.set_view(view);
-            self.focus = Focus::Sidebar;
-        }
-    }
-
-    /// The column of the sidebar under (x, y), as the view it shows.
-    fn column_at(&self, x: u16, y: u16) -> Option<View> {
-        let i = (0..2).find(|&i| !self.fold[i] && inside(self.layout.cols[i], x, y))?;
-        Some(if i == 0 { View::Spaces } else { View::Folders })
-    }
-
-    /// A click or the wheel on the column that is not the active view makes it the active one first (the list
-    /// under the pointer keeps the place it was drawn at).
-    fn activate_column_at(&mut self, x: u16, y: u16) {
-        let Some(view) = self.column_at(x, y) else { return };
-        if view == self.view {
-            return;
-        }
-        let i = if view == View::Spaces { 0 } else { 1 };
-        let g = self.layout.col_geom[i];
-        self.set_view(view);
-        self.layout.list = g.top;
-        self.layout.list_bottom = g.bottom;
-        self.layout.row_h = g.row_h;
-    }
-
-    /// Opens the quick open box with every server and project.
+    /// Opens the quick open box with every server.
     fn open_search(&mut self) {
         let mut items = vec![SearchItem { label: "Local terminal".into(), detail: "this computer".into(), target: SearchTarget::Local }];
-        for sp in &self.spaces.spaces {
-            items.push(SearchItem { label: sp.name.clone(), detail: self.tilde(&sp.cwd), target: SearchTarget::Space(sp.id) });
-        }
         for sv in &self.store.servers {
             let detail = if sv.user.is_empty() { sv.host.clone() } else { format!("{}@{}", sv.user, sv.host) };
             items.push(SearchItem { label: sv.name.clone(), detail, target: SearchTarget::Server(sv.id) });
@@ -2529,7 +1923,6 @@ impl App {
     fn run_search(&mut self, target: SearchTarget) {
         match target {
             SearchTarget::Server(id) => self.open_or_focus_server(id),
-            SearchTarget::Space(id) => self.open_space(id),
             SearchTarget::Local => self.open_server(LOCAL),
         }
     }
@@ -2571,10 +1964,6 @@ impl App {
             return;
         }
         match p.kind {
-            PromptKind::RenameSpace(id) => {
-                self.spaces.rename(id, name);
-                self.save_spaces();
-            }
             PromptKind::NewFolder(parent) => {
                 let id = self.store.add_folder(name, parent);
                 self.persist();
@@ -2587,34 +1976,6 @@ impl App {
                     f.name = name;
                 }
                 self.persist();
-            }
-            PromptKind::NewSpaceFolder => {
-                let id = self.spaces.add_folder(name);
-                self.save_spaces();
-                self.rebuild();
-                self.select_node(NodeId::SpaceFolder(id));
-                self.focus = Focus::Sidebar;
-            }
-            PromptKind::RenameSpaceFolder(id) => {
-                if let Some(f) = self.spaces.folders.iter_mut().find(|f| f.id == id) {
-                    f.name = name;
-                }
-                self.save_spaces();
-            }
-            PromptKind::MoveSpace(id) => {
-                let folder = if name == "-" {
-                    None
-                } else {
-                    let f = self.spaces.folder_named(&name).unwrap_or_else(|| self.spaces.add_folder(name.clone()));
-                    if let Some(fo) = self.spaces.folders.iter_mut().find(|x| x.id == f) {
-                        fo.expanded = true;
-                    }
-                    Some(f)
-                };
-                self.spaces.set_folder(id, folder);
-                self.save_spaces();
-                self.rebuild();
-                self.select_node(NodeId::Space(id));
             }
             PromptKind::RenameTab(i) => {
                 if let Some(t) = self.tabs.get_mut(i) {
@@ -2650,19 +2011,6 @@ impl App {
             }
             ConfirmAction::Quit => {
                 self.quit = true;
-                None
-            }
-            ConfirmAction::DeleteSpace(id) => {
-                let doomed: Vec<usize> =
-                    self.tabs.iter().enumerate().filter(|(_, t)| t.scope == Scope::Space(id)).map(|(i, _)| i).collect();
-                for i in doomed.into_iter().rev() {
-                    self.close_tab(i);
-                }
-                self.remembered.remove(&Scope::Space(id));
-                self.spaces.remove(id);
-                self.save_spaces();
-                self.rebuild();
-                self.sync_scope();
                 None
             }
             ConfirmAction::Delete(node) => {
@@ -2806,8 +2154,7 @@ impl App {
         let rh = self.layout.row_h.max(1);
         let b = self.layout.list_bottom;
         if let (true, Some(header)) = (inside(b, x, y), self.split_index()) {
-            let rhb = if self.view == View::Spaces { 1 } else { rh };
-            return Some(header + self.offset_bottom + ((y - b.y) / rhb) as usize);
+            return Some(header + self.offset_bottom + ((y - b.y) / rh) as usize);
         }
         let l = self.layout.list;
         if inside(l, x, y) { Some(self.offset + ((y - l.y) / rh) as usize) } else { None }
@@ -2815,7 +2162,6 @@ impl App {
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         self.on_mouse_inner(ev);
-        self.sync_scope();
         self.sync_bar();
     }
 
@@ -2843,7 +2189,6 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => self.mouse_up(x, y),
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = matches!(ev.kind, MouseEventKind::ScrollUp);
-                self.activate_column_at(x, y);
                 if inside(self.layout.list_bottom, x, y) {
                     let max = self.rows.len().saturating_sub(self.split_index().unwrap_or(0) + 1);
                     self.offset_bottom =
@@ -2865,11 +2210,9 @@ impl App {
     fn mouse_down(&mut self, x: u16, y: u16) {
         let double = self.is_double_click(x, y);
         self.drag = None;
-        self.header = None;
         self.selection = None;
         self.selecting = false;
         if let Some(&(_, hit)) = self.layout.toolbar.iter().find(|(r, _)| inside(*r, x, y)) {
-            self.header = None;
             self.activate(hit);
             return;
         }
@@ -2877,7 +2220,6 @@ impl App {
             self.drag = Some(Drag::Divider);
             return;
         }
-        self.activate_column_at(x, y);
         if inside(self.layout.sidebar, x, y) {
             self.focus = Focus::Sidebar;
             if let Some(i) = self.row_at(x, y).filter(|&i| i < self.rows.len() && self.rows[i].node != NodeId::BastionsHeader) {
@@ -2885,17 +2227,15 @@ impl App {
                 let row = self.rows[i];
                 // A click on the arrow of a folder (or of a bastion) opens or closes it right away.
                 let on_arrow = (x.saturating_sub(self.layout.list.x) as usize) < row.depth * 2 + 4;
-                if !double && on_arrow && self.has_children(&row) && !matches!(row.node, NodeId::Space(_)) {
+                if !double && on_arrow && self.has_children(&row) {
                     self.toggle(row);
                     return;
                 }
                 if double {
                     match row.node {
-                        NodeId::Folder(_) | NodeId::SpaceFolder(_) => self.toggle(row),
+                        NodeId::Folder(_) => self.toggle(row),
                         NodeId::BastionsHeader => {}
                         NodeId::Server(id) => self.open_or_focus_server(id),
-                        NodeId::Space(id) if row.jump => self.open_filed_space(id),
-                        NodeId::Space(id) => self.open_space(id),
                     }
                 } else {
                     self.drag = Some(Drag::Node(row.node, row.jump));
@@ -2914,7 +2254,7 @@ impl App {
                     self.drag = Some(Drag::Tab(i));
                 }
             }
-        } else if self.pane_at(x, y).is_some() && (self.is_split() || !self.scoped().is_empty()) {
+        } else if self.pane_at(x, y).is_some() && (self.is_split() || !self.tabs.is_empty()) {
             self.focus = Focus::Terminal;
             let cell = self.content_cell(x, y);
             if double {
@@ -3052,37 +2392,9 @@ impl App {
         }
     }
 
-    /// A project dropped on a folder (or on a project filed in it) goes into it; dropped on the top part it is
-    /// taken out of its folder.
-    fn drop_space(&mut self, node: NodeId, x: u16, y: u16) {
-        let NodeId::Space(id) = node else { return };
-        let target = self.row_at(x, y).and_then(|i| self.rows.get(i)).copied();
-        let folder = match target {
-            Some(Row { node: NodeId::SpaceFolder(f), .. }) => Some(Some(f)),
-            Some(Row { node: NodeId::Space(t), jump: true, .. }) => self.spaces.get(t).map(|s| s.folder),
-            Some(Row { node: NodeId::BastionsHeader, .. }) => None,
-            _ if inside(self.layout.list, x, y) || target.is_some() => Some(None),
-            _ => None,
-        };
-        let Some(folder) = folder else { return };
-        if self.spaces.get(id).is_some_and(|s| s.folder == folder) {
-            return;
-        }
-        if let Some(f) = folder.and_then(|f| self.spaces.folders.iter_mut().find(|x| x.id == f)) {
-            f.expanded = true;
-        }
-        self.spaces.set_folder(id, folder);
-        self.save_spaces();
-        self.rebuild();
-        self.select_node(NodeId::Space(id));
-    }
-
     fn drop_node(&mut self, node: NodeId, from_jump: bool, x: u16, y: u16) {
         if !inside(self.layout.sidebar, x, y) {
             return;
-        }
-        if self.view == View::Spaces {
-            return self.drop_space(node, x, y);
         }
         let target = self.row_at(x, y).and_then(|i| self.rows.get(i)).copied();
         // A server dropped on a bastion (or on something behind one) is reached through it from then on; one that
@@ -3119,7 +2431,7 @@ impl App {
         }
         let moved = match target.map(|r| (r.node, r.jump)) {
             Some((t, _)) if t == node => return,
-            Some((_, true)) | Some((NodeId::BastionsHeader, _)) | Some((NodeId::Space(_) | NodeId::SpaceFolder(_), _)) => false,
+            Some((_, true)) | Some((NodeId::BastionsHeader, _)) => false,
             Some((NodeId::Folder(f), _)) => self.store.move_into(node, Some(f)),
             Some((NodeId::Server(s), _)) => match node {
                 NodeId::Server(id) => self.store.move_server_before(id, s),
@@ -3127,7 +2439,7 @@ impl App {
                     let parent = self.store.server(s).and_then(|s| s.parent);
                     self.store.move_into(node, parent)
                 }
-                NodeId::Space(_) | NodeId::SpaceFolder(_) | NodeId::BastionsHeader => false,
+                NodeId::BastionsHeader => false,
             },
             None if inside(self.layout.list, x, y) || y >= self.layout.list.y => self.store.move_into(node, None),
             None => false,
@@ -3239,11 +2551,6 @@ pub fn expand_tilde(p: &str) -> String {
         }
     }
     p.to_string()
-}
-
-/// Name a space gets from its directory: the folder name, or `home` for the home directory.
-fn space_name(dir: &Path) -> String {
-    if home_dir().is_some_and(|h| h == dir) { "home".into() } else { spaces::default_name(dir) }
 }
 
 /// The user's shell, for the local terminal tab.
@@ -3420,68 +2727,6 @@ mod tests {
     }
 
     #[test]
-    fn arrows_cross_between_servers_and_projects_and_reach_the_titles() {
-        let mut app = app_with_servers(2);
-        let dir = temp_dir("cross");
-        app.spaces.add("proj".into(), dir.display().to_string());
-        app.rebuild();
-        press(&mut app, KeyCode::Up);
-        assert_eq!((app.view, app.selected), (View::Spaces, 0), "Up from the first server: the last project");
-        press(&mut app, KeyCode::Down);
-        assert_eq!((app.view, app.selected), (View::Folders, 0), "Down from the last project: the first server");
-        press(&mut app, KeyCode::Tab);
-        assert_eq!(app.view, View::Spaces, "Tab switches too");
-        press(&mut app, KeyCode::Up);
-        assert_eq!((app.header, app.view), (Some(0), View::Spaces), "Up from the first project: the title");
-        press(&mut app, KeyCode::Right);
-        assert_eq!((app.header, app.view), (Some(1), View::Folders), "Right on the titles: Servers");
-        press(&mut app, KeyCode::Left);
-        assert_eq!((app.header, app.view), (Some(0), View::Spaces), "and back to Projects");
-        press(&mut app, KeyCode::Down);
-        assert_eq!(app.header, None, "Down returns to the list");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn both_lists_are_built_and_the_panel_cannot_be_folded() {
-        let mut app = app_with_servers(2);
-        assert!(!app.rows.is_empty(), "the active view (Servers) has its rows");
-        assert!(app.other_rows.is_empty(), "no projects yet");
-        let dir = temp_dir("cols");
-        app.spaces.add("proj".into(), dir.display().to_string());
-        app.rebuild();
-        assert_eq!(app.other_rows.len(), 1, "the other list has its own rows");
-        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(app.fold, [false, false], "Alt+B no longer folds anything");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn f6_goes_round_projects_servers_and_the_terminal() {
-        let (mut app, _, dir) = app_with_two_tabs();
-        app.focus = Focus::Sidebar;
-        app.set_view(View::Spaces);
-        let f6 = |app: &mut App, shift: bool| {
-            app.on_key(KeyEvent::new(KeyCode::F(6), if shift { KeyModifiers::SHIFT } else { KeyModifiers::NONE }))
-        };
-        f6(&mut app, false);
-        assert_eq!((app.view, app.focus), (View::Folders, Focus::Sidebar), "Projects -> Servers");
-        f6(&mut app, false);
-        assert_eq!(app.focus, Focus::Terminal, "Servers -> the terminal");
-        f6(&mut app, false);
-        assert_eq!((app.view, app.focus), (View::Spaces, Focus::Sidebar), "and round to Projects");
-        f6(&mut app, true);
-        assert_eq!(app.focus, Focus::Terminal, "Shift+F6 goes back");
-        // A folded column is skipped.
-        app.fold_column(0);
-        app.focus = Focus::Sidebar;
-        f6(&mut app, false);
-        assert_eq!(app.focus, Focus::Terminal, "only Servers and the terminal are left");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
     fn quick_open_finds_a_server_by_a_few_letters_and_opens_it() {
         let mut app = app_with_servers(3);
         let name = app.store.servers[1].name.clone();
@@ -3551,101 +2796,6 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_space_terminal_starts_in_its_directory_and_stays_out_of_the_ssh_tabs() {
-        let dir = temp_dir("space");
-        let mut app = app_with_servers(1);
-        let id = app.spaces.add("proj".into(), dir.display().to_string());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        assert_eq!(app.scope, Scope::Space(id));
-        app.open_space(id);
-        assert_eq!(app.tabs.len(), 1);
-        assert_eq!(app.tabs[0].scope, Scope::Space(id));
-        app.tabs[0].session.write(b"pwd\r");
-        assert!(wait_for_screen(&app, 0, dir.file_name().unwrap().to_str().unwrap()), "the shell starts in the space directory");
-
-        app.set_view(View::Folders);
-        assert_eq!(app.scope, Scope::Ssh);
-        assert!(app.scoped().is_empty(), "nothing of the space belongs to the SSH section");
-        assert_eq!(app.tabs[app.active].scope, Scope::Space(id), "but its tab stays on screen, like a browser tab");
-        app.open_server(LOCAL);
-        assert_eq!(app.tabs[1].scope, Scope::Ssh, "a local terminal outside the spaces belongs to the SSH section");
-        assert_eq!(app.scoped(), vec![1]);
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_filed_project_is_a_shortcut_that_opens_a_new_project_on_top() {
-        let dir = temp_dir("shortcut");
-        let mut app = app_with_servers(0);
-        let f = app.spaces.add_folder("F".into());
-        let id = app.spaces.add("proj".into(), dir.display().to_string());
-        app.spaces.set_folder(id, Some(f));
-        app.rebuild();
-        app.set_view(View::Spaces);
-        app.open_filed_space(id);
-        assert_eq!(app.spaces.spaces.len(), 2, "a project appears on top");
-        let top = app.spaces.spaces.iter().find(|s| s.folder.is_none()).unwrap().id;
-        assert_eq!(app.scope, Scope::Space(top));
-        assert!(app.tabs.iter().all(|t| t.scope == Scope::Space(top)), "the shortcut has no terminal");
-        app.open_filed_space(id);
-        assert_eq!(app.spaces.spaces.len(), 3, "every opening makes a new project");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn every_open_tab_has_its_place_in_the_bar() {
-        let (d1, d2) = (temp_dir("s1"), temp_dir("s2"));
-        let mut app = app_with_servers(0);
-        let a = app.spaces.add("a".into(), d1.display().to_string());
-        let b = app.spaces.add("b".into(), d2.display().to_string());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        app.open_space(a);
-        app.sync_bar();
-        app.open_space(b);
-        app.sync_bar();
-        assert_eq!(app.tabs.len(), 2, "each project has its session");
-        assert_eq!(app.bar_tabs().len(), 2, "and the bar shows both, like browser tabs");
-        app.new_tab_here();
-        app.sync_bar();
-        assert_eq!(app.bar_tabs().len(), 3);
-        app.select_node(NodeId::Space(a));
-        app.sync_scope();
-        app.open_space(a);
-        app.sync_bar();
-        assert_eq!(app.bar_tabs().len(), 3, "going back to a project opens nothing new");
-        std::fs::remove_dir_all(d1).ok();
-        std::fs::remove_dir_all(d2).ok();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn the_project_you_use_moves_to_the_top() {
-        let (d1, d2) = (temp_dir("m1"), temp_dir("m2"));
-        let mut app = app_with_servers(0);
-        let a = app.spaces.add("a".into(), d1.display().to_string());
-        let b = app.spaces.add("b".into(), d2.display().to_string());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        assert_eq!(app.spaces.spaces[0].id, a);
-        app.open_space(b);
-        app.sync_bar();
-        assert_eq!(app.spaces.spaces[0].id, a, "opening a project does not move it");
-        assert_eq!(app.focus, Focus::Terminal);
-        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert_eq!(app.spaces.spaces[0].id, a, "typing without Enter does not either");
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.spaces.spaces[0].id, b, "Enter in it does: b was used last, so it comes first");
-        assert_eq!(app.selected_node(), Some(NodeId::Space(b)), "and the selection follows it");
-        std::fs::remove_dir_all(d1).ok();
-        std::fs::remove_dir_all(d2).ok();
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn alt_q_switches_between_the_sidebar_and_the_terminal() {
         let mut app = app_with_servers(1);
         app.open_server(LOCAL);
@@ -3654,122 +2804,6 @@ mod tests {
         assert_eq!(app.focus, Focus::Sidebar);
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT));
         assert_eq!(app.focus, Focus::Terminal);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_project_whose_shell_exits_leaves_the_list() {
-        let (d1, d2) = (temp_dir("x1"), temp_dir("x2"));
-        let mut app = app_with_servers(0);
-        let a = app.spaces.add("a".into(), d1.display().to_string());
-        let b = app.spaces.add("b".into(), d2.display().to_string());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        app.open_space(a);
-        app.open_space(b);
-        let ti = app.tabs.iter().position(|t| t.scope == Scope::Space(b)).unwrap();
-        app.tabs[ti].session.write(b"exit\r");
-        for _ in 0..100 {
-            app.tick();
-            if app.spaces.get(b).is_none() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert!(app.spaces.get(b).is_none(), "b is gone after exit");
-        assert!(app.spaces.get(a).is_some(), "a stays");
-        assert!(d2.exists(), "its directory is untouched");
-        std::fs::remove_dir_all(d1).ok();
-        std::fs::remove_dir_all(d2).ok();
-    }
-
-    #[test]
-    fn projects_are_filed_in_folders_below_the_list() {
-        let mut app = app_with_servers(0);
-        let a = app.spaces.add("a".into(), "/tmp".into());
-        let b = app.spaces.add("b".into(), "/tmp".into());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        app.select_node(NodeId::Space(a));
-        app.modal = None;
-        app.submit_prompt(&Prompt {
-            title: String::new(),
-            input: Input::new("Work"),
-            kind: PromptKind::MoveSpace(a),
-        });
-        let nodes: Vec<(NodeId, bool)> = app.rows.iter().map(|r| (r.node, r.jump)).collect();
-        let f = app.spaces.get(a).unwrap().folder.expect("the folder was created");
-        assert_eq!(
-            nodes,
-            vec![
-                (NodeId::Space(b), false),
-                (NodeId::BastionsHeader, false),
-                (NodeId::SpaceFolder(f), true),
-                (NodeId::Space(a), true),
-            ],
-            "b on top; a only inside its folder"
-        );
-        // `-` takes it out again.
-        app.submit_prompt(&Prompt { title: String::new(), input: Input::new("-"), kind: PromptKind::MoveSpace(a) });
-        assert!(app.rows.iter().filter(|r| matches!(r.node, NodeId::Space(_))).all(|r| !r.jump));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn each_space_remembers_its_own_active_tab() {
-        let (d1, d2) = (temp_dir("a"), temp_dir("b"));
-        let mut app = app_with_servers(0);
-        let a = app.spaces.add("a".into(), d1.display().to_string());
-        let b = app.spaces.add("b".into(), d2.display().to_string());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        app.open_space(a);
-        app.sync_bar();
-        app.new_tab_here(); // second tab in a, in a slot of its own
-        app.sync_bar();
-        app.goto_tab(0);
-        assert_eq!(app.active, 0);
-        app.open_space(b);
-        assert_eq!(app.scope, Scope::Space(b));
-        assert_eq!(app.scoped(), vec![2], "b has its own single tab");
-        app.select_node(NodeId::Space(a));
-        app.sync_scope();
-        assert_eq!((app.scope, app.active), (Scope::Space(a), 0), "back in a, on the tab it was left on");
-        std::fs::remove_dir_all(d1).ok();
-        std::fs::remove_dir_all(d2).ok();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn deleting_a_space_closes_its_terminals() {
-        let dir = temp_dir("del");
-        let mut app = app_with_servers(0);
-        let id = app.spaces.add("gone".into(), dir.display().to_string());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        app.open_space(id);
-        app.open_server(LOCAL);
-        assert_eq!(app.tabs.len(), 2);
-        app.run_confirmed(ConfirmAction::DeleteSpace(id));
-        assert!(app.tabs.is_empty() && app.spaces.spaces.is_empty() && app.rows.is_empty());
-        assert_eq!(app.focus, Focus::Sidebar);
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn focusing_an_agent_tab_switches_to_its_space() {
-        let dir = temp_dir("agent");
-        let mut app = app_with_servers(1);
-        let id = app.spaces.add("proj".into(), dir.display().to_string());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        app.open_space(id);
-        app.set_view(View::Folders);
-        assert!(app.scoped().is_empty());
-        app.focus_tab(0);
-        assert_eq!((app.view, app.scope, app.focus), (View::Spaces, Scope::Space(id), Focus::Terminal));
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -3809,10 +2843,8 @@ mod tests {
             id: app.next_tab_id,
             title: "t".into(),
             server_id: LOCAL,
-            scope: Scope::Ssh,
             right: false,
             session,
-            attention: false,
             meta_sent: String::new(),
         });
         app.layout.content = Rect::new(32, 1, 80, 24);
@@ -3861,53 +2893,6 @@ mod tests {
         app.mouse_up(32 + 2, 1);
         assert_eq!(copied(), before, "a click without dragging copies nothing");
         assert!(app.selection.is_none());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_opens_a_terminal_right_away_without_asking_for_a_path() {
-        let mut app = app_with_servers(0);
-        app.set_view(View::Spaces);
-        press(&mut app, KeyCode::Char('a'));
-        assert!(app.modal.is_none(), "no prompt");
-        assert_eq!(app.spaces.spaces.len(), 1);
-        let id = app.spaces.spaces[0].id;
-        assert_eq!((app.scope, app.focus), (Scope::Space(id), Focus::Terminal));
-        assert_eq!(app.scoped().len(), 1, "a terminal is already open in it");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_space_stays_where_its_terminal_is_left() {
-        let dir = temp_dir("follow");
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
-        let mut app = app_with_servers(0);
-        let id = app.spaces.add("proj".into(), dir.display().to_string());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        app.open_space(id);
-        assert_eq!(app.spaces.get(id).unwrap().name, "proj");
-
-        let wait_for_dir = |app: &mut App, want: &Path| {
-            let end = Instant::now() + Duration::from_secs(6);
-            while Instant::now() < end {
-                app.tick();
-                if Path::new(&app.spaces.get(id).unwrap().cwd) == want {
-                    return true;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            false
-        };
-        app.tabs[0].session.write(b"cd sub\r");
-        assert!(wait_for_dir(&mut app, &dir.join("sub")), "the space follows `cd`");
-        assert_eq!(app.spaces.get(id).unwrap().name, "sub", "and its automatic name follows too");
-
-        app.spaces.rename(id, "mine".into());
-        app.tabs[0].session.write(b"cd ..\r");
-        assert!(wait_for_dir(&mut app, &dir));
-        assert_eq!(app.spaces.get(id).unwrap().name, "mine", "a name chosen by the user is kept");
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -3972,19 +2957,6 @@ mod tests {
     }
 
     #[test]
-    fn which_bastions_are_open_is_remembered_between_runs() {
-        let dir = temp_dir_any("uistate");
-        let mut app = app_with_servers(3);
-        let (b, _, _) = bastion_setup(&mut app);
-        app.ui_path = dir.join("state.json");
-        app.selected = app.rows.iter().position(|r| r.node == NodeId::Server(b) && r.jump).unwrap();
-        press(&mut app, KeyCode::Right);
-        let saved: crate::uistate::UiState = serde_json::from_str(&std::fs::read_to_string(&app.ui_path).unwrap()).unwrap();
-        assert_eq!(saved.open_nodes, vec![b]);
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
     fn dropping_a_server_on_a_bastion_routes_it_through_that_bastion() {
         let mut app = app_with_servers(3);
         let (b, _, plain) = bastion_setup(&mut app);
@@ -4012,72 +2984,40 @@ mod tests {
         assert_eq!(f.jump, Some(b));
     }
 
-    /// Two tabs: an agent project's terminal (index 0) and a local SSH-section terminal (index 1).
+    /// Two local terminals (indices 0 and 1), the second one active.
     #[cfg(unix)]
     fn app_with_two_tabs() -> (App, u64, PathBuf) {
         let dir = temp_dir("bar");
         let mut app = app_with_servers(1);
-        let id = app.spaces.add("proj".into(), dir.display().to_string());
-        app.rebuild();
-        app.set_view(View::Spaces);
-        app.open_space(id);
-        app.set_view(View::Folders);
         app.open_server(LOCAL);
-        assert_eq!((app.tabs.len(), app.active, app.view), (2, 1, View::Folders), "tabs: {:?}", app.tabs.iter().map(|t| (t.scope, t.session.exit_code)).collect::<Vec<_>>());
-        (app, id, dir)
+        app.open_server(LOCAL);
+        assert_eq!((app.tabs.len(), app.active), (2, 1));
+        (app, 0, dir)
+    }
+
+
+    #[test]
+    fn input_edits_unicode() {
+        let mut i = Input::new("añb");
+        i.handle(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        i.handle(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(i.value, "ab");
+        assert_eq!(i.cursor, 1);
     }
 
     #[test]
-    #[cfg(unix)]
-    fn the_tab_bar_travels_between_agents_and_ssh() {
-        let (mut app, id, dir) = app_with_two_tabs();
-        app.select_tab(0);
-        assert_eq!((app.view, app.scope, app.active), (View::Spaces, Scope::Space(id), 0), "the sidebar goes to the agent");
-        assert_eq!(app.selected_node(), Some(NodeId::Space(id)));
-        app.select_tab(1);
-        assert_eq!((app.view, app.scope, app.active), (View::Folders, Scope::Ssh, 1), "and back to SSH");
-        // Alt+arrows and the digits stay inside what is selected: here each part has one tab.
-        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
-        assert_eq!((app.active, app.view), (1, View::Folders));
-        press(&mut app, KeyCode::Char('2'));
-        assert_eq!((app.active, app.view), (1, View::Folders), "there is no second tab here");
-        app.select_tab(0);
-        assert_eq!((app.active, app.view), (0, View::Spaces));
-        // Ctrl+N adds a tab to the project you are on, and only that project shows it.
-        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!(app.tabs.len(), 3);
-        assert_eq!(app.bar_tabs().len(), 3, "all three tabs are in the bar");
-        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
-        assert_eq!(app.active, app.bar_tabs()[1]);
+    fn which_bastions_are_open_is_remembered_between_runs() {
+        let dir = temp_dir_any("uistate");
+        let mut app = app_with_servers(3);
+        let (b, _, _) = bastion_setup(&mut app);
+        app.ui_path = dir.join("state.json");
+        app.selected = app.rows.iter().position(|r| r.node == NodeId::Server(b) && r.jump).unwrap();
+        press(&mut app, KeyCode::Right);
+        let saved: crate::uistate::UiState = serde_json::from_str(&std::fs::read_to_string(&app.ui_path).unwrap()).unwrap();
+        assert_eq!(saved.open_nodes, vec![b]);
         std::fs::remove_dir_all(dir).ok();
     }
 
-    #[test]
-    #[cfg(unix)]
-    fn closing_the_last_tab_of_a_scope_shows_the_welcome_instead_of_jumping() {
-        let (mut app, _, dir) = app_with_two_tabs();
-        let view = app.view;
-        app.close_tab(1);
-        assert_eq!((app.tabs.len(), app.view, app.focus), (1, view, Focus::Sidebar), "the sidebar stays where it was");
-        assert!(app.blank(), "the empty scope shows the welcome screen, not the other scope's tab");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn every_emptied_scope_keeps_showing_the_welcome() {
-        let (mut app, id, dir) = app_with_two_tabs();
-        app.close_tab(1); // SSH emptied
-        assert!(app.blank());
-        app.select_tab(0); // go to the project, then empty it too
-        app.close_tab(0);
-        assert!(app.blank(), "the project is empty");
-        app.set_view(View::Folders);
-        app.sync_scope();
-        assert!(app.blank(), "SSH was emptied earlier and still shows the welcome");
-        let _ = id;
-        std::fs::remove_dir_all(dir).ok();
-    }
 
     #[test]
     #[cfg(unix)]
@@ -4106,21 +3046,16 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn tabs_of_a_project_carry_its_name_in_the_bar() {
-        let (mut app, _, dir) = app_with_two_tabs();
-        assert_eq!(app.tab_label(&app.tabs[0]), "proj");
-        assert_eq!(app.tab_label(&app.tabs[1]), "Local");
-        app.tabs[0].title = "build".into();
-        assert_eq!(app.tab_label(&app.tabs[0]), "proj/build");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn input_edits_unicode() {
-        let mut i = Input::new("añb");
-        i.handle(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        i.handle(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(i.value, "ab");
-        assert_eq!(i.cursor, 1);
+    fn every_open_tab_has_its_place_in_the_bar() {
+        let mut app = app_with_servers(1);
+        app.open_server(LOCAL);
+        app.sync_bar();
+        let id = app.store.servers[0].id;
+        app.open_server(id);
+        app.sync_bar();
+        assert_eq!(app.bar_tabs().len(), 2, "each session is a tab in the bar, like browser tabs");
+        app.new_tab_here();
+        app.sync_bar();
+        assert_eq!(app.bar_tabs().len(), 3);
     }
 }

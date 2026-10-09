@@ -1,6 +1,5 @@
 //! No background server on this platform: sessions live in the interface process and end with it.
 
-use crate::agent::AgentInfo;
 use crate::session::SpawnOpts;
 use anyhow::Result;
 use serde_json::Value;
@@ -55,15 +54,6 @@ impl RemoteSession {
         match self.0 {}
     }
     pub fn exit_code(&self) -> Option<u32> {
-        match self.0 {}
-    }
-    pub fn agent(&self) -> Option<AgentInfo> {
-        match self.0 {}
-    }
-    pub fn cwd(&self) -> Option<String> {
-        match self.0 {}
-    }
-    pub fn take_done(&mut self) -> bool {
         match self.0 {}
     }
     pub fn with_screen<R>(&self, _f: impl FnOnce(&vt100::Screen) -> R) -> R {

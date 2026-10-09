@@ -6,7 +6,6 @@
 //!
 //! The protocol is one JSON object per line. Terminal bytes travel as base64.
 
-use crate::agent::AgentInfo;
 use crate::session::{Autofill, PtySession, SCROLLBACK, SpawnOpts};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
@@ -64,24 +63,6 @@ enum Req {
     Shutdown,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct AgentMsg {
-    name: String,
-    working: bool,
-}
-
-impl From<AgentInfo> for AgentMsg {
-    fn from(a: AgentInfo) -> Self {
-        AgentMsg { name: a.name, working: a.working }
-    }
-}
-
-impl From<AgentMsg> for AgentInfo {
-    fn from(a: AgentMsg) -> Self {
-        AgentInfo { name: a.name, working: a.working }
-    }
-}
-
 /// What the client needs to rebuild a tab for a session that is already running.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Info {
@@ -104,21 +85,13 @@ enum Ev {
         data: String,
         exit: Option<u32>,
         sudo: bool,
-        agent: Option<AgentMsg>,
-        /// An agent finished while nobody was attached.
-        done: bool,
         /// The raw output so far, replayed before `data` to rebuild the scroll-back.
         #[serde(default)]
         replay: String,
-        /// Directory of the session's shell.
-        #[serde(default)]
-        cwd: Option<String>,
     },
     Output { sid: u64, data: String },
     Exit { sid: u64, code: u32 },
     Sudo { sid: u64, on: bool },
-    Cwd { sid: u64, cwd: String },
-    Agent { sid: u64, agent: Option<AgentMsg>, done: bool },
 }
 
 fn write_line<T: Serialize>(w: &mut impl Write, msg: &T) -> std::io::Result<()> {
@@ -187,8 +160,6 @@ fn broadcast(subs: &Subs, ev: Ev) {
 struct Sent {
     exit: bool,
     sudo: bool,
-    agent: Option<AgentInfo>,
-    cwd: Option<String>,
 }
 
 struct Hosted {
@@ -196,8 +167,6 @@ struct Hosted {
     meta: Value,
     subs: Subs,
     sent: Sent,
-    /// An agent finished while nobody was attached: reported on the next attach.
-    pending_done: bool,
 }
 
 #[derive(Default)]
@@ -210,7 +179,6 @@ struct State {
 
 struct Server {
     state: Mutex<State>,
-    sound: bool,
     /// Leave once there has been nothing to keep for a while (always, except in tests).
     idle_exit: bool,
     socket: PathBuf,
@@ -219,10 +187,10 @@ struct Server {
 /// Runs the server until it is told to stop or has been idle for a while.
 pub fn run_server() -> Result<()> {
     let path = socket_path();
-    serve(path, crate::settings::Settings::load().sound, true)
+    serve(path, true)
 }
 
-fn serve(path: PathBuf, sound: bool, idle_exit: bool) -> Result<()> {
+fn serve(path: PathBuf, idle_exit: bool) -> Result<()> {
     prepare_dir(&path)?;
     if path.exists() {
         if UnixStream::connect(&path).is_ok() {
@@ -232,7 +200,7 @@ fn serve(path: PathBuf, sound: bool, idle_exit: bool) -> Result<()> {
     }
     let listener = UnixListener::bind(&path).with_context(|| format!("could not listen on {}", path.display()))?;
     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    let server = Arc::new(Server { state: Mutex::new(State::default()), sound, idle_exit, socket: path });
+    let server = Arc::new(Server { state: Mutex::new(State::default()), idle_exit, socket: path });
 
     {
         let server = Arc::clone(&server);
@@ -253,47 +221,23 @@ fn exit_server(server: &Server) -> ! {
     std::process::exit(0)
 }
 
-/// Twice a second: announce exits, agent changes and sudo prompts; leave when there is nothing to keep.
+/// Twice a second: announce exits and sudo prompts; leave when there is nothing to keep.
 fn tick_loop(server: &Server) {
     let mut idle_since: Option<Instant> = None;
     loop {
         std::thread::sleep(Duration::from_millis(250));
         let mut st = lock(&server.state);
         for (&sid, h) in st.sessions.iter_mut() {
-            let (exit, agent, done, sudo, cwd) = {
+            let (exit, sudo) = {
                 let mut p = lock(&h.pty);
                 p.poll_exit();
-                p.poll_agent();
-                p.poll_cwd();
-                let cwd = p.cwd().map(|c| c.display().to_string());
-                (p.exit_code, p.agent().cloned(), p.take_done(), p.sudo_prompt(), cwd)
+                (p.exit_code, p.sudo_prompt())
             };
-            if cwd != h.sent.cwd {
-                if let Some(c) = &cwd {
-                    broadcast(&h.subs, Ev::Cwd { sid, cwd: c.clone() });
-                }
-                h.sent.cwd = cwd;
-            }
-            let attached = !lock(&h.subs).is_empty();
-            if done {
-                if attached {
-                    // reported below with the agent change
-                } else {
-                    h.pending_done = true;
-                    if server.sound {
-                        crate::notify::ring();
-                    }
-                }
-            }
             if let Some(code) = exit {
                 if !h.sent.exit {
                     h.sent.exit = true;
                     broadcast(&h.subs, Ev::Exit { sid, code });
                 }
-            }
-            if agent != h.sent.agent || (done && attached) {
-                h.sent.agent = agent.clone();
-                broadcast(&h.subs, Ev::Agent { sid, agent: agent.map(Into::into), done: done && attached });
             }
             if sudo != h.sent.sudo {
                 h.sent.sudo = sudo;
@@ -390,7 +334,6 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
                         meta: Value::Null,
                         subs,
                         sent: Sent::default(),
-                        pending_done: false,
                     };
                     lock(&server.state).sessions.insert(sid, hosted);
                     reply(Ev::Spawned { req, sid });
@@ -399,15 +342,14 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
             }
         }
         Req::Attach { sid, rows, cols } => {
-            let (pty, subs, done) = {
+            let (pty, subs) = {
                 let mut st = lock(&server.state);
                 let Some(h) = st.sessions.get_mut(&sid) else { return };
-                (Arc::clone(&h.pty), Arc::clone(&h.subs), std::mem::take(&mut h.pending_done))
+                (Arc::clone(&h.pty), Arc::clone(&h.subs))
             };
             let mut p = lock(&pty);
             p.resize(rows, cols);
-            let (exit, sudo, agent) = (p.exit_code, p.sudo_prompt(), p.agent().cloned());
-            let cwd = p.cwd().map(|c| c.display().to_string());
+            let (exit, sudo) = (p.exit_code, p.sudo_prompt());
             // Snapshot and subscription happen under the screen lock: the output that follows the snapshot
             // is exactly the output that came after it.
             p.with_screen(|screen| {
@@ -418,10 +360,7 @@ fn handle(server: &Arc<Server>, req: Req, cid: u64, tx: &SyncSender<Ev>, ctl: &A
                     data: B64.encode(screen.state_formatted()),
                     exit,
                     sudo,
-                    agent: agent.map(Into::into),
-                    done,
                     replay: B64.encode(p.history()),
-                    cwd,
                 };
                 let _ = tx.try_send(snapshot);
                 lock(&subs).push(Sub { client: cid, tx: tx.clone(), stream: Arc::clone(ctl) });
@@ -477,9 +416,6 @@ pub struct Remote {
     parser: Mutex<vt100::Parser>,
     exit: Mutex<Option<u32>>,
     sudo: AtomicBool,
-    agent: Mutex<Option<AgentInfo>>,
-    done: AtomicBool,
-    cwd: Mutex<Option<String>>,
 }
 
 struct ClientShared {
@@ -516,7 +452,7 @@ impl ClientShared {
                     let _ = w.send(ev);
                 }
             }
-            Ev::Snapshot { sid, rows, cols, data, exit, sudo, agent, done, replay, cwd } => {
+            Ev::Snapshot { sid, rows, cols, data, exit, sudo, replay } => {
                 if let Some(r) = lock(&self.sessions).get(&sid) {
                     let mut parser = vt100::Parser::new(rows, cols, SCROLLBACK);
                     // Replaying the output rebuilds the scroll-back; the snapshot then sets the exact screen and modes.
@@ -524,14 +460,7 @@ impl ClientShared {
                     parser.process(&B64.decode(data).unwrap_or_default());
                     *lock(&r.parser) = parser;
                     *lock(&r.exit) = exit;
-                    if cwd.is_some() {
-                        *lock(&r.cwd) = cwd;
-                    }
                     r.sudo.store(sudo, Ordering::Relaxed);
-                    *lock(&r.agent) = agent.map(Into::into);
-                    if done {
-                        r.done.store(true, Ordering::Relaxed);
-                    }
                 }
             }
             Ev::Output { sid, data } => {
@@ -544,22 +473,9 @@ impl ClientShared {
                     *lock(&r.exit) = Some(code);
                 }
             }
-            Ev::Cwd { sid, cwd } => {
-                if let Some(r) = lock(&self.sessions).get(&sid) {
-                    *lock(&r.cwd) = Some(cwd);
-                }
-            }
             Ev::Sudo { sid, on } => {
                 if let Some(r) = lock(&self.sessions).get(&sid) {
                     r.sudo.store(on, Ordering::Relaxed);
-                }
-            }
-            Ev::Agent { sid, agent, done } => {
-                if let Some(r) = lock(&self.sessions).get(&sid) {
-                    *lock(&r.agent) = agent.map(Into::into);
-                    if done {
-                        r.done.store(true, Ordering::Relaxed);
-                    }
                 }
             }
             Ev::Hello { .. } => {}
@@ -669,9 +585,6 @@ impl Daemon {
             parser: Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)),
             exit: Mutex::new(None),
             sudo: AtomicBool::new(false),
-            agent: Mutex::new(None),
-            done: AtomicBool::new(false),
-            cwd: Mutex::new(None),
         });
         lock(&self.shared.sessions).insert(sid, Arc::clone(&remote));
         self.shared.send(&Req::Attach { sid, rows, cols });
@@ -725,19 +638,6 @@ impl RemoteSession {
 
     pub fn exit_code(&self) -> Option<u32> {
         *lock(&self.remote.exit)
-    }
-
-    pub fn agent(&self) -> Option<AgentInfo> {
-        lock(&self.remote.agent).clone()
-    }
-
-    /// The directory the session's shell is in.
-    pub fn cwd(&self) -> Option<String> {
-        lock(&self.remote.cwd).clone()
-    }
-
-    pub fn take_done(&mut self) -> bool {
-        self.remote.done.swap(false, Ordering::Relaxed)
     }
 
     pub fn with_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
@@ -825,7 +725,7 @@ mod tests {
         let path = dir.join("d.sock");
         let p = path.clone();
         std::thread::spawn(move || {
-            let _ = serve(p, false, false);
+            let _ = serve(p, false);
         });
         let end = Instant::now() + Duration::from_secs(3);
         while Daemon::connect_at(&path).is_err() && Instant::now() < end {
@@ -910,20 +810,6 @@ mod tests {
         assert!(top.lines().any(|l| l == "history-line-1"), "the oldest line is reachable: {top:?}");
     }
 
-    /// The directory of a session's shell reaches the interface, also through the server.
-    #[test]
-    fn the_shell_directory_travels_through_the_server() {
-        let path = start("cwd");
-        let d = Daemon::connect_at(&path).ok().unwrap();
-        let mut s = Session::spawn_with(sh("cd / ; echo moved; sleep 6"), Some(&d)).unwrap();
-        assert!(wait_for(&mut s, "moved"));
-        let end = Instant::now() + Duration::from_secs(5);
-        while s.cwd().as_deref() != Some(std::path::Path::new("/")) && Instant::now() < end {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert_eq!(s.cwd().as_deref(), Some(std::path::Path::new("/")));
-    }
-
     #[test]
     fn exit_codes_and_kill() {
         let path = start("exit");
@@ -941,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn the_new_client_sees_a_running_agent_and_the_environment_is_the_clients() {
+    fn the_session_gets_the_clients_environment() {
         let path = start("env");
         let d = Daemon::connect_at(&path).ok().unwrap();
         let mut opts = sh("echo \"v=$SHIP_TEST_VAR\"; sleep 1");

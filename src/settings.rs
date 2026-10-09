@@ -4,9 +4,6 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct Settings {
-    /// Play a sound when an AI agent finishes.
-    #[serde(default = "yes")]
-    pub sound: bool,
     /// `"terminal"` (pastels on your terminal's own background, the default) or `"classic"` (fixed colours).
     #[serde(default = "terminal")]
     pub theme: String,
@@ -16,13 +13,9 @@ fn terminal() -> String {
     "terminal".into()
 }
 
-fn yes() -> bool {
-    true
-}
-
 impl Default for Settings {
     fn default() -> Self {
-        Settings { sound: true, theme: terminal() }
+        Settings { theme: terminal() }
     }
 }
 

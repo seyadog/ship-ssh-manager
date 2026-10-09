@@ -1,4 +1,3 @@
-mod agent;
 mod app;
 mod clipboard;
 #[cfg(unix)]
@@ -7,10 +6,8 @@ mod daemon;
 #[path = "daemon_stub.rs"]
 mod daemon;
 mod keys;
-mod notify;
 mod session;
 mod settings;
-mod spaces;
 mod store;
 mod tabby;
 mod uistate;
@@ -47,9 +44,7 @@ fn main() -> Result<()> {
     let store = store::Store::load()?;
     let vault = vault::Vault::new(store::Store::config_dir().join("vault.json"));
     let mut app = app::App::new(store, vault);
-    app.spaces = spaces::Spaces::load()?;
     let settings = settings::Settings::load();
-    app.sound = settings.sound;
     ui::set_theme(settings.theme != "classic");
     let ui = uistate::UiState::load();
     app.jump_open = ui.open_nodes.into_iter().collect();

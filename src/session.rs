@@ -7,13 +7,12 @@
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use crate::agent::{self, AgentInfo};
 use crate::daemon::{Daemon, RemoteSession};
 use std::path::PathBuf;
 #[cfg(all(unix, not(target_os = "linux")))]
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 
@@ -84,19 +83,8 @@ pub struct PtySession {
     /// Set when the user types, so an identical prompt line is recognised again.
     typed: Arc<AtomicBool>,
     pub exit_code: Option<u32>,
-    pub started: Instant,
-    /// Milliseconds since `started` of the last output and of the last keypress.
-    last_output: Arc<AtomicU64>,
-    last_input: Arc<AtomicU64>,
-    tracker: agent::Tracker,
-    agent: Option<AgentInfo>,
-    done: bool,
-    probed: Instant,
     #[cfg_attr(not(unix), allow(dead_code))]
     history: Arc<Mutex<History>>,
-    /// Directory of the shell (the child), refreshed about once a second.
-    cwd: Option<PathBuf>,
-    cwd_probed: Instant,
 }
 
 impl PtySession {
@@ -130,9 +118,6 @@ impl PtySession {
         let writer: SharedWriter = Arc::new(Mutex::new(pair.master.take_writer()?));
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
 
-        let started = Instant::now();
-        let last_output = Arc::new(AtomicU64::new(0));
-        let last_input = Arc::new(AtomicU64::new(0));
         let history = Arc::new(Mutex::new(History::default()));
         let sudo_prompt = Arc::new(AtomicBool::new(false));
         let typed_flag = Arc::new(AtomicBool::new(false));
@@ -141,7 +126,6 @@ impl PtySession {
             let writer = Arc::clone(&writer);
             let sudo_flag = Arc::clone(&sudo_prompt);
             let typed = Arc::clone(&typed_flag);
-            let last_output = Arc::clone(&last_output);
             let history = Arc::clone(&history);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 16 * 1024];
@@ -158,7 +142,6 @@ impl PtySession {
                     let line = {
                         let Ok(mut p) = parser.lock() else { break };
                         p.process(&buf[..n]);
-                        last_output.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
                         history.lock().unwrap_or_else(|e| e.into_inner()).push(&buf[..n]);
                         if let Some(tap) = &tap {
                             tap(&buf[..n]);
@@ -217,16 +200,7 @@ impl PtySession {
             sudo_prompt,
             typed: typed_flag,
             exit_code: None,
-            started,
-            last_output,
-            last_input,
-            tracker: agent::Tracker::default(),
-            agent: None,
-            done: false,
-            probed: started,
             history,
-            cwd: None,
-            cwd_probed: started - Duration::from_secs(5),
         })
     }
 
@@ -255,7 +229,6 @@ impl PtySession {
         // Any input answers (or dismisses) the prompt.
         self.sudo_prompt.store(false, Ordering::Relaxed);
         self.typed.store(true, Ordering::Relaxed);
-        self.last_input.store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(bytes);
             let _ = w.flush();
@@ -271,53 +244,6 @@ impl PtySession {
         }
     }
 
-    /// Looks at what runs in the foreground and whether it is busy. Call often; it rate-limits itself.
-    pub fn poll_agent(&mut self) {
-        if self.exit_code.is_some() {
-            self.agent = None;
-            return;
-        }
-        let now = self.started.elapsed().as_millis() as u64;
-        if self.probed.elapsed() >= Duration::from_millis(500) {
-            self.probed = Instant::now();
-            let name = agent::foreground_agent(self.master.as_ref());
-            if name.map(String::from) != self.agent.as_ref().map(|a| a.name.clone()) {
-                self.agent = name.map(|n| AgentInfo { name: n.to_string(), working: false });
-            }
-        }
-        let finished = self.tracker.step(
-            now,
-            self.last_output.load(Ordering::Relaxed),
-            self.last_input.load(Ordering::Relaxed),
-            self.agent.is_some(),
-        );
-        if let Some(a) = self.agent.as_mut() {
-            a.working = self.tracker.working;
-        }
-        self.done |= finished;
-    }
-
-    /// Looks up the shell's current directory (rate-limited: about once a second).
-    pub fn poll_cwd(&mut self) {
-        if self.exit_code.is_some() || self.cwd_probed.elapsed() < Duration::from_secs(1) {
-            return;
-        }
-        self.cwd_probed = Instant::now();
-        if let Some(dir) = self.child.process_id().and_then(process_cwd) {
-            self.cwd = Some(dir);
-        }
-    }
-
-    /// The last known directory of the shell.
-    pub fn cwd(&self) -> Option<&PathBuf> {
-        self.cwd.as_ref()
-    }
-
-    /// The agent running in this terminal, if any.
-    pub fn agent(&self) -> Option<&AgentInfo> {
-        self.agent.as_ref()
-    }
-
     pub fn kill(&mut self) {
         let _ = self.child.kill();
     }
@@ -326,11 +252,6 @@ impl PtySession {
     #[cfg_attr(not(unix), allow(dead_code))]
     pub fn history(&self) -> Vec<u8> {
         self.history.lock().unwrap_or_else(|e| e.into_inner()).bytes().to_vec()
-    }
-
-    /// True once after an agent finishes a stretch of work.
-    pub fn take_done(&mut self) -> bool {
-        std::mem::take(&mut self.done)
     }
 
     pub fn with_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
@@ -432,39 +353,6 @@ impl Session {
         }
     }
 
-    /// Looks at what runs in the foreground and in which directory (only for sessions of this process:
-    /// the server does it for the rest).
-    pub fn poll_agent(&mut self) {
-        if let Backend::Pty(p) = &mut self.backend {
-            p.poll_agent();
-            p.poll_cwd();
-        }
-    }
-
-    /// The directory the terminal's shell is in.
-    pub fn cwd(&self) -> Option<PathBuf> {
-        match &self.backend {
-            Backend::Pty(p) => p.cwd().cloned(),
-            Backend::Remote(r) => r.cwd().map(PathBuf::from),
-        }
-    }
-
-    /// The AI agent running in this terminal, if any.
-    pub fn agent(&self) -> Option<AgentInfo> {
-        match &self.backend {
-            Backend::Pty(p) => p.agent().cloned(),
-            Backend::Remote(r) => r.agent(),
-        }
-    }
-
-    /// True once after an agent finishes a stretch of work.
-    pub fn take_done(&mut self) -> bool {
-        match &mut self.backend {
-            Backend::Pty(p) => p.take_done(),
-            Backend::Remote(r) => r.take_done(),
-        }
-    }
-
     pub fn with_screen<R>(&self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
         match &self.backend {
             Backend::Pty(p) => p.with_screen(f),
@@ -501,23 +389,6 @@ impl Session {
             r.set_meta(meta);
         }
     }
-}
-
-/// Current directory of a process.
-#[cfg(target_os = "linux")]
-fn process_cwd(pid: u32) -> Option<PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn process_cwd(pid: u32) -> Option<PathBuf> {
-    let out = Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]).output().ok()?;
-    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix('n')).map(PathBuf::from)
-}
-
-#[cfg(not(unix))]
-fn process_cwd(_pid: u32) -> Option<PathBuf> {
-    None
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -631,33 +502,6 @@ mod tests {
         assert!(s.sudo_prompt());
         s.write(b"x");
         assert!(!s.sudo_prompt());
-    }
-
-    /// A process called `claude` in the foreground is recognised as an agent, and stops being one when it exits.
-    #[test]
-    #[cfg(unix)]
-    fn detects_an_agent_in_the_foreground() {
-        let dir = std::env::temp_dir().join(format!("ship-agent-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let fake = dir.join("claude");
-        let _ = std::fs::remove_file(&fake);
-        std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
-        let argv = vec![fake.display().to_string(), "2".into()];
-        let mut s = Session::spawn(&argv, 24, 80, vec![], false).unwrap();
-        let end = Instant::now() + Duration::from_secs(3);
-        while s.agent().is_none() && Instant::now() < end {
-            s.poll_agent();
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert_eq!(s.agent().map(|a| a.name), Some("claude".to_string()));
-        let end = Instant::now() + Duration::from_secs(5);
-        while s.agent().is_some() && Instant::now() < end {
-            s.poll_exit();
-            s.poll_agent();
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert!(s.agent().is_none(), "the agent is gone once it exits");
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
