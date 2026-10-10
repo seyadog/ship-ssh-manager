@@ -127,6 +127,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.layout.tabs.clear();
     app.layout.toolbar.clear();
     app.layout.modal.clear();
+    app.layout.mosaic.clear();
 
     let [main, status] = RLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     // One column: Projects on top, Servers below.
@@ -144,7 +145,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.layout.content = content;
 
     draw_sidebar(f, app, side);
-    if app.is_split() {
+    if app.mosaic && !app.tabs.is_empty() {
+        draw_tabs(f, app, tabbar, false);
+        draw_mosaic(f, app, content);
+    } else if app.is_split() {
         // Two groups of tabs, each with its bar and its terminal, with a line between them to drag.
         let left_w = ((right.width as u32 * app.split_pm as u32 / 1000) as u16).clamp(10, right.width.saturating_sub(11));
         let lrect = Rect::new(right.x, right.y, left_w, right.height);
@@ -220,7 +224,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // The list keeps two columns of margin on the left and a little on the right.
     let inner = Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(5), area.height.saturating_sub(3));
     // The actions, as small padded buttons along the bottom.
-    let by = area.y + area.height - 1;
+    let by = area.y + area.height - 2;
     let actions: [(&str, Hit); 4] = [(" + new ", Hit::NewServer), (" edit ", Hit::Edit), (" term ", Hit::Term), (" vault ", Hit::Vault)];
     let mut bx = area.x + 2;
     for (n, (label, hit)) in actions.into_iter().enumerate() {
@@ -233,7 +237,26 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         app.layout.toolbar.push((r, hit));
         bx += w + 1;
     }
-    let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
+    // The last line: the mosaic and the broadcast, which act on several terminals at once.
+    let ly = area.y + area.height - 1;
+    let mosaic_style = if app.mosaic { Style::new().fg(Color::Black).bg(c_accent()) } else { Style::new().fg(c_fg()).bg(c_sel()) };
+    let bcast_style = if app.broadcast {
+        Style::new().fg(Color::Black).bg(c_red()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(c_fg()).bg(c_sel())
+    };
+    let mut bx = area.x + 2;
+    for (label, hit, style) in [(" ▦ mosaic ", Hit::Mosaic, mosaic_style), (" ⇉ broadcast ", Hit::Broadcast, bcast_style)] {
+        let w = label.width() as u16;
+        if bx + w > area.x + area.width - 1 {
+            break;
+        }
+        let r = Rect::new(bx, ly, w, 1);
+        f.render_widget(Paragraph::new(label).style(style), r);
+        app.layout.toolbar.push((r, hit));
+        bx += w + 1;
+    }
+    let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(2));
     draw_list(f, app, list, focused);
 }
 
@@ -478,6 +501,69 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     draw_terminal(f, app, idx, area, true);
 }
 
+/// Up to four terminals at once: one box each, with a border and a title. The active one shows the cursor; with the
+/// broadcast on, every title says so, in red.
+fn draw_mosaic(f: &mut Frame, app: &mut App, area: Rect) {
+    let tabs = app.mosaic_tabs();
+    let n = tabs.len();
+    if n == 0 || area.width < 4 || area.height < 4 {
+        return;
+    }
+    let half_w = area.width / 2;
+    let half_h = area.height / 2;
+    let left = Rect::new(area.x, area.y, half_w, half_h);
+    let right = Rect::new(area.x + half_w, area.y, area.width - half_w, half_h);
+    let bl = Rect::new(area.x, area.y + half_h, half_w, area.height - half_h);
+    let br = Rect::new(area.x + half_w, area.y + half_h, area.width - half_w, area.height - half_h);
+    let rects: Vec<Rect> = match n {
+        1 => vec![area],
+        2 => vec![Rect::new(area.x, area.y, half_w, area.height), Rect::new(area.x + half_w, area.y, area.width - half_w, area.height)],
+        3 => vec![left, right, Rect::new(area.x, area.y + half_h, area.width, area.height - half_h)],
+        _ => vec![left, right, bl, br],
+    };
+    let broadcast = app.broadcast;
+    for (&i, full) in tabs.iter().zip(rects) {
+        app.layout.mosaic.push((i, full));
+        let active = i == app.active;
+        let (title, dead, server_id) = {
+            let t = &app.tabs[i];
+            (app.tab_label(t), t.session.exit_code.is_some(), t.server_id)
+        };
+        let border = if broadcast && !dead {
+            c_red()
+        } else if active {
+            c_accent()
+        } else {
+            c_muted()
+        };
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled(if dead { "◇ " } else { "◆ " }, Style::new().fg(if dead { c_red() } else { server_color(server_id) })),
+            Span::styled(
+                fit(&title, (full.width as usize).saturating_sub(16)),
+                Style::new().fg(if active { c_fg() } else { c_muted() }).add_modifier(if active { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+            Span::raw(" "),
+        ];
+        if broadcast && !dead {
+            spans.push(Span::styled(" ⇉ BROADCAST ", Style::new().fg(Color::Black).bg(c_red()).add_modifier(Modifier::BOLD)));
+        }
+        let block = Block::bordered()
+            .border_type(if active { BorderType::Thick } else { BorderType::Plain })
+            .border_style(Style::new().fg(border))
+            .title(Line::from(spans));
+        let body = block.inner(full);
+        f.render_widget(Clear, full);
+        f.render_widget(block, full);
+        if active {
+            app.layout.content = body;
+        }
+        if body.height > 0 && body.width > 0 {
+            draw_terminal(f, app, i, body, active);
+        }
+    }
+}
+
 /// The terminal of tab `idx` in `area`. Only the group that has the focus shows the cursor and the selection.
 fn draw_terminal(f: &mut Frame, app: &mut App, idx: usize, area: Rect, in_focus: bool) {
     let focused = in_focus && app.focus == Focus::Terminal && app.modal.is_none();
@@ -693,7 +779,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if let Some((msg, _)) = &app.flash {
         return f.render_widget(Paragraph::new(format!(" {msg}")).style(Style::new().fg(c_amber())), area);
     }
-    let (mode, text) = if app.modal.is_some() {
+    let (mode, text) = if app.broadcast {
+        ("BROADCAST", "typing goes to every terminal of the mosaic · Alt+B stop · Alt+M leave the mosaic")
+    } else if app.modal.is_some() {
         ("DIALOG", "Esc cancel")
     } else if app.focus == Focus::Terminal {
         ("TERMINAL", "F6 next area · Alt+K open · Ctrl+N new tab · Alt+←/→ tabs · Alt+W close")
@@ -702,7 +790,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
     let live = app.tabs.iter().filter(|t| t.session.exit_code.is_none()).count();
     let stats = format!(" {} servers · {} open ", app.store.servers.len(), live);
-    let mut spans = vec![Span::styled(format!(" {mode} "), badge_accent().add_modifier(Modifier::BOLD)), Span::raw(" ")];
+    let badge = if app.broadcast { Style::new().fg(Color::Black).bg(c_red()) } else { badge_accent() };
+    let mut spans = vec![Span::styled(format!(" {mode} "), badge.add_modifier(Modifier::BOLD)), Span::raw(" ")];
     // "key action · key action": the key (first word of each hint) stands out, the rest stays quiet.
     let room = (area.width as usize).saturating_sub(mode.width() + 3 + stats.width());
     let mut used = 0;

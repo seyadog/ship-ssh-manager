@@ -89,6 +89,12 @@ The **tab bar** at the top is like a browser's: it shows every tab. Pick one wit
 
 **Two groups side by side:** `Alt+Shift+→` sends the active tab to a right group (the screen splits in half, each group with its own bar), `Alt+Shift+←` sends it back. Drag the line between them to resize; drag a tab onto the other group to move it. A group that loses its last tab disappears. The numbers run through the left group and on into the right one.
 
+## Mosaic and broadcast
+
+Like a multi-terminal client: `▦ mosaic` (bottom of the sidebar, or `Alt+M`) shows up to **four** of your open sessions at once in a grid (one, two side by side, two on top and one below, or 2×2), each in its own bordered box with its title (the active one has a thick, coloured border); click one (or use `Alt+←/→`) to give it the keyboard. **Place them where you want:** `Alt+Shift+←/→/↑/↓` moves the active terminal to the left, right, top or bottom (it trades places with the one there), or drag a box by its title onto another one. With more than four tabs open, the mosaic shows the first four in bar order, and always the active one. `Alt+M` again goes back to one terminal.
+
+`⇉ broadcast` (or `Alt+B`) sends **everything you type or paste to all the terminals of the mosaic** at once, so you can run the same command on several machines. While it is on, every title says `BROADCAST` in red and so does the status bar. It stops by itself when you leave the mosaic or fewer than two sessions are left. Only the terminals you can see receive it; sessions that ended are skipped.
+
 ## Keyboard (sidebar)
 
 Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or a bastion, `←` folds it or goes back up, `Enter` opens a session.
@@ -107,7 +113,7 @@ Navigate like a menu: `↓`/`↑` move, `→` goes into a folder or a bastion, `
 | `p` | open the password vault |
 | `q` | quit |
 
-**Global:** `F6` / `Shift+F6` next / previous area (servers, terminal; both terminals when split) · `Alt+Q` panel ⇄ terminal · `Alt+K` (or `/` in the panel) quick open: type a few letters of a server · `F8` switch the colours between the default pastel theme (it keeps your terminal's background and text colour) and the classic fixed colours · `Alt+←/→` switch tab · `Alt+Shift+←/→` send tab to the left/right group · `Alt+1..9` jump to tab (from the sidebar, plain `1`..`9` also work; some terminals, e.g. Ptyxis, keep `Alt+N` for their own tabs) · `Alt+W` close · `F2` rename · `Shift+PgUp/PgDn` scrollback.
+**Global:** `F6` / `Shift+F6` next / previous area (servers, terminal; both terminals when split) · `Alt+M` mosaic · `Alt+B` broadcast · `Alt+Q` panel ⇄ terminal · `Alt+K` (or `/` in the panel) quick open: type a few letters of a server · `F8` switch the colours between the default pastel theme (it keeps your terminal's background and text colour) and the classic fixed colours · `Alt+←/→` switch tab · `Alt+Shift+←/→` send tab to the left/right group (in the mosaic, `Alt+Shift+←/→/↑/↓` moves the terminal around the grid) · `Alt+1..9` jump to tab (from the sidebar, plain `1`..`9` also work; some terminals, e.g. Ptyxis, keep `Alt+N` for their own tabs) · `Alt+W` close · `F2` rename · `Shift+PgUp/PgDn` scrollback.
 
 **Mouse:** double-click opens a server or toggles a folder · drag to move (onto a folder: inside it; onto a server: right before it; onto a bastion: it is reached through it from then on; from the bastions section onto its title or empty space: directly again) · drag tabs to reorder · ✕ closes a tab · double-click a tab renames it · wheel scrolls the history.
 
@@ -143,5 +149,5 @@ MIT, see [LICENSE](LICENSE).
 ## Roadmap
 
 1. **Done** — tree, forms, tabs, resize, errors, drag & drop, jump hosts, password vault (with sudo fill), background server for persistent sessions, one-column sidebar. ✔
-2. **Next:** up to four terminals in a mosaic with a broadcast button, folders that close by themselves when the list runs out of room, `oso <alias>` / `list` / `add`, `~/.ssh/config` import (mapping `ProxyJump` to jump hosts), Ctrl+K quick search, auto-reconnect.
+2. **Next:** folders that close by themselves when the list runs out of room, `oso <alias>` / `list` / `add`, `~/.ssh/config` import (mapping `ProxyJump` to jump hosts), Ctrl+K quick search, auto-reconnect.
 3. **Later:** SFTP, saved tunnels, snippets, themes (including per-server colors), remembering the chosen view.
