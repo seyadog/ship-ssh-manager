@@ -648,6 +648,8 @@ pub struct App {
     pub flash: Option<(String, Instant)>,
     /// Up to four terminals shown at once, in a grid.
     pub mosaic: bool,
+    /// How many terminals the mosaic shows (2 to 4): Alt+2, Alt+3, Alt+4.
+    pub mosaic_n: usize,
     /// What is typed in one terminal of the mosaic goes to all of them.
     pub broadcast: bool,
     /// Row under the pointer while dragging (highlighted as the drop target).
@@ -691,6 +693,7 @@ impl App {
             quit: false,
             flash: None,
             mosaic: false,
+            mosaic_n: 4,
             broadcast: false,
             drop_hover: None,
             jump_open: HashSet::new(),
@@ -1596,8 +1599,13 @@ impl App {
             KeyCode::Down if alt && shift && self.mosaic => return self.move_in_mosaic(0, 1),
             KeyCode::Left if alt && shift && n > 0 => return self.send_tab(false),
             KeyCode::Right if alt && shift && n > 0 => return self.send_tab(true),
+            KeyCode::Left if alt && self.mosaic => return self.focus_in_mosaic(-1, 0),
+            KeyCode::Right if alt && self.mosaic => return self.focus_in_mosaic(1, 0),
+            KeyCode::Up if alt && self.mosaic => return self.focus_in_mosaic(0, -1),
+            KeyCode::Down if alt && self.mosaic => return self.focus_in_mosaic(0, 1),
             KeyCode::Left if alt && n > 0 => return self.step_tab(-1),
             KeyCode::Right if alt && n > 0 => return self.step_tab(1),
+            KeyCode::Char(c @ '1'..='4') if alt && !ctrl => return self.show_terminals(c as usize - '0' as usize),
             KeyCode::Char('n') if ctrl => return self.new_tab_here(),
             KeyCode::Char('w') if alt && n > 0 => return self.close_tab(self.active),
             KeyCode::Char(c @ '1'..='9') if alt => return self.goto_tab(c as usize - '1' as usize),
@@ -1653,10 +1661,11 @@ impl App {
     /// The tabs shown in the mosaic: up to four, in bar order; the active tab is always one of them.
     pub fn mosaic_tabs(&self) -> Vec<usize> {
         let mut all = self.bar_tabs();
-        if all.len() > 4 {
-            all.truncate(4);
+        let max = self.mosaic_n.clamp(2, 4);
+        if all.len() > max {
+            all.truncate(max);
             if !all.contains(&self.active) && self.active < self.tabs.len() {
-                all[3] = self.active;
+                all[max - 1] = self.active;
             }
         }
         all
@@ -1678,6 +1687,40 @@ impl App {
             _ => return None,
         };
         (t < n).then_some(t)
+    }
+
+    /// Alt+1..4: one terminal, or two, three or four at once. Missing terminals are opened beside this one.
+    fn show_terminals(&mut self, count: usize) {
+        if count == 1 {
+            self.mosaic = false;
+            self.broadcast = false;
+            return self.goto_tab(0);
+        }
+        while self.tabs.len() < count {
+            let before = self.tabs.len();
+            self.new_tab_here();
+            if self.tabs.len() == before {
+                break;
+            }
+        }
+        if self.tabs.len() < 2 {
+            return;
+        }
+        self.join_groups();
+        self.mosaic = true;
+        self.mosaic_n = count;
+        self.focus = Focus::Terminal;
+        let shown = self.mosaic_tabs().len();
+        self.set_flash(format!("{shown} terminals at once · Alt+arrows move between them · Alt+Shift+arrows move the terminal"));
+    }
+
+    /// Alt+arrows in the mosaic: the keyboard goes to the terminal on that side.
+    fn focus_in_mosaic(&mut self, dx: i32, dy: i32) {
+        let shown = self.mosaic_tabs();
+        let Some(s) = shown.iter().position(|&i| i == self.active) else { return };
+        if let Some(t) = Self::mosaic_neighbour(s, shown.len(), dx, dy) {
+            self.focus_tab(shown[t]);
+        }
     }
 
     /// Swaps two tabs of the mosaic: they trade places in the bar, so they trade boxes on screen.
@@ -1716,6 +1759,7 @@ impl App {
         }
         self.join_groups();
         self.mosaic = true;
+        self.mosaic_n = 4;
         self.set_flash("Mosaic: up to 4 terminals at once (Alt+M to leave)");
     }
 
@@ -1730,6 +1774,7 @@ impl App {
         }
         self.join_groups();
         self.mosaic = true;
+        self.mosaic_n = 4;
         self.broadcast = true;
         let n = self.mosaic_tabs().len();
         self.set_flash(format!("BROADCAST on: what you type goes to all {n} terminals (Alt+B to stop)"));
@@ -3225,6 +3270,24 @@ mod tests {
         assert!(app.broadcast && app.mosaic);
         app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
         assert!(!app.mosaic && !app.broadcast, "leaving the mosaic stops the broadcast");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn alt_digits_choose_how_many_terminals_are_shown() {
+        let mut app = app_with_servers(1);
+        app.open_server(LOCAL);
+        app.on_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
+        assert!(app.mosaic);
+        assert_eq!(app.tabs.len(), 3, "the missing terminal is opened");
+        assert_eq!(app.mosaic_tabs().len(), 3);
+        app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT));
+        assert_eq!(app.mosaic_tabs().len(), 2);
+        let before = app.active;
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_ne!(app.active, before, "Alt+← moves to the terminal on the left");
+        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
+        assert!(!app.mosaic);
     }
 
     #[test]
