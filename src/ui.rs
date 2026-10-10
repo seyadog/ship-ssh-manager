@@ -129,6 +129,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.layout.modal.clear();
     app.layout.mosaic.clear();
     app.layout.mosaic_splits.clear();
+    app.layout.mosaic_close.clear();
 
     let [main, status] = RLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     // One column: Projects on top, Servers below.
@@ -533,13 +534,19 @@ fn draw_mosaic(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             c_muted()
         };
+        let shown = fit(&title, (full.width as usize).saturating_sub(18));
+        // the × sits right after the name: " ◆ name × "
+        let close_x = full.x + 1 + 1 + 2 + shown.width() as u16 + 1;
+        app.layout.mosaic_close.push((i, Rect::new(close_x.saturating_sub(1), full.y, 3, 1)));
         let mut spans = vec![
             Span::raw(" "),
             Span::styled(if dead { "◇ " } else { "◆ " }, Style::new().fg(if dead { c_red() } else { server_color(server_id) })),
             Span::styled(
-                fit(&title, (full.width as usize).saturating_sub(16)),
+                shown,
                 Style::new().fg(if active { c_fg() } else { c_muted() }).add_modifier(if active { Modifier::BOLD } else { Modifier::empty() }),
             ),
+            Span::raw(" "),
+            Span::styled("×", Style::new().fg(c_red()).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
         ];
         if broadcast && !dead {

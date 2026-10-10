@@ -99,7 +99,7 @@ Like a tiling terminal: `▦ mosaic` (bottom of the sidebar, or `Alt+M`) shows y
 - `Alt+arrows` move the keyboard to the terminal on that side; `Alt+Shift+arrows` swap the active terminal with the one there.
 - A new tab joins the mosaic by splitting the terminal you were on; a tab picked from the bar takes its place; closing a terminal gives its room to its neighbour. `Alt+M` again goes back to one terminal.
 
-To start, `Alt+M` arranges up to four terminals in a grid.
+It arranges itself like Hyprland's default: each new terminal splits the one you were on, beside it when that box is wide and below it when it is tall (never leaving a box too small to use); `Alt+M` starts with up to six terminals that way. Then drag them wherever you want. The **×** next to a terminal's name closes it.
 
 `⇉ broadcast` (or `Alt+B`) sends **everything you type or paste to all the terminals of the mosaic** at once, so you can run the same command on several machines. While it is on, every title says `BROADCAST` in red and so does the status bar. It stops by itself when you leave the mosaic or fewer than two sessions are left. Only the terminals you can see receive it; sessions that ended are skipped.
 

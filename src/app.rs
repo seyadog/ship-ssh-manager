@@ -602,6 +602,8 @@ pub struct Layout {
     pub mosaic_area: Rect,
     /// The divisions of the mosaic, as drawn (to drag them).
     pub mosaic_splits: Vec<SplitInfo>,
+    /// The × of each terminal of the mosaic (tab index, where to click).
+    pub mosaic_close: Vec<(usize, Rect)>,
     /// The draggable line between the groups, and the whole area they share.
     pub divider: Rect,
     pub split_area: Rect,
@@ -1535,8 +1537,12 @@ impl App {
             if let (true, Some(p)) = (new_ids.contains(&active), prev) {
                 // a new terminal: it splits the box that had the keyboard, the way it was asked for or where it fits
                 let boxed = self.layout.mosaic.iter().find(|(i, _)| self.tabs.get(*i).is_some_and(|t| t.id == p)).map(|&(_, r)| r);
-                let side_by_side = self.pending_split.unwrap_or_else(|| boxed.is_none_or(|r| r.width >= r.height * 2));
-                tree.dock(p, active, if side_by_side { Side::Right } else { Side::Bottom });
+                let side = match self.pending_split {
+                    Some(true) => Side::Right,
+                    Some(false) => Side::Bottom,
+                    None => boxed.map_or(Side::Right, mosaic::auto_side),
+                };
+                tree.dock(p, active, side);
             } else if let Some(p) = prev {
                 tree.replace(p, active);
             } else if let Some(&first) = tree.leaves().first() {
@@ -1823,20 +1829,21 @@ impl App {
         }
     }
 
-    /// Turns the mosaic on with these tabs (indices), the active one included: up to four to start with.
+    /// Turns the mosaic on with these tabs (indices), the active one included: up to six to start with, each splitting the one before like Hyprland.
     fn start_mosaic(&mut self, mut tabs: Vec<usize>) {
-        if tabs.len() > 4 {
-            tabs.truncate(4);
+        if tabs.len() > 6 {
+            tabs.truncate(6);
         }
         if !tabs.contains(&self.active) && self.active < self.tabs.len() {
-            if tabs.len() >= 4 {
+            if tabs.len() >= 6 {
                 tabs.pop();
             }
             tabs.push(self.active);
         }
         self.join_groups();
         let ids: Vec<u64> = tabs.into_iter().map(|i| self.tabs[i].id).collect();
-        self.mosaic_tree = Some(Tree::balanced(&ids, true));
+        let area = if self.layout.content.width > 0 { self.layout.content } else { Rect::new(0, 0, 160, 50) };
+        self.mosaic_tree = Some(mosaic::dwindle(&ids, area));
         self.mosaic_prev = self.tabs.get(self.active).map(|t| t.id);
         self.mosaic = true;
     }
@@ -2487,6 +2494,9 @@ impl App {
             return;
         }
         if self.mosaic {
+            if let Some(&(i, _)) = self.layout.mosaic_close.iter().find(|(_, r)| inside(*r, x, y)) {
+                return self.close_tab(i);
+            }
             // the line between two terminals: drag it to resize (both borders count)
             let grab = self.layout.mosaic_splits.iter().find(|s| {
                 let on_line = if s.side { x + 1 == s.at || x == s.at } else { y + 1 == s.at || y == s.at };
@@ -3395,7 +3405,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn the_mosaic_shows_up_to_four_tabs_and_broadcast_needs_two() {
+    fn the_mosaic_shows_the_open_tabs_and_broadcast_needs_two() {
         let mut app = app_with_servers(1);
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
         assert!(!app.broadcast, "one session is not enough to broadcast");
@@ -3407,7 +3417,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
         assert!(app.mosaic);
         let shown = app.mosaic_tabs();
-        assert_eq!(shown.len(), 4, "at most 2x2");
+        assert_eq!(shown.len(), 5, "every open terminal, up to six");
         assert!(shown.contains(&app.active), "the active tab is always shown");
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
         assert!(app.broadcast && app.mosaic);

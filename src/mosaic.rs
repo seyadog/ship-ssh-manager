@@ -158,6 +158,29 @@ impl Tree {
     }
 }
 
+/// Where a new terminal goes when it splits the box `r` by itself: beside it when the box is wide (a cell is about
+/// twice as tall as wide), below it when it is tall, and never leaving a box too small to use if the other way fits.
+pub fn auto_side(r: Rect) -> Side {
+    let wide = r.width >= r.height * 2;
+    let fits_beside = r.width / 2 >= 20;
+    let fits_below = r.height / 2 >= 6;
+    if wide && (fits_beside || !fits_below) || !wide && !fits_below && fits_beside {
+        Side::Right
+    } else {
+        Side::Bottom
+    }
+}
+
+/// Like Hyprland's default layout: each terminal splits the one before it, beside or below by the shape of its box.
+pub fn dwindle(ids: &[u64], area: Rect) -> Tree {
+    let mut tree = Tree::Leaf(ids[0]);
+    for pair in ids.windows(2) {
+        let r = tree.layout(area).0.iter().find(|(i, _)| *i == pair[0]).map(|&(_, r)| r).unwrap_or(area);
+        tree.dock(pair[0], pair[1], auto_side(r));
+    }
+    tree
+}
+
 /// The side of `r` a pointer at (x, y) is closest to, when it is near the edge; `None` in the middle.
 pub fn dock_side(r: Rect, x: u16, y: u16) -> Option<Side> {
     let fx = (x.saturating_sub(r.x)) as f32 / r.width.max(1) as f32;
@@ -232,6 +255,22 @@ mod tests {
         // 4 is above 1, 2 is to the right of 1, 3 is below 2, 5 is left of 3
         let at = |id| boxes.iter().find(|(i, _)| *i == id).unwrap().1;
         assert!(at(4).y < at(1).y && at(2).x > at(1).x && at(3).y > at(2).y && at(5).x < at(3).x);
+    }
+
+    #[test]
+    fn terminals_open_by_themselves_like_hyprland() {
+        // a wide screen: the second goes beside, the third below the second, the fourth beside it...
+        let t = dwindle(&[1, 2, 3, 4], Rect::new(0, 0, 160, 50));
+        let (boxes, _) = t.layout(Rect::new(0, 0, 160, 50));
+        assert_eq!(boxes.len(), 4);
+        let at = |id| boxes.iter().find(|(i, _)| *i == id).unwrap().1;
+        assert!(at(2).x > at(1).x);
+        assert!(at(3).y > at(2).y);
+        assert!(boxes.iter().all(|(_, r)| r.width >= 20 && r.height >= 6), "{boxes:?}");
+        assert_eq!(auto_side(Rect::new(0, 0, 100, 20)), Side::Right);
+        assert_eq!(auto_side(Rect::new(0, 0, 50, 40)), Side::Bottom);
+        assert_eq!(auto_side(Rect::new(0, 0, 30, 40)), Side::Bottom);
+        assert_eq!(auto_side(Rect::new(0, 0, 60, 10)), Side::Right, "too short to split below");
     }
 
     #[test]
