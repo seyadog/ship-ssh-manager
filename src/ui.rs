@@ -128,6 +128,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.layout.toolbar.clear();
     app.layout.modal.clear();
     app.layout.mosaic.clear();
+    app.layout.mosaic_splits.clear();
 
     let [main, status] = RLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     // One column: Projects on top, Servers below.
@@ -251,7 +252,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         Style::new().fg(c_fg()).bg(c_sel())
     };
     let mut bx = area.x + 2;
-    for (label, hit, style) in [(" ▦ mosaic ", Hit::Mosaic, mosaic_style), (" ⇉ broadcast ", Hit::Broadcast, bcast_style), (" ▤ layout ", Hit::MosaicShape, Style::new().fg(c_fg()).bg(c_sel()))] {
+    for (label, hit, style) in [(" ▦ mosaic ", Hit::Mosaic, mosaic_style), (" ⇉ broadcast ", Hit::Broadcast, bcast_style)] {
         let w = label.width() as u16;
         if bx + w > area.x + area.width - 1 {
             break;
@@ -506,18 +507,19 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     draw_terminal(f, app, idx, area, true);
 }
 
-/// Up to four terminals at once: one box each, with a border and a title. The active one shows the cursor; with the
+/// The terminals of the mosaic: one box each, with a border and a title. The active one shows the cursor; with the
 /// broadcast on, every title says so, in red.
 fn draw_mosaic(f: &mut Frame, app: &mut App, area: Rect) {
-    let tabs = app.mosaic_tabs();
-    let n = tabs.len();
-    if n == 0 || area.width < 4 || area.height < 4 {
+    let Some(tree) = app.mosaic_tree.clone() else { return };
+    if area.width < 4 || area.height < 4 {
         return;
     }
     app.layout.mosaic_area = area;
-    let rects = mosaic_slots(n, app.mosaic_shape, area);
+    let (boxes, splits) = tree.layout(area);
+    app.layout.mosaic_splits = splits;
     let broadcast = app.broadcast;
-    for (&i, full) in tabs.iter().zip(rects) {
+    for (id, full) in boxes {
+        let Some(i) = app.tabs.iter().position(|t| t.id == id) else { continue };
         app.layout.mosaic.push((i, full));
         let active = i == app.active;
         let (title, dead, server_id) = {
@@ -556,6 +558,11 @@ fn draw_mosaic(f: &mut Frame, app: &mut App, area: Rect) {
         if body.height > 0 && body.width > 0 {
             draw_terminal(f, app, i, body, active);
         }
+    }
+    // Where a dragged tab would dock.
+    if let Some(zone) = app.dock_hint {
+        let hint = Block::bordered().border_type(BorderType::Double).border_style(Style::new().fg(c_amber()).add_modifier(Modifier::BOLD));
+        f.render_widget(hint, zone);
     }
 }
 

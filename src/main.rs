@@ -6,6 +6,7 @@ mod daemon;
 #[path = "daemon_stub.rs"]
 mod daemon;
 mod keys;
+mod mosaic;
 mod session;
 mod settings;
 mod store;
