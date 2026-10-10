@@ -91,7 +91,7 @@ The **tab bar** at the top is like a browser's: it shows every tab. Pick one wit
 
 ## Mosaic and broadcast
 
-Like a tiling terminal: `▦ mosaic` (bottom of the sidebar, or `Alt+M`) shows your open sessions at once, each in its own bordered box with its title (the active one has a thick, coloured border). The screen is a tree of divisions: every division is side by side or stacked and can be split again, so **any arrangement** works, with as many terminals as fit. Build it your way:
+Like a tiling terminal. At the bottom of the sidebar, two buttons choose the mode that stays (the lit one is in use; `Alt+M` switches): `▤ tabs` (each new terminal is its own tab) or `▦ mosaic` (every new terminal tiles into the mosaic by itself, when you open it with a click or the keyboard). The choice is remembered between runs. The mosaic shows your open sessions at once, each in its own bordered box with its title (the active one has a thick, coloured border). The screen is a tree of divisions: every division is side by side or stacked and can be split again, so **any arrangement** works, with as many terminals as fit. Build it your way:
 
 - `Alt+V` opens a new terminal to the **right** of the active one, `Alt+H` **below** it (from a single terminal too: that starts the mosaic). Do it again on any box to keep splitting.
 - **Drag a tab** from the bar (or a box by its title) onto a terminal: near its left, right, top or bottom edge it docks there and takes half of it (the zone is outlined while you drag); in the middle it trades places with that box. Dragging a tab onto the screen when there is no mosaic yet starts one with the tab you were on.

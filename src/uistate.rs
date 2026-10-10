@@ -9,6 +9,9 @@ pub struct UiState {
     /// Bastions (server ids) shown unfolded in the bastions section of the SSH view.
     #[serde(default)]
     pub open_nodes: Vec<u64>,
+    /// Mosaic mode: new terminals tile by themselves (else each is its own tab).
+    #[serde(default)]
+    pub mosaic_mode: bool,
 }
 
 impl UiState {
@@ -40,7 +43,7 @@ mod tests {
     fn round_trips_and_defaults_to_closed() {
         let dir = std::env::temp_dir().join(format!("ship-ui-{}", std::process::id()));
         let path = dir.join("state.json");
-        let s = UiState { open_nodes: vec![3, 7] };
+        let s = UiState { open_nodes: vec![3, 7], ..Default::default() };
         s.save_to(&path).unwrap();
         let t: UiState = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(t.open_nodes, vec![3, 7]);

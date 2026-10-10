@@ -549,6 +549,7 @@ pub enum Hit {
     NewTab,
     NewTabRight,
     Mosaic,
+    Tabs,
     Broadcast,
     Field(usize),
     Browse,
@@ -657,6 +658,8 @@ pub struct App {
     pub flash: Option<(String, Instant)>,
     /// Up to four terminals shown at once, in a grid.
     pub mosaic: bool,
+    /// The mode that stays: with it on, new terminals tile into the mosaic by themselves; off, each is its own tab.
+    pub mosaic_mode: bool,
     /// The mosaic: a tree of divisions whose leaves are tab ids.
     pub mosaic_tree: Option<Tree>,
     /// The way the next terminal opened joins the mosaic (Alt+V / Alt+H): side by side (true) or below.
@@ -710,6 +713,7 @@ impl App {
             quit: false,
             flash: None,
             mosaic: false,
+            mosaic_mode: false,
             mosaic_tree: None,
             pending_split: None,
             dock_hint: None,
@@ -906,7 +910,7 @@ impl App {
         }
         let mut open_nodes: Vec<u64> = self.jump_open.iter().copied().collect();
         open_nodes.sort_unstable();
-        let state = crate::uistate::UiState { open_nodes };
+        let state = crate::uistate::UiState { open_nodes, mosaic_mode: self.mosaic_mode };
         if let Err(e) = state.save_to(&self.ui_path) {
             self.set_flash(format!("Could not save the sidebar state: {e}"));
         }
@@ -1515,6 +1519,9 @@ impl App {
             self.shown[t.right as usize] = Some(t.id);
         }
         self.sync_mosaic(new_ids);
+        if self.mosaic_mode && !self.mosaic && self.tabs.len() >= 2 {
+            self.start_mosaic(self.bar_tabs());
+        }
     }
 
     /// Keeps the mosaic in step with the tabs: closed ones leave it, a new tab joins it by splitting the box that
@@ -1663,7 +1670,7 @@ impl App {
             }
             KeyCode::F(2) if n > 0 => return self.rename_tab_prompt(),
             KeyCode::F(8) => return self.toggle_theme(),
-            KeyCode::Char('m') if alt && !ctrl => return self.toggle_mosaic(),
+            KeyCode::Char('m') if alt && !ctrl => return self.set_mosaic_mode(!self.mosaic_mode),
             KeyCode::Char('b') if alt && !ctrl => return self.toggle_broadcast(),
             KeyCode::Char('v') if alt && !ctrl => return self.split_active(true),
             KeyCode::Char('h') if alt && !ctrl => return self.split_active(false),
@@ -1758,6 +1765,7 @@ impl App {
             self.mosaic_tree = Some(Tree::Leaf(active));
             self.mosaic_prev = Some(active);
             self.mosaic = true;
+            self.mosaic_mode = true;
         }
         self.pending_split = Some(side_by_side);
         let before = self.tabs.len();
@@ -1846,19 +1854,23 @@ impl App {
         self.mosaic_tree = Some(mosaic::dwindle(&ids, area));
         self.mosaic_prev = self.tabs.get(self.active).map(|t| t.id);
         self.mosaic = true;
+        self.mosaic_mode = true;
     }
 
-    /// Alt+M / the mosaic button: shows up to four terminals at once, or goes back to one.
-    fn toggle_mosaic(&mut self) {
-        if self.mosaic {
+    /// Alt+M and the `tabs` / `mosaic` buttons: the mode that stays. In mosaic mode every new terminal tiles into
+    /// the mosaic by itself; in tabs mode each one is its own tab.
+    fn set_mosaic_mode(&mut self, on: bool) {
+        self.mosaic_mode = on;
+        if on {
+            if self.tabs.len() >= 2 && !self.mosaic {
+                self.start_mosaic(self.bar_tabs());
+            }
+            self.set_flash("Mosaic mode: new terminals tile by themselves · Alt+V / Alt+H split · drag to place them · Alt+M for tabs");
+        } else {
             self.end_mosaic();
-            return self.set_flash("Mosaic off");
+            self.set_flash("Tabs mode: each new terminal is its own tab · Alt+M for the mosaic");
         }
-        if self.tabs.len() < 2 {
-            return self.set_flash("Open at least two sessions to use the mosaic");
-        }
-        self.start_mosaic(self.bar_tabs());
-        self.set_flash("Mosaic: Alt+V / Alt+H split · Alt+arrows move between terminals · drag a tab to an edge of a terminal to dock it (Alt+M to leave)");
+        self.save_ui();
     }
 
     /// Alt+B / the broadcast button: what you type goes to every terminal of the mosaic.
@@ -1886,7 +1898,8 @@ impl App {
             Hit::Vault => self.modal = self.gate(Pending::OpenVault),
             Hit::Edit => self.edit_selected(),
             Hit::NewTab => self.new_tab_here(),
-            Hit::Mosaic => self.toggle_mosaic(),
+            Hit::Mosaic => self.set_mosaic_mode(true),
+            Hit::Tabs => self.set_mosaic_mode(false),
             Hit::Broadcast => self.toggle_broadcast(),
             Hit::NewTabRight => {
                 if let Some(i) = self.pane_tab(true) {
@@ -2695,6 +2708,7 @@ impl App {
                             self.mosaic_tree = Some(Tree::Leaf(self.tabs[base].id));
                             self.mosaic_prev = Some(self.tabs[base].id);
                             self.mosaic = true;
+                            self.mosaic_mode = true;
                             let side = mosaic::dock_side(self.layout.content, x, y).unwrap_or(Side::Right);
                             self.drop_on_mosaic(from, Some(base), Some(side));
                         }
@@ -3475,5 +3489,28 @@ mod tests {
         assert_eq!(app.mosaic_tabs().len(), 2);
         app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
         assert!(!app.mosaic, "one terminal left: back to the normal view");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mosaic_mode_tiles_new_terminals_and_tabs_mode_keeps_tabs() {
+        let mut app = app_with_servers(1);
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert!(app.mosaic_mode && !app.mosaic, "one terminal: nothing to tile yet");
+        app.open_server(LOCAL);
+        app.sync_bar();
+        assert!(!app.mosaic);
+        app.open_server(LOCAL);
+        app.sync_bar();
+        assert!(app.mosaic, "the second terminal starts the mosaic by itself");
+        app.open_server(LOCAL);
+        app.sync_bar();
+        assert_eq!(app.mosaic_tabs().len(), 3, "and the next ones tile into it");
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert!(!app.mosaic_mode && !app.mosaic);
+        app.open_server(LOCAL);
+        app.sync_bar();
+        assert!(!app.mosaic, "tabs mode: a new terminal is a new tab");
+        assert_eq!(app.tabs.len(), 4);
     }
 }

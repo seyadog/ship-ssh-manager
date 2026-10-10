@@ -230,40 +230,48 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
     // The list keeps two columns of margin on the left and a little on the right.
     let inner = Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(5), area.height.saturating_sub(3));
-    // The actions, as small padded buttons along the bottom.
+    // The bottom: a faint line, the actions, and the mode (tabs or mosaic) with the broadcast.
+    let sep_y = area.y + area.height - 3;
+    let sep_w = area.width.saturating_sub(5);
+    f.render_widget(Paragraph::new("─".repeat(sep_w as usize)).style(Style::new().fg(c_muted())), Rect::new(area.x + 2, sep_y, sep_w, 1));
+    let right_edge = area.x + area.width - 2;
+    let button = |f: &mut Frame, app: &mut App, x: u16, y: u16, label: &str, hit: Hit, style: Style| -> Option<u16> {
+        let w = label.width() as u16;
+        if x + w > right_edge {
+            return None;
+        }
+        let r = Rect::new(x, y, w, 1);
+        f.render_widget(Paragraph::new(label.to_string()).style(style), r);
+        app.layout.toolbar.push((r, hit));
+        Some(x + w)
+    };
+    let idle = Style::new().fg(c_fg()).bg(c_sel());
     let by = area.y + area.height - 2;
     let actions: [(&str, Hit); 4] = [(" + new ", Hit::NewServer), (" edit ", Hit::Edit), (" term ", Hit::Term), (" vault ", Hit::Vault)];
     let mut bx = area.x + 2;
     for (n, (label, hit)) in actions.into_iter().enumerate() {
-        let w = label.width() as u16;
-        if bx + w > area.x + area.width - 2 {
-            break;
+        let style = if n == 0 { Style::new().fg(c_accent()).bg(c_sel()).add_modifier(Modifier::BOLD) } else { idle };
+        match button(f, app, bx, by, label, hit, style) {
+            Some(end) => bx = end + 1,
+            None => break,
         }
-        let r = Rect::new(bx, by, w, 1);
-        f.render_widget(Paragraph::new(label).style(Style::new().fg(if n == 0 { c_accent() } else { c_fg() }).bg(c_sel())), r);
-        app.layout.toolbar.push((r, hit));
-        bx += w + 1;
     }
-    // The last line: the mosaic and the broadcast, which act on several terminals at once.
+    // Two buttons side by side, the lit one is the mode in use; then the broadcast.
     let ly = area.y + area.height - 1;
-    let mosaic_style = if app.mosaic { Style::new().fg(Color::Black).bg(c_accent()) } else { Style::new().fg(c_fg()).bg(c_sel()) };
-    let bcast_style = if app.broadcast {
-        Style::new().fg(Color::Black).bg(c_red()).add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(c_fg()).bg(c_sel())
-    };
+    let lit = Style::new().fg(Color::Black).bg(c_accent()).add_modifier(Modifier::BOLD);
+    let (tabs_style, mosaic_style) = if app.mosaic_mode { (idle, lit) } else { (lit, idle) };
     let mut bx = area.x + 2;
-    for (label, hit, style) in [(" ▦ mosaic ", Hit::Mosaic, mosaic_style), (" ⇉ broadcast ", Hit::Broadcast, bcast_style)] {
-        let w = label.width() as u16;
-        if bx + w > area.x + area.width - 1 {
-            break;
+    if let Some(end) = button(f, app, bx, ly, " ▤ tabs ", Hit::Tabs, tabs_style) {
+        bx = end;
+        if let Some(end) = button(f, app, bx, ly, " ▦ mosaic ", Hit::Mosaic, mosaic_style) {
+            bx = end + 1;
+            let bcast = if app.broadcast { Style::new().fg(Color::Black).bg(c_red()).add_modifier(Modifier::BOLD) } else { idle };
+            if button(f, app, bx, ly, " ⇉ all ", Hit::Broadcast, bcast).is_none() {
+                button(f, app, bx, ly, " ⇉ ", Hit::Broadcast, bcast);
+            }
         }
-        let r = Rect::new(bx, ly, w, 1);
-        f.render_widget(Paragraph::new(label).style(style), r);
-        app.layout.toolbar.push((r, hit));
-        bx += w + 1;
     }
-    let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(2));
+    let list = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(3));
     draw_list(f, app, list, focused);
 }
 
