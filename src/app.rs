@@ -620,6 +620,9 @@ enum Drag {
     Divider,
 }
 
+/// The mosaic is two columns by two rows at most.
+const MOSAIC_MAX: usize = 4;
+
 // ---------------------------------------------------------------- app
 
 pub struct App {
@@ -1515,7 +1518,7 @@ impl App {
         self.mosaic_ids.retain(|id| tabs.iter().any(|t| t.id == *id));
         let Some(active) = self.tabs.get(self.active).map(|t| t.id) else { return };
         if !self.mosaic_ids.contains(&active) {
-            if new_ids.contains(&active) {
+            if new_ids.contains(&active) && self.mosaic_ids.len() < MOSAIC_MAX {
                 self.mosaic_ids.push(active);
             } else if let Some(p) = self.mosaic_prev.and_then(|p| self.mosaic_ids.iter().position(|&x| x == p)) {
                 self.mosaic_ids[p] = active;
@@ -1742,6 +1745,10 @@ impl App {
             if let Some(to) = to.filter(|&t| t != from) {
                 self.swap_in_mosaic(from, to);
             }
+        } else if self.mosaic_ids.len() >= MOSAIC_MAX {
+            // full: it takes the place of the box it lands on
+            let at = to.and_then(|t| self.mosaic_ids.iter().position(|&x| x == self.tabs[t].id)).unwrap_or(MOSAIC_MAX - 1);
+            self.mosaic_ids[at] = fid;
         } else {
             let at = to.and_then(|t| self.mosaic_ids.iter().position(|&x| x == self.tabs[t].id)).unwrap_or(self.mosaic_ids.len());
             self.mosaic_ids.insert(at, fid);
@@ -1768,7 +1775,13 @@ impl App {
 
     /// Turns the mosaic on with these tabs (indices), the active one included.
     fn start_mosaic(&mut self, mut tabs: Vec<usize>) {
+        if tabs.len() > MOSAIC_MAX {
+            tabs.truncate(MOSAIC_MAX);
+        }
         if !tabs.contains(&self.active) && self.active < self.tabs.len() {
+            if tabs.len() >= MOSAIC_MAX {
+                tabs.pop();
+            }
             tabs.push(self.active);
         }
         self.join_groups();
@@ -3297,7 +3310,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
         assert!(app.mosaic);
         let shown = app.mosaic_tabs();
-        assert_eq!(shown.len(), 5, "every open terminal");
+        assert_eq!(shown.len(), 4, "at most 2x2");
         assert!(shown.contains(&app.active), "the active tab is always shown");
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
         assert!(app.broadcast && app.mosaic);
