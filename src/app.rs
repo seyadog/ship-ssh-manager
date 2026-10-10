@@ -549,6 +549,7 @@ pub enum Hit {
     NewTabRight,
     Mosaic,
     Broadcast,
+    MosaicShape,
     Field(usize),
     Browse,
     Save,
@@ -623,6 +624,37 @@ enum Drag {
 /// The mosaic is two columns by two rows at most.
 const MOSAIC_MAX: usize = 4;
 
+/// How many arrangements there are for `n` terminals: two can be side by side or stacked; three can have the
+/// odd one on top, at the bottom, on the left or on the right.
+pub fn mosaic_shapes(n: usize) -> usize {
+    match n {
+        2 => 2,
+        3 => 4,
+        _ => 1,
+    }
+}
+
+/// The boxes of the mosaic inside `area`, in slot order, for `n` terminals and arrangement `shape`.
+pub fn mosaic_slots(n: usize, shape: usize, area: Rect) -> Vec<Rect> {
+    let (hw, hh) = (area.width / 2, area.height / 2);
+    let (x2, y2, w2, h2) = (area.x + hw, area.y + hh, area.width - hw, area.height - hh);
+    let tl = Rect::new(area.x, area.y, hw, hh);
+    let tr = Rect::new(x2, area.y, w2, hh);
+    let bl = Rect::new(area.x, y2, hw, h2);
+    let br = Rect::new(x2, y2, w2, h2);
+    let shape = shape % mosaic_shapes(n).max(1);
+    match (n, shape) {
+        (0 | 1, _) => vec![area],
+        (2, 0) => vec![Rect::new(area.x, area.y, hw, area.height), Rect::new(x2, area.y, w2, area.height)],
+        (2, _) => vec![Rect::new(area.x, area.y, area.width, hh), Rect::new(area.x, y2, area.width, h2)],
+        (3, 0) => vec![Rect::new(area.x, area.y, area.width, hh), bl, br],
+        (3, 1) => vec![tl, tr, Rect::new(area.x, y2, area.width, h2)],
+        (3, 2) => vec![Rect::new(area.x, area.y, hw, area.height), tr, br],
+        (3, _) => vec![tl, bl, Rect::new(x2, area.y, w2, area.height)],
+        _ => vec![tl, tr, bl, br],
+    }
+}
+
 // ---------------------------------------------------------------- app
 
 pub struct App {
@@ -655,6 +687,8 @@ pub struct App {
     pub mosaic: bool,
     /// The tabs of the mosaic (ids), in slot order: two columns, as many rows as needed.
     pub mosaic_ids: Vec<u64>,
+    /// Which arrangement the mosaic uses for its number of terminals (see `mosaic_slots`).
+    pub mosaic_shape: usize,
     /// The last tab of the mosaic that had the keyboard: a tab picked from outside takes its place.
     mosaic_prev: Option<u64>,
     /// The tab that had the focus before a tab of the bar was picked up to be dragged.
@@ -703,6 +737,7 @@ impl App {
             flash: None,
             mosaic: false,
             mosaic_ids: vec![],
+            mosaic_shape: 0,
             mosaic_prev: None,
             before_drag: None,
             broadcast: false,
@@ -1632,6 +1667,7 @@ impl App {
             KeyCode::F(8) => return self.toggle_theme(),
             KeyCode::Char('m') if alt && !ctrl => return self.toggle_mosaic(),
             KeyCode::Char('b') if alt && !ctrl => return self.toggle_broadcast(),
+            KeyCode::Char('l') if alt && !ctrl => return self.cycle_mosaic_shape(),
             KeyCode::Char('k') if alt => return self.open_search(),
             KeyCode::Char('p') if alt && self.sudo_ready() => {
                 self.modal = self.gate(Pending::FillSudo(self.active));
@@ -1706,26 +1742,44 @@ impl App {
         self.mosaic_ids.iter().filter_map(|id| self.tabs.iter().position(|t| t.id == *id)).collect()
     }
 
-    /// Where the tab in mosaic slot `s` goes when pushed (dx, dy) in a mosaic of `n` terminals: slots run
-    /// left to right, top to bottom, two per row; with an odd number the last one takes the whole row.
-    pub fn mosaic_neighbour(s: usize, n: usize, dx: i32, dy: i32) -> Option<usize> {
-        let (col, row) = (s % 2, s / 2);
-        let wide = n > 1 && n % 2 == 1 && s == n - 1;
-        match (dx, dy) {
-            (-1, 0) if col == 1 => Some(s - 1),
-            (1, 0) if col == 0 && !wide && s + 1 < n => Some(s + 1),
-            (0, -1) if row > 0 => Some(s - 2),
-            (0, 1) if s + 2 < n => Some(s + 2),
-            (0, 1) if n % 2 == 1 && n > 2 && row + 1 == (n - 1) / 2 => Some(n - 1),
-            _ => None,
+    /// The slot next to slot `s` in direction (dx, dy), by where the boxes really are.
+    pub fn mosaic_neighbour(s: usize, n: usize, shape: usize, dx: i32, dy: i32) -> Option<usize> {
+        let rects = mosaic_slots(n, shape, Rect::new(0, 0, 1000, 1000));
+        let cur = *rects.get(s)?;
+        let overlap = |a0: u16, a1: u16, b0: u16, b1: u16| (a1.min(b1) as i32 - a0.max(b0) as i32).max(0);
+        rects
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != s)
+            .filter_map(|(i, r)| {
+                let (gap, side) = match (dx, dy) {
+                    (-1, 0) => (cur.x as i32 - (r.x + r.width) as i32, overlap(cur.y, cur.y + cur.height, r.y, r.y + r.height)),
+                    (1, 0) => (r.x as i32 - (cur.x + cur.width) as i32, overlap(cur.y, cur.y + cur.height, r.y, r.y + r.height)),
+                    (0, -1) => (cur.y as i32 - (r.y + r.height) as i32, overlap(cur.x, cur.x + cur.width, r.x, r.x + r.width)),
+                    _ => (r.y as i32 - (cur.y + cur.height) as i32, overlap(cur.x, cur.x + cur.width, r.x, r.x + r.width)),
+                };
+                (gap >= 0 && side > 0).then_some((i, gap, side))
+            })
+            .min_by_key(|&(_, gap, side)| (gap, -side))
+            .map(|(i, _, _)| i)
+    }
+
+    /// Alt+L / the layout button: the next arrangement for the terminals shown (two: side by side or stacked;
+    /// three: one on top, one below, one on the left or one on the right).
+    fn cycle_mosaic_shape(&mut self) {
+        let n = self.mosaic_tabs().len();
+        let shapes = mosaic_shapes(n);
+        if !self.mosaic || shapes < 2 {
+            return self.set_flash("Layouts change with two or three terminals in the mosaic");
         }
+        self.mosaic_shape = (self.mosaic_shape + 1) % shapes;
     }
 
     /// Alt+arrows in the mosaic: the keyboard goes to the terminal on that side.
     fn focus_in_mosaic(&mut self, dx: i32, dy: i32) {
         let shown = self.mosaic_tabs();
         let Some(s) = shown.iter().position(|&i| i == self.active) else { return };
-        if let Some(t) = Self::mosaic_neighbour(s, shown.len(), dx, dy) {
+        if let Some(t) = Self::mosaic_neighbour(s, shown.len(), self.mosaic_shape, dx, dy) {
             self.focus_tab(shown[t]);
         }
     }
@@ -1760,7 +1814,7 @@ impl App {
     fn move_in_mosaic(&mut self, dx: i32, dy: i32) {
         let shown = self.mosaic_tabs();
         let Some(s) = shown.iter().position(|&i| i == self.active) else { return };
-        match Self::mosaic_neighbour(s, shown.len(), dx, dy) {
+        match Self::mosaic_neighbour(s, shown.len(), self.mosaic_shape, dx, dy) {
             Some(t) => self.swap_in_mosaic(shown[s], shown[t]),
             None => self.set_flash("Already at that edge of the mosaic"),
         }
@@ -1831,6 +1885,7 @@ impl App {
             Hit::NewTab => self.new_tab_here(),
             Hit::Mosaic => self.toggle_mosaic(),
             Hit::Broadcast => self.toggle_broadcast(),
+            Hit::MosaicShape => self.cycle_mosaic_shape(),
             Hit::NewTabRight => {
                 if let Some(i) = self.pane_tab(true) {
                     self.active = i;
@@ -3339,21 +3394,35 @@ mod tests {
 
     #[test]
     fn terminals_move_around_the_mosaic() {
-        // 2x2: right from the top-left is the top-right; down from there is the bottom-right
-        assert_eq!(App::mosaic_neighbour(0, 4, 1, 0), Some(1));
-        assert_eq!(App::mosaic_neighbour(1, 4, 0, 1), Some(3));
-        assert_eq!(App::mosaic_neighbour(3, 4, -1, 0), Some(2));
-        assert_eq!(App::mosaic_neighbour(0, 4, -1, 0), None);
-        // 3: the third one is the wide bottom
-        assert_eq!(App::mosaic_neighbour(1, 3, 0, 1), Some(2));
-        assert_eq!(App::mosaic_neighbour(2, 3, 0, -1), Some(0));
-        assert_eq!(App::mosaic_neighbour(2, 3, 1, 0), None);
-        // 2: side by side
-        assert_eq!(App::mosaic_neighbour(0, 2, 1, 0), Some(1));
-        assert_eq!(App::mosaic_neighbour(0, 2, 0, 1), None);
-        // 5: two rows of two and a wide one below
-        assert_eq!(App::mosaic_neighbour(3, 5, 0, 1), Some(4));
-        assert_eq!(App::mosaic_neighbour(1, 5, 0, 1), Some(3));
-        assert_eq!(App::mosaic_neighbour(4, 5, 0, -1), Some(2));
+        let nb = |s, n, shape, dx, dy| App::mosaic_neighbour(s, n, shape, dx, dy);
+        // 2x2
+        assert_eq!(nb(0, 4, 0, 1, 0), Some(1));
+        assert_eq!(nb(1, 4, 0, 0, 1), Some(3));
+        assert_eq!(nb(3, 4, 0, -1, 0), Some(2));
+        assert_eq!(nb(0, 4, 0, -1, 0), None);
+        // three: one on top, two below
+        assert_eq!(nb(0, 3, 0, 0, 1).is_some(), true);
+        assert_eq!(nb(2, 3, 0, 0, -1), Some(0));
+        assert_eq!(nb(1, 3, 0, 1, 0), Some(2));
+        // three: one on the left, two on the right
+        assert_eq!(nb(0, 3, 2, 1, 0).is_some(), true);
+        assert_eq!(nb(2, 3, 2, -1, 0), Some(0));
+        assert_eq!(nb(1, 3, 2, 0, 1), Some(2));
+        // three: two on the left, one on the right
+        assert_eq!(nb(2, 3, 3, -1, 0).is_some(), true);
+        assert_eq!(nb(0, 3, 3, 0, 1), Some(1));
+        // two: side by side, or stacked
+        assert_eq!(nb(0, 2, 0, 1, 0), Some(1));
+        assert_eq!(nb(0, 2, 0, 0, 1), None);
+        assert_eq!(nb(0, 2, 1, 0, 1), Some(1));
+        assert_eq!(nb(0, 2, 1, 1, 0), None);
+        // the boxes tile the screen
+        for (n, shapes) in [(1, 1), (2, 2), (3, 4), (4, 1)] {
+            for shape in 0..shapes {
+                let area = Rect::new(0, 0, 40, 20);
+                let cells: u32 = mosaic_slots(n, shape, area).iter().map(|r| r.width as u32 * r.height as u32).sum();
+                assert_eq!(cells, 40 * 20, "{n} terminals, shape {shape}");
+            }
+        }
     }
 }

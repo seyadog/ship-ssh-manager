@@ -251,7 +251,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         Style::new().fg(c_fg()).bg(c_sel())
     };
     let mut bx = area.x + 2;
-    for (label, hit, style) in [(" ▦ mosaic ", Hit::Mosaic, mosaic_style), (" ⇉ broadcast ", Hit::Broadcast, bcast_style)] {
+    for (label, hit, style) in [(" ▦ mosaic ", Hit::Mosaic, mosaic_style), (" ⇉ broadcast ", Hit::Broadcast, bcast_style), (" ▤ layout ", Hit::MosaicShape, Style::new().fg(c_fg()).bg(c_sel()))] {
         let w = label.width() as u16;
         if bx + w > area.x + area.width - 1 {
             break;
@@ -515,21 +515,7 @@ fn draw_mosaic(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     app.layout.mosaic_area = area;
-    // Two columns and as many rows as needed; an odd last terminal takes the whole row.
-    let rows = n.div_ceil(2) as u16;
-    let half_w = area.width / 2;
-    let mut rects: Vec<Rect> = vec![];
-    for s in 0..n {
-        let r = (s / 2) as u16;
-        let y = area.y + area.height * r / rows;
-        let h = area.y + area.height * (r + 1) / rows - y;
-        let wide = n == 1 || (n % 2 == 1 && s == n - 1);
-        rects.push(match (wide, s % 2) {
-            (true, _) => Rect::new(area.x, y, area.width, h),
-            (_, 0) => Rect::new(area.x, y, half_w, h),
-            _ => Rect::new(area.x + half_w, y, area.width - half_w, h),
-        });
-    }
+    let rects = mosaic_slots(n, app.mosaic_shape, area);
     let broadcast = app.broadcast;
     for (&i, full) in tabs.iter().zip(rects) {
         app.layout.mosaic.push((i, full));
