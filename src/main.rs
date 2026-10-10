@@ -49,7 +49,7 @@ fn main() -> Result<()> {
     ui::set_theme(settings.theme != "classic");
     let ui = uistate::UiState::load();
     app.jump_open = ui.open_nodes.into_iter().collect();
-    app.mosaic_mode = ui.mosaic_mode;
+    app.set_screen_modes(&ui.screen_modes);
     app.ui_path = uistate::UiState::path();
     app.rebuild();
 

@@ -147,7 +147,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.layout.content = content;
 
     draw_sidebar(f, app, side);
-    if app.mosaic && !app.tabs.is_empty() {
+    if app.mosaic {
         draw_tabs(f, app, tabbar, false);
         draw_mosaic(f, app, content);
     } else if app.is_split() {
@@ -227,6 +227,28 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let dw = (dots.len() as u16).min(area.width.saturating_sub(4));
     if dw > 0 {
         f.render_widget(Paragraph::new(Line::from(dots)), Rect::new(area.x + area.width - 2 - dw, area.y, dw, 1));
+    }
+    // The screens, Hyprland style: the ones in use and the one you are on, the lit one is where you are.
+    let mut sx = area.x + 2;
+    for s in 0..SCREENS {
+        let used = app.tabs.iter().any(|t| t.screen == s);
+        if !used && s != app.screen {
+            continue;
+        }
+        let label = format!(" {} ", s + 1);
+        let w = label.width() as u16;
+        if sx + w > area.x + area.width - 2 {
+            break;
+        }
+        let style = if s == app.screen {
+            Style::new().fg(Color::Black).bg(c_accent()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(c_fg()).bg(c_sel())
+        };
+        let r = Rect::new(sx, area.y + 1, w, 1);
+        f.render_widget(Paragraph::new(label).style(style), r);
+        app.layout.toolbar.push((r, Hit::Screen(s)));
+        sx += w + 1;
     }
     // The list keeps two columns of margin on the left and a little on the right.
     let inner = Rect::new(area.x + 2, area.y + 2, area.width.saturating_sub(5), area.height.saturating_sub(3));
@@ -512,7 +534,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     if app.blank() {
         return draw_welcome(f, area);
     }
-    let idx = app.active.min(app.tabs.len() - 1);
+    let idx = app.active.min(app.tabs.len().saturating_sub(1));
     draw_terminal(f, app, idx, area, true);
 }
 

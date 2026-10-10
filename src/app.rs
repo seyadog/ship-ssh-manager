@@ -161,6 +161,8 @@ pub struct Tab {
     pub server_id: u64,
     /// Shown in the right group of tabs (see `App::is_split`).
     pub right: bool,
+    /// The screen (workspace) this tab lives on: Alt+1, Alt+2...
+    pub screen: usize,
     pub session: Session,
     /// The last description of this tab sent to the background server.
     meta_sent: String,
@@ -550,6 +552,7 @@ pub enum Hit {
     NewTabRight,
     Mosaic,
     Tabs,
+    Screen(usize),
     Broadcast,
     Field(usize),
     Browse,
@@ -628,6 +631,26 @@ enum Drag {
     MosaicSplit(Vec<bool>, Rect, bool),
 }
 
+/// The digit a shifted number key types (US and Spanish layouts): Alt+Shift+1 arrives as Alt+`!`.
+fn shifted_digit(c: char) -> Option<usize> {
+    "!@#$%^&*(".chars().position(|x| x == c).or_else(|| "!\"·$%&/()".chars().position(|x| x == c))
+}
+
+/// How many screens there are: Alt+1 to Alt+9.
+pub const SCREENS: usize = 9;
+
+/// What a screen remembers while you are on another one (the one you are on lives in the fields of `App`).
+#[derive(Default)]
+struct ScreenState {
+    mosaic_mode: bool,
+    mosaic: bool,
+    tree: Option<Tree>,
+    prev: Option<u64>,
+    broadcast: bool,
+    /// The tab that had the keyboard.
+    active_id: Option<u64>,
+}
+
 // ---------------------------------------------------------------- app
 
 pub struct App {
@@ -660,6 +683,9 @@ pub struct App {
     pub mosaic: bool,
     /// The mode that stays: with it on, new terminals tile into the mosaic by themselves; off, each is its own tab.
     pub mosaic_mode: bool,
+    /// The screen you are on (0 is Alt+1) and what the others remember.
+    pub screen: usize,
+    screens: Vec<ScreenState>,
     /// The mosaic: a tree of divisions whose leaves are tab ids.
     pub mosaic_tree: Option<Tree>,
     /// The way the next terminal opened joins the mosaic (Alt+V / Alt+H): side by side (true) or below.
@@ -714,6 +740,8 @@ impl App {
             flash: None,
             mosaic: false,
             mosaic_mode: false,
+            screen: 0,
+            screens: (0..SCREENS).map(|_| ScreenState::default()).collect(),
             mosaic_tree: None,
             pending_split: None,
             dock_hint: None,
@@ -831,15 +859,33 @@ impl App {
 
     /// True when the content area has no terminal to show.
     pub fn blank(&self) -> bool {
-        !self.is_split() && self.tabs.is_empty()
+        !self.is_split() && self.here_count() == 0
+    }
+
+    pub fn here_count(&self) -> usize {
+        self.tabs.iter().filter(|t| t.screen == self.screen).count()
+    }
+
+    /// The tab the keyboard is on belongs to this screen: when it does not, another tab of the screen takes it.
+    fn keep_active_here(&mut self) {
+        if self.tabs.get(self.active).is_some_and(|t| t.screen == self.screen) {
+            return;
+        }
+        let want = self.screens[self.screen].active_id;
+        let here = self.bar_tabs();
+        if let Some(i) = want.and_then(|id| here.iter().copied().find(|&i| self.tabs[i].id == id)).or(here.last().copied()) {
+            self.active = i;
+        }
     }
 
     /// Keeps `active` pointing at a tab, and the keyboard off an empty terminal.
     fn fix_active(&mut self) {
-        if self.tabs.is_empty() {
-            self.focus = Focus::Sidebar;
-        } else {
+        if !self.tabs.is_empty() {
             self.active = self.active.min(self.tabs.len() - 1);
+            self.keep_active_here();
+        }
+        if self.here_count() == 0 {
+            self.focus = Focus::Sidebar;
         }
     }
 
@@ -851,6 +897,10 @@ impl App {
     /// Makes tab `idx` the one on screen.
     pub fn select_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() {
+            let screen = self.tabs[idx].screen;
+            if screen != self.screen {
+                self.switch_screen(screen);
+            }
             self.active = idx;
         }
     }
@@ -903,6 +953,14 @@ impl App {
         self.store.parent_of(self.selected_node()?)
     }
 
+    /// The mode each screen had last time (from `state.json`).
+    pub fn set_screen_modes(&mut self, modes: &[bool]) {
+        for (s, &m) in modes.iter().enumerate().take(SCREENS) {
+            self.screens[s].mosaic_mode = m;
+        }
+        self.mosaic_mode = self.screens[self.screen].mosaic_mode;
+    }
+
     /// Remembers what is open in the sidebar, for the next run.
     fn save_ui(&mut self) {
         if self.ui_path.as_os_str().is_empty() {
@@ -910,7 +968,8 @@ impl App {
         }
         let mut open_nodes: Vec<u64> = self.jump_open.iter().copied().collect();
         open_nodes.sort_unstable();
-        let state = crate::uistate::UiState { open_nodes, mosaic_mode: self.mosaic_mode };
+        let modes: Vec<bool> = (0..SCREENS).map(|s| if s == self.screen { self.mosaic_mode } else { self.screens[s].mosaic_mode }).collect();
+        let state = crate::uistate::UiState { open_nodes, screen_modes: modes };
         if let Err(e) = state.save_to(&self.ui_path) {
             self.set_flash(format!("Could not save the sidebar state: {e}"));
         }
@@ -932,6 +991,7 @@ impl App {
                 "title": t.title,
                 "server_id": t.server_id,
                 "order": i,
+                "screen": t.screen,
             });
             let text = meta.to_string();
             if text != t.meta_sent {
@@ -956,6 +1016,7 @@ impl App {
                 title,
                 server_id,
                 right: false,
+                screen: meta.get("screen").and_then(|v| v.as_u64()).map_or(0, |s| (s as usize).min(SCREENS - 1)),
                 session: Session::from_remote(d.attach(info.sid, rows, cols)),
                 meta_sent: String::new(),
             });
@@ -977,7 +1038,7 @@ impl App {
             t.session.poll_exit();
         }
         self.reap_clean_ssh_exits();
-        if self.tabs.len() < 2 {
+        if self.here_count() < 2 {
             self.end_mosaic();
         }
         self.sync_meta();
@@ -1076,6 +1137,7 @@ impl App {
                         title,
                         server_id: id,
                         right: self.is_split() && self.tabs.get(self.active).is_some_and(|t| t.right),
+                        screen: self.screen,
                         session,
                         meta_sent: String::new(),
                     });
@@ -1452,13 +1514,16 @@ impl App {
         self.bar
             .iter()
             .filter_map(|id| self.tabs.iter().position(|t| t.id == *id))
-            .filter(|&i| self.tabs[i].right == right)
+            .filter(|&i| self.tabs[i].screen == self.screen && self.tabs[i].right == right)
             .collect()
     }
 
     /// Two groups of tabs side by side: both have tabs. A group that loses its last tab disappears.
     pub fn is_split(&self) -> bool {
-        self.tabs.iter().any(|t| t.right) && self.tabs.iter().any(|t| !t.right)
+        let mut here = self.tabs.iter().filter(|t| t.screen == self.screen);
+        let (mut left, mut right) = (false, false);
+        here.by_ref().for_each(|t| if t.right { right = true } else { left = true });
+        left && right
     }
 
     /// The tab a group shows: the active one in the group that has the focus, else the one it showed last.
@@ -1478,7 +1543,7 @@ impl App {
         if t.right == right {
             return;
         }
-        if right && self.tabs.iter().filter(|t| !t.right).count() < 2 {
+        if right && self.tabs.iter().filter(|t| t.screen == self.screen && !t.right).count() < 2 {
             return self.set_flash("Open another tab first: the left group needs one");
         }
         self.tabs[self.active].right = right;
@@ -1510,16 +1575,19 @@ impl App {
                 new_ids.push(t.id);
             }
         }
-        if !self.tabs.iter().any(|t| !t.right) {
-            for t in &mut self.tabs {
-                t.right = false; // nothing is left of the line: the right group becomes the only one
+        for s in 0..SCREENS {
+            if !self.tabs.iter().any(|t| t.screen == s && !t.right) {
+                for t in self.tabs.iter_mut().filter(|t| t.screen == s) {
+                    t.right = false; // nothing is left of the line: the right group becomes the only one
+                }
             }
         }
+        self.keep_active_here();
         if let Some(t) = self.tabs.get(self.active) {
             self.shown[t.right as usize] = Some(t.id);
         }
         self.sync_mosaic(new_ids);
-        if self.mosaic_mode && !self.mosaic && self.tabs.len() >= 2 {
+        if self.mosaic_mode && !self.mosaic && self.here_count() >= 2 {
             self.start_mosaic(self.bar_tabs());
         }
     }
@@ -1532,7 +1600,7 @@ impl App {
             return;
         };
         for id in tree.leaves() {
-            if !self.tabs.iter().any(|t| t.id == id) {
+            if !self.tabs.iter().any(|t| t.id == id && t.screen == self.screen) {
                 match tree.remove(id) {
                     Some(t) => tree = t,
                     None => return self.end_mosaic(),
@@ -1661,7 +1729,7 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let n = self.tabs.len();
+        let n = self.here_count();
         match key.code {
             KeyCode::F(6) => return self.cycle_focus(if shift { -1 } else { 1 }),
             KeyCode::Char('q') if alt => {
@@ -1693,7 +1761,9 @@ impl App {
             KeyCode::Right if alt && n > 0 => return self.step_tab(1),
             KeyCode::Char('n') if ctrl => return self.new_tab_here(),
             KeyCode::Char('w') if alt && n > 0 => return self.close_tab(self.active),
-            KeyCode::Char(c @ '1'..='9') if alt => return self.goto_tab(c as usize - '1' as usize),
+            KeyCode::Char(c @ '1'..='9') if alt && !shift => return self.switch_screen(c as usize - '1' as usize),
+            KeyCode::Char(c) if alt && shifted_digit(c).is_some() => return self.send_to_screen(shifted_digit(c).unwrap()),
+            KeyCode::Char(c @ '1'..='9') if alt && shift => return self.send_to_screen(c as usize - '1' as usize),
             KeyCode::Char('0') if alt => return self.goto_tab(9),
             _ => {}
         }
@@ -1832,7 +1902,7 @@ impl App {
 
     /// The mosaic replaces the two groups of tabs: everything goes back to one bar.
     fn join_groups(&mut self) {
-        for t in &mut self.tabs {
+        for t in self.tabs.iter_mut().filter(|t| t.screen == self.screen) {
             t.right = false;
         }
     }
@@ -1857,12 +1927,62 @@ impl App {
         self.mosaic_mode = true;
     }
 
+    /// Alt+1..9 and the numbers in the sidebar: goes to another screen. Each screen has its own tabs and its own
+    /// mode (tabs or mosaic); what you leave stays as it was.
+    pub fn switch_screen(&mut self, n: usize) {
+        if n >= SCREENS || n == self.screen {
+            return;
+        }
+        let cur = self.screen;
+        self.screens[cur] = ScreenState {
+            mosaic_mode: self.mosaic_mode,
+            mosaic: self.mosaic,
+            tree: self.mosaic_tree.take(),
+            prev: self.mosaic_prev,
+            broadcast: self.broadcast,
+            active_id: self.tabs.get(self.active).filter(|t| t.screen == cur).map(|t| t.id),
+        };
+        let st = std::mem::take(&mut self.screens[n]);
+        self.screen = n;
+        self.mosaic_mode = st.mosaic_mode;
+        self.mosaic = st.mosaic;
+        self.mosaic_tree = st.tree;
+        self.mosaic_prev = st.prev;
+        self.broadcast = st.broadcast;
+        self.screens[n].active_id = st.active_id;
+        self.pending_split = None;
+        self.dock_hint = None;
+        self.selection = None;
+        self.selecting = false;
+        self.keep_active_here();
+        self.focus = if self.here_count() == 0 { Focus::Sidebar } else { Focus::Terminal };
+    }
+
+    /// Alt+Shift+1..9: sends the active tab to another screen and stays here.
+    fn send_to_screen(&mut self, n: usize) {
+        if n >= SCREENS || n == self.screen {
+            return;
+        }
+        let Some(t) = self.tabs.get(self.active).filter(|t| t.screen == self.screen) else { return };
+        let id = t.id;
+        self.tabs[self.active].screen = n;
+        self.tabs[self.active].right = false;
+        // Where it lands: in the mosaic of that screen if it has one on, else it is one more tab there.
+        if let Some(tree) = self.screens[n].tree.as_mut() {
+            if let Some(&last) = tree.leaves().last() {
+                tree.dock(last, id, Side::Right);
+            }
+        }
+        self.keep_active_here();
+        self.set_flash(format!("Sent to screen {} (Alt+{} to go there)", n + 1, n + 1));
+    }
+
     /// Alt+M and the `tabs` / `mosaic` buttons: the mode that stays. In mosaic mode every new terminal tiles into
     /// the mosaic by itself; in tabs mode each one is its own tab.
     fn set_mosaic_mode(&mut self, on: bool) {
         self.mosaic_mode = on;
         if on {
-            if self.tabs.len() >= 2 && !self.mosaic {
+            if self.here_count() >= 2 && !self.mosaic {
                 self.start_mosaic(self.bar_tabs());
             }
             self.set_flash("Mosaic mode: new terminals tile by themselves · Alt+V / Alt+H split · drag to place them · Alt+M for tabs");
@@ -1900,6 +2020,7 @@ impl App {
             Hit::NewTab => self.new_tab_here(),
             Hit::Mosaic => self.set_mosaic_mode(true),
             Hit::Tabs => self.set_mosaic_mode(false),
+            Hit::Screen(n) => self.switch_screen(n),
             Hit::Broadcast => self.toggle_broadcast(),
             Hit::NewTabRight => {
                 if let Some(i) = self.pane_tab(true) {
@@ -2158,7 +2279,7 @@ impl App {
         let mut zones = vec![Zone::Sidebar];
         if self.is_split() {
             zones.extend([Zone::Terminal(false), Zone::Terminal(true)]);
-        } else if !self.tabs.is_empty() {
+        } else if !self.blank() {
             zones.push(Zone::Terminal(false));
         }
         let here = if self.focus == Focus::Terminal {
@@ -2567,7 +2688,7 @@ impl App {
                     self.drag = Some(Drag::Tab(i));
                 }
             }
-        } else if self.pane_at(x, y).is_some() && (self.is_split() || !self.tabs.is_empty()) {
+        } else if self.pane_at(x, y).is_some() && !self.blank() {
             self.focus = Focus::Terminal;
             let cell = self.content_cell(x, y);
             if double {
@@ -2690,6 +2811,13 @@ impl App {
         }
         match self.drag.take() {
             Some(Drag::Divider | Drag::MosaicSplit(..)) => {}
+            Some(Drag::Tab(from)) if from < self.tabs.len() && self.layout.toolbar.iter().any(|(r, h)| matches!(h, Hit::Screen(_)) && inside(*r, x, y)) => {
+                // dropped on a screen number: the tab goes to that screen
+                if let Some(&(_, Hit::Screen(n))) = self.layout.toolbar.iter().find(|(r, h)| matches!(h, Hit::Screen(_)) && inside(*r, x, y)) {
+                    self.active = from;
+                    self.send_to_screen(n);
+                }
+            }
             Some(Drag::Tab(from)) if self.mosaic && from < self.tabs.len() && !self.layout.tabs.iter().any(|t| inside(t.rect, x, y)) => {
                 // dropped on the terminals: docked at the edge it is nearest to, or traded with the box
                 if let Some((_, side, to)) = self.dock_target(x, y) {
@@ -3202,6 +3330,7 @@ mod tests {
             title: "t".into(),
             server_id: LOCAL,
             right: false,
+            screen: 0,
             session,
             meta_sent: String::new(),
         });
@@ -3512,5 +3641,36 @@ mod tests {
         app.sync_bar();
         assert!(!app.mosaic, "tabs mode: a new terminal is a new tab");
         assert_eq!(app.tabs.len(), 4);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn each_screen_has_its_own_tabs_and_its_own_mode() {
+        let mut app = app_with_servers(1);
+        // screen 1: mosaic mode with two terminals
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        app.open_server(LOCAL);
+        app.open_server(LOCAL);
+        app.sync_bar();
+        assert!(app.mosaic && app.mosaic_tabs().len() == 2);
+        // screen 2: empty, tabs mode
+        app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT));
+        assert_eq!(app.screen, 1);
+        assert!(!app.mosaic && !app.mosaic_mode && app.blank(), "a fresh screen: no tabs, tabs mode");
+        app.open_server(LOCAL);
+        app.open_server(LOCAL);
+        app.sync_bar();
+        assert!(!app.mosaic, "tabs mode: separate tabs");
+        assert_eq!(app.bar_tabs().len(), 2);
+        // back on screen 1 the mosaic is as it was
+        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
+        assert!(app.mosaic && app.mosaic_mode);
+        assert_eq!(app.mosaic_tabs().len(), 2);
+        assert_eq!(app.bar_tabs().len(), 2, "the bar only shows this screen's tabs");
+        // send a tab to screen 2 with Alt+Shift+2
+        app.on_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::ALT | KeyModifiers::SHIFT));
+        assert_eq!(app.here_count(), 1);
+        assert_eq!(app.tabs.iter().filter(|t| t.screen == 1).count(), 3);
+        assert!(!app.mosaic, "one terminal left on the screen: the normal view");
     }
 }

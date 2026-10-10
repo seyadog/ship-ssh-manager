@@ -34,6 +34,7 @@ pub struct SplitInfo {
 
 impl Tree {
     /// A tidy arrangement of these terminals: halves, alternating side by side and stacked.
+    #[cfg(test)]
     pub fn balanced(ids: &[u64], side: bool) -> Tree {
         match ids {
             [one] => Tree::Leaf(*one),

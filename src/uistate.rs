@@ -9,9 +9,9 @@ pub struct UiState {
     /// Bastions (server ids) shown unfolded in the bastions section of the SSH view.
     #[serde(default)]
     pub open_nodes: Vec<u64>,
-    /// Mosaic mode: new terminals tile by themselves (else each is its own tab).
+    /// For each screen, whether it is in mosaic mode (new terminals tile by themselves) or tabs mode.
     #[serde(default)]
-    pub mosaic_mode: bool,
+    pub screen_modes: Vec<bool>,
 }
 
 impl UiState {
