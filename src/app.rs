@@ -633,7 +633,19 @@ enum Drag {
 
 /// The digit a shifted number key types (US and Spanish layouts): Alt+Shift+1 arrives as Alt+`!`.
 fn shifted_digit(c: char) -> Option<usize> {
-    "!@#$%^&*(".chars().position(|x| x == c).or_else(|| "!\"·$%&/()".chars().position(|x| x == c))
+    // '&' and '(' type different numbers on the two layouts, so they are left out (Alt+S then the number works anywhere).
+    match c {
+        '!' => Some(0),
+        '@' | '"' => Some(1),
+        '#' | '·' => Some(2),
+        '$' => Some(3),
+        '%' => Some(4),
+        '^' => Some(5),
+        '/' => Some(6),
+        '*' => Some(7),
+        ')' => Some(8),
+        _ => None,
+    }
 }
 
 /// How many screens there are: Alt+1 to Alt+9.
@@ -690,6 +702,8 @@ pub struct App {
     pub mosaic_tree: Option<Tree>,
     /// The way the next terminal opened joins the mosaic (Alt+V / Alt+H): side by side (true) or below.
     pending_split: Option<bool>,
+    /// Alt+S was pressed: the next number says which screen to send the tab to.
+    send_chord: bool,
     /// Where a dragged tab would dock if dropped now (highlighted).
     pub dock_hint: Option<Rect>,
     /// The last tab of the mosaic that had the keyboard: a tab picked from outside takes its place.
@@ -744,6 +758,7 @@ impl App {
             screens: (0..SCREENS).map(|_| ScreenState::default()).collect(),
             mosaic_tree: None,
             pending_split: None,
+            send_chord: false,
             dock_hint: None,
             mosaic_prev: None,
             before_drag: None,
@@ -1726,6 +1741,12 @@ impl App {
             self.modal_key(key);
             return;
         }
+        if std::mem::take(&mut self.send_chord) {
+            return match key.code {
+                KeyCode::Char(c @ '1'..='9') => self.send_to_screen(c as usize - '1' as usize),
+                _ => self.set_flash("Send cancelled"),
+            };
+        }
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1738,6 +1759,12 @@ impl App {
             }
             KeyCode::F(2) if n > 0 => return self.rename_tab_prompt(),
             KeyCode::F(8) => return self.toggle_theme(),
+            KeyCode::Char('s') if alt && !ctrl && n > 0 => {
+                self.send_chord = true;
+                return self.set_flash("Send this terminal to screen: press 1-9 (any other key cancels)");
+            }
+            KeyCode::Char(',') if alt && !ctrl => return self.switch_screen(self.screen.checked_sub(1).unwrap_or(SCREENS - 1)),
+            KeyCode::Char('.') if alt && !ctrl => return self.switch_screen((self.screen + 1) % SCREENS),
             KeyCode::Char('m') if alt && !ctrl => return self.set_mosaic_mode(!self.mosaic_mode),
             KeyCode::Char('b') if alt && !ctrl => return self.toggle_broadcast(),
             KeyCode::Char('v') if alt && !ctrl => return self.split_active(true),
