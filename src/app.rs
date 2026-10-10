@@ -597,6 +597,8 @@ pub struct Layout {
     pub panes: [Rect; 2],
     /// The terminals of the mosaic (tab index, whole box including its title line).
     pub mosaic: Vec<(usize, Rect)>,
+    /// The whole area of the mosaic (where a dragged tab can be dropped).
+    pub mosaic_area: Rect,
     /// The draggable line between the groups, and the whole area they share.
     pub divider: Rect,
     pub split_area: Rect,
@@ -648,8 +650,12 @@ pub struct App {
     pub flash: Option<(String, Instant)>,
     /// Up to four terminals shown at once, in a grid.
     pub mosaic: bool,
-    /// How many terminals the mosaic shows (2 to 4): Alt+2, Alt+3, Alt+4.
-    pub mosaic_n: usize,
+    /// The tabs of the mosaic (ids), in slot order: two columns, as many rows as needed.
+    pub mosaic_ids: Vec<u64>,
+    /// The last tab of the mosaic that had the keyboard: a tab picked from outside takes its place.
+    mosaic_prev: Option<u64>,
+    /// The tab that had the focus before a tab of the bar was picked up to be dragged.
+    before_drag: Option<usize>,
     /// What is typed in one terminal of the mosaic goes to all of them.
     pub broadcast: bool,
     /// Row under the pointer while dragging (highlighted as the drop target).
@@ -693,7 +699,9 @@ impl App {
             quit: false,
             flash: None,
             mosaic: false,
-            mosaic_n: 4,
+            mosaic_ids: vec![],
+            mosaic_prev: None,
+            before_drag: None,
             broadcast: false,
             drop_hover: None,
             jump_open: HashSet::new(),
@@ -1479,9 +1487,11 @@ impl App {
     fn sync_bar(&mut self) {
         let tabs = &self.tabs;
         self.bar.retain(|id| tabs.iter().any(|t| t.id == *id));
+        let mut new_ids = vec![];
         for t in &self.tabs {
             if !self.bar.contains(&t.id) {
                 self.bar.push(t.id);
+                new_ids.push(t.id);
             }
         }
         if !self.tabs.iter().any(|t| !t.right) {
@@ -1491,6 +1501,37 @@ impl App {
         }
         if let Some(t) = self.tabs.get(self.active) {
             self.shown[t.right as usize] = Some(t.id);
+        }
+        self.sync_mosaic(new_ids);
+    }
+
+    /// Keeps the mosaic in step with the tabs: closed ones leave it, a new tab joins it, and a tab picked from
+    /// outside takes the box of the one that had the keyboard.
+    fn sync_mosaic(&mut self, new_ids: Vec<u64>) {
+        if !self.mosaic {
+            return;
+        }
+        let tabs = &self.tabs;
+        self.mosaic_ids.retain(|id| tabs.iter().any(|t| t.id == *id));
+        let Some(active) = self.tabs.get(self.active).map(|t| t.id) else { return };
+        if !self.mosaic_ids.contains(&active) {
+            if new_ids.contains(&active) {
+                self.mosaic_ids.push(active);
+            } else if let Some(p) = self.mosaic_prev.and_then(|p| self.mosaic_ids.iter().position(|&x| x == p)) {
+                self.mosaic_ids[p] = active;
+            } else if let Some(i) = self.mosaic_tabs().first().copied() {
+                self.active = i; // the box that had the keyboard is gone: another one takes it
+            }
+        }
+        if self.mosaic_ids.len() < 2 {
+            self.mosaic = false;
+            self.broadcast = false;
+            return;
+        }
+        if let Some(t) = self.tabs.get(self.active) {
+            if self.mosaic_ids.contains(&t.id) {
+                self.mosaic_prev = Some(t.id);
+            }
         }
     }
 
@@ -1605,7 +1646,6 @@ impl App {
             KeyCode::Down if alt && self.mosaic => return self.focus_in_mosaic(0, 1),
             KeyCode::Left if alt && n > 0 => return self.step_tab(-1),
             KeyCode::Right if alt && n > 0 => return self.step_tab(1),
-            KeyCode::Char(c @ '1'..='4') if alt && !ctrl => return self.show_terminals(c as usize - '0' as usize),
             KeyCode::Char('n') if ctrl => return self.new_tab_here(),
             KeyCode::Char('w') if alt && n > 0 => return self.close_tab(self.active),
             KeyCode::Char(c @ '1'..='9') if alt => return self.goto_tab(c as usize - '1' as usize),
@@ -1658,60 +1698,24 @@ impl App {
         }
     }
 
-    /// The tabs shown in the mosaic: up to four, in bar order; the active tab is always one of them.
+    /// The tabs shown in the mosaic (indices into `tabs`), in slot order.
     pub fn mosaic_tabs(&self) -> Vec<usize> {
-        let mut all = self.bar_tabs();
-        let max = self.mosaic_n.clamp(2, 4);
-        if all.len() > max {
-            all.truncate(max);
-            if !all.contains(&self.active) && self.active < self.tabs.len() {
-                all[max - 1] = self.active;
-            }
-        }
-        all
+        self.mosaic_ids.iter().filter_map(|id| self.tabs.iter().position(|t| t.id == *id)).collect()
     }
 
     /// Where the tab in mosaic slot `s` goes when pushed (dx, dy) in a mosaic of `n` terminals: slots run
-    /// left to right, top to bottom; with three, the third one takes the whole bottom.
-    fn mosaic_neighbour(s: usize, n: usize, dx: i32, dy: i32) -> Option<usize> {
-        let (col, row) = match (n, s) {
-            (3, 2) => (0, 1),
-            _ => (s % 2, s / 2),
-        };
-        let wide = n == 3 && s == 2;
-        let t = match (dx, dy) {
-            (-1, 0) if col == 1 && !wide => s - 1,
-            (1, 0) if col == 0 && !wide && s + 1 < n && !(n == 3 && s == 1) => s + 1,
-            (0, -1) if row == 1 => if wide { 0 } else { s - 2 },
-            (0, 1) if row == 0 && n > 2 => if n == 3 { 2 } else { s + 2 },
-            _ => return None,
-        };
-        (t < n).then_some(t)
-    }
-
-    /// Alt+1..4: one terminal, or two, three or four at once. Missing terminals are opened beside this one.
-    fn show_terminals(&mut self, count: usize) {
-        if count == 1 {
-            self.mosaic = false;
-            self.broadcast = false;
-            return self.goto_tab(0);
+    /// left to right, top to bottom, two per row; with an odd number the last one takes the whole row.
+    pub fn mosaic_neighbour(s: usize, n: usize, dx: i32, dy: i32) -> Option<usize> {
+        let (col, row) = (s % 2, s / 2);
+        let wide = n > 1 && n % 2 == 1 && s == n - 1;
+        match (dx, dy) {
+            (-1, 0) if col == 1 => Some(s - 1),
+            (1, 0) if col == 0 && !wide && s + 1 < n => Some(s + 1),
+            (0, -1) if row > 0 => Some(s - 2),
+            (0, 1) if s + 2 < n => Some(s + 2),
+            (0, 1) if n % 2 == 1 && n > 2 && row + 1 == (n - 1) / 2 => Some(n - 1),
+            _ => None,
         }
-        while self.tabs.len() < count {
-            let before = self.tabs.len();
-            self.new_tab_here();
-            if self.tabs.len() == before {
-                break;
-            }
-        }
-        if self.tabs.len() < 2 {
-            return;
-        }
-        self.join_groups();
-        self.mosaic = true;
-        self.mosaic_n = count;
-        self.focus = Focus::Terminal;
-        let shown = self.mosaic_tabs().len();
-        self.set_flash(format!("{shown} terminals at once · Alt+arrows move between them · Alt+Shift+arrows move the terminal"));
     }
 
     /// Alt+arrows in the mosaic: the keyboard goes to the terminal on that side.
@@ -1723,11 +1727,26 @@ impl App {
         }
     }
 
-    /// Swaps two tabs of the mosaic: they trade places in the bar, so they trade boxes on screen.
-    fn swap_in_bar(&mut self, a: usize, b: usize) {
+    /// Swaps two tabs of the mosaic: they trade boxes on screen.
+    fn swap_in_mosaic(&mut self, a: usize, b: usize) {
         let (ida, idb) = (self.tabs[a].id, self.tabs[b].id);
-        let (Some(pa), Some(pb)) = (self.bar.iter().position(|&x| x == ida), self.bar.iter().position(|&x| x == idb)) else { return };
-        self.bar.swap(pa, pb);
+        let (Some(pa), Some(pb)) = (self.mosaic_ids.iter().position(|&x| x == ida), self.mosaic_ids.iter().position(|&x| x == idb)) else { return };
+        self.mosaic_ids.swap(pa, pb);
+    }
+
+    /// A tab dropped on the mosaic: if it is already there it trades places with the box it lands on; if not,
+    /// it comes in at that box (or at the end).
+    fn drop_on_mosaic(&mut self, from: usize, to: Option<usize>) {
+        let fid = self.tabs[from].id;
+        if self.mosaic_ids.contains(&fid) {
+            if let Some(to) = to.filter(|&t| t != from) {
+                self.swap_in_mosaic(from, to);
+            }
+        } else {
+            let at = to.and_then(|t| self.mosaic_ids.iter().position(|&x| x == self.tabs[t].id)).unwrap_or(self.mosaic_ids.len());
+            self.mosaic_ids.insert(at, fid);
+        }
+        self.active = from;
     }
 
     /// Alt+Shift+arrows in the mosaic: the active terminal moves up, down, left or right (trading places).
@@ -1735,7 +1754,7 @@ impl App {
         let shown = self.mosaic_tabs();
         let Some(s) = shown.iter().position(|&i| i == self.active) else { return };
         match Self::mosaic_neighbour(s, shown.len(), dx, dy) {
-            Some(t) => self.swap_in_bar(shown[s], shown[t]),
+            Some(t) => self.swap_in_mosaic(shown[s], shown[t]),
             None => self.set_flash("Already at that edge of the mosaic"),
         }
     }
@@ -1745,6 +1764,17 @@ impl App {
         for t in &mut self.tabs {
             t.right = false;
         }
+    }
+
+    /// Turns the mosaic on with these tabs (indices), the active one included.
+    fn start_mosaic(&mut self, mut tabs: Vec<usize>) {
+        if !tabs.contains(&self.active) && self.active < self.tabs.len() {
+            tabs.push(self.active);
+        }
+        self.join_groups();
+        self.mosaic_ids = tabs.into_iter().map(|i| self.tabs[i].id).collect();
+        self.mosaic_prev = self.tabs.get(self.active).map(|t| t.id);
+        self.mosaic = true;
     }
 
     /// Alt+M / the mosaic button: shows up to four terminals at once, or goes back to one.
@@ -1757,10 +1787,8 @@ impl App {
         if self.tabs.len() < 2 {
             return self.set_flash("Open at least two sessions to use the mosaic");
         }
-        self.join_groups();
-        self.mosaic = true;
-        self.mosaic_n = 4;
-        self.set_flash("Mosaic: up to 4 terminals at once (Alt+M to leave)");
+        self.start_mosaic(self.bar_tabs());
+        self.set_flash("Mosaic: every terminal at once · Alt+arrows move between them · drag a tab here to add it (Alt+M to leave)");
     }
 
     /// Alt+B / the broadcast button: what you type goes to every terminal of the mosaic.
@@ -1772,9 +1800,9 @@ impl App {
         if self.tabs.len() < 2 {
             return self.set_flash("Open at least two sessions to broadcast");
         }
-        self.join_groups();
-        self.mosaic = true;
-        self.mosaic_n = 4;
+        if !self.mosaic {
+            self.start_mosaic(self.bar_tabs());
+        }
         self.broadcast = true;
         let n = self.mosaic_tabs().len();
         self.set_flash(format!("BROADCAST on: what you type goes to all {n} terminals (Alt+B to stop)"));
@@ -2423,6 +2451,7 @@ impl App {
                 if inside(close, x, y) {
                     return self.close_tab(i);
                 }
+                self.before_drag = Some(self.active);
                 self.focus_tab(i);
                 if double {
                     self.rename_tab_prompt();
@@ -2552,17 +2581,21 @@ impl App {
         }
         match self.drag.take() {
             Some(Drag::Divider) => {}
-            Some(Drag::Tab(from)) if self.mosaic => {
-                // dropped on another terminal of the mosaic: they trade places
-                let to = self.layout.mosaic.iter().find(|(_, r)| inside(*r, x, y)).map(|&(i, _)| i);
-                if let Some(to) = to.filter(|&t| t != from && from < self.tabs.len() && t < self.tabs.len()) {
-                    self.swap_in_bar(from, to);
-                    self.active = from;
+            Some(Drag::Tab(from)) if self.mosaic && from < self.tabs.len() && !self.layout.tabs.iter().any(|t| inside(t.rect, x, y)) => {
+                // dropped on the terminals: a tab comes in, or two of them trade places
+                if inside(self.layout.mosaic_area, x, y) || self.layout.mosaic.iter().any(|(_, r)| inside(*r, x, y)) {
+                    let to = self.layout.mosaic.iter().find(|(_, r)| inside(*r, x, y)).map(|&(i, _)| i);
+                    self.drop_on_mosaic(from, to);
                 }
             }
             Some(Drag::Tab(from)) => {
                 if let Some(to) = self.layout.tabs.iter().find(|t| inside(t.rect, x, y)).map(|t| t.idx) {
                     self.move_tab(from, to);
+                } else if from < self.tabs.len() && !self.is_split() && inside(self.layout.content, x, y) {
+                    // dropped on the screen: it opens a mosaic with the tab you were on
+                    let others: Vec<usize> = self.before_drag.filter(|&i| i != from && i < self.tabs.len()).into_iter().collect();
+                    self.start_mosaic(others);
+                    self.drop_on_mosaic(from, None);
                 } else if from < self.tabs.len() {
                     // dropped on a terminal: the tab goes to that group
                     let right = if inside(self.layout.panes[1], x, y) {
@@ -3264,7 +3297,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
         assert!(app.mosaic);
         let shown = app.mosaic_tabs();
-        assert_eq!(shown.len(), 4, "at most four at once");
+        assert_eq!(shown.len(), 5, "every open terminal");
         assert!(shown.contains(&app.active), "the active tab is always shown");
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
         assert!(app.broadcast && app.mosaic);
@@ -3274,20 +3307,21 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn alt_digits_choose_how_many_terminals_are_shown() {
+    fn the_mosaic_grows_with_new_tabs_and_alt_arrows_focus() {
         let mut app = app_with_servers(1);
         app.open_server(LOCAL);
-        app.on_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::ALT));
-        assert!(app.mosaic);
-        assert_eq!(app.tabs.len(), 3, "the missing terminal is opened");
-        assert_eq!(app.mosaic_tabs().len(), 3);
-        app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT));
+        app.open_server(LOCAL);
+        app.sync_bar();
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
         assert_eq!(app.mosaic_tabs().len(), 2);
+        app.open_server(LOCAL);
+        app.sync_bar();
+        assert_eq!(app.mosaic_tabs().len(), 3, "a new tab joins the mosaic");
         let before = app.active;
-        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
-        assert_ne!(app.active, before, "Alt+← moves to the terminal on the left");
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        assert_ne!(app.active, before, "the third one is the wide bottom: up goes to the first");
         app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
-        assert!(!app.mosaic);
+        assert!(app.mosaic, "Alt+1 still jumps to tab 1");
     }
 
     #[test]
@@ -3304,5 +3338,9 @@ mod tests {
         // 2: side by side
         assert_eq!(App::mosaic_neighbour(0, 2, 1, 0), Some(1));
         assert_eq!(App::mosaic_neighbour(0, 2, 0, 1), None);
+        // 5: two rows of two and a wide one below
+        assert_eq!(App::mosaic_neighbour(3, 5, 0, 1), Some(4));
+        assert_eq!(App::mosaic_neighbour(1, 5, 0, 1), Some(3));
+        assert_eq!(App::mosaic_neighbour(4, 5, 0, -1), Some(2));
     }
 }

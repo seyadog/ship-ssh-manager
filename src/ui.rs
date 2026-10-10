@@ -514,18 +514,22 @@ fn draw_mosaic(f: &mut Frame, app: &mut App, area: Rect) {
     if n == 0 || area.width < 4 || area.height < 4 {
         return;
     }
+    app.layout.mosaic_area = area;
+    // Two columns and as many rows as needed; an odd last terminal takes the whole row.
+    let rows = n.div_ceil(2) as u16;
     let half_w = area.width / 2;
-    let half_h = area.height / 2;
-    let left = Rect::new(area.x, area.y, half_w, half_h);
-    let right = Rect::new(area.x + half_w, area.y, area.width - half_w, half_h);
-    let bl = Rect::new(area.x, area.y + half_h, half_w, area.height - half_h);
-    let br = Rect::new(area.x + half_w, area.y + half_h, area.width - half_w, area.height - half_h);
-    let rects: Vec<Rect> = match n {
-        1 => vec![area],
-        2 => vec![Rect::new(area.x, area.y, half_w, area.height), Rect::new(area.x + half_w, area.y, area.width - half_w, area.height)],
-        3 => vec![left, right, Rect::new(area.x, area.y + half_h, area.width, area.height - half_h)],
-        _ => vec![left, right, bl, br],
-    };
+    let mut rects: Vec<Rect> = vec![];
+    for s in 0..n {
+        let r = (s / 2) as u16;
+        let y = area.y + area.height * r / rows;
+        let h = area.y + area.height * (r + 1) / rows - y;
+        let wide = n == 1 || (n % 2 == 1 && s == n - 1);
+        rects.push(match (wide, s % 2) {
+            (true, _) => Rect::new(area.x, y, area.width, h),
+            (_, 0) => Rect::new(area.x, y, half_w, h),
+            _ => Rect::new(area.x + half_w, y, area.width - half_w, h),
+        });
+    }
     let broadcast = app.broadcast;
     for (&i, full) in tabs.iter().zip(rects) {
         app.layout.mosaic.push((i, full));
