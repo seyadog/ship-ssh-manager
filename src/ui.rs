@@ -204,6 +204,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         Style::new().fg(c_fg()).add_modifier(Modifier::BOLD)
     };
     f.render_widget(Paragraph::new("  Servers").style(title_style), Rect::new(area.x, area.y, area.width - 1, 1));
+    // The version, small and quiet, always next to the title.
+    let ver = format!(" v{}", env!("CARGO_PKG_VERSION"));
+    if (area.width as usize) > 9 + ver.width() + 2 {
+        f.render_widget(Paragraph::new(ver).style(Style::new().fg(c_muted())), Rect::new(area.x + 9, area.y, area.width - 10, 1));
+    }
     // A dot per server with a live session, each in its own colour, at the right end of the title.
     let mut open: Vec<u64> = vec![];
     for t in app.tabs.iter().filter(|t| t.session.exit_code.is_none()) {
@@ -211,7 +216,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             open.push(t.server_id);
         }
     }
-    let room = (area.width as usize).saturating_sub(9 + 7) / 2;
+    let room = (area.width as usize).saturating_sub(9 + 8 + 7) / 2;
     let dots: Vec<Span> = open
         .iter()
         .take(room)
